@@ -1,0 +1,9 @@
+export { MarketingNav } from "./components/MarketingNav";
+export { Hero } from "./components/Hero";
+export { TickerStrip } from "./components/TickerStrip";
+export { FeatureStrip } from "./components/FeatureStrip";
+export { NovaSection } from "./components/NovaSection";
+export { ScreenShowcase } from "./components/ScreenShowcase";
+export { FaqSection } from "./components/FaqSection";
+export { ClosingCta } from "./components/ClosingCta";
+export { MarketingFooter } from "./components/MarketingFooter";

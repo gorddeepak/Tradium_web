@@ -1,0 +1,57 @@
+/* Only the ticker marquee and the hover underline live here; index.css owns
+   entrance animations. */
+
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.marquee {
+  animation: marquee 30s linear infinite;
+}
+
+.story-link {
+  position: relative;
+}
+.story-link::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -2px;
+  width: 100%;
+  height: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: right;
+  transition: transform 0.3s ease;
+}
+.story-link:hover::after {
+  transform: scaleX(1);
+  transform-origin: left;
+}
+
+/* Cancel the animations under reduced motion and pin opacity/transform to
+   their finished values. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-entry,
+  .animate-rise,
+  .animate-media-in {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .animate-focus-in {
+    animation: none;
+    opacity: 1;
+    transform: none;
+    filter: blur(0.055em);
+  }
+  .skeleton-shimmer {
+    animation: none;
+  }
+  .marquee {
+    animation: none;
+  }
+  .story-link::after {
+    transition: none;
+  }
+}

@@ -1,0 +1,485 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+/* Ships the @custom-variant blocks the shadcn primitives are written against. */
+@import "shadcn/tailwind.css";
+/* Two-axis Inter (opsz 14-32 + wght 100-900) and JetBrains Mono. */
+@import "@fontsource-variable/inter/opsz.css";
+@import "@fontsource-variable/jetbrains-mono";
+
+@custom-variant dark (&:is(.dark *));
+
+/* The single Tailwind root — the only place @utility/@theme tokens are emitted. */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) * 2.6);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --color-ink: var(--ink);
+  --color-ink-foreground: var(--ink-foreground);
+  --color-ink-border: var(--ink-border);
+  --color-ink-positive: var(--ink-positive);
+  --color-ink-negative: var(--ink-negative);
+
+  /* Family names must match what Fontsource registers ('Inter Variable',
+     'JetBrains Mono Variable'), not "Inter"/"JetBrains Mono". */
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-sans);
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --color-chart-scale-pattern-color: var(----chart-scale-pattern-color);
+
+  --color-chart-scale-05: var(----chart-scale-05);
+
+  --color-chart-scale-04: var(----chart-scale-04);
+
+  --color-chart-scale-03: var(----chart-scale-03);
+
+  --color-chart-scale-02: var(----chart-scale-02);
+
+  --color-chart-scale-01: var(----chart-scale-01);
+
+  --color-chart-label: var(----chart-label);
+
+  --color-chart-marker-foreground: var(----chart-marker-foreground);
+
+  --color-chart-marker-border: var(----chart-marker-border);
+
+  --color-chart-marker-background: var(----chart-marker-background);
+
+  --color-chart-tooltip-muted: var(----chart-tooltip-muted);
+
+  --color-chart-tooltip-foreground: var(----chart-tooltip-foreground);
+
+  --color-chart-tooltip-background: var(----chart-tooltip-background);
+
+  --chart-brush-border: var(----chart-brush-border);
+
+  --color-chart-grid: var(----chart-grid);
+
+  --color-chart-crosshair: var(----chart-crosshair);
+
+  --chart-line-secondary: var(----chart-line-secondary);
+
+  --chart-line-primary: var(----chart-line-primary);
+
+  --color-chart-foreground-muted: var(----chart-foreground-muted);
+
+  --color-chart-foreground: var(----chart-foreground);
+
+  --color-chart-background: var(----chart-background);
+
+  --color-chart-5: var(----chart-5);
+
+  --color-chart-6: var(----chart-6);
+  --color-chart-7: var(----chart-7);
+  --color-chart-8: var(----chart-8);
+  --color-chart-9: var(----chart-9);
+  --color-chart-10: var(----chart-10);
+
+  --color-chart-4: var(----chart-4);
+
+  --color-chart-3: var(----chart-3);
+
+  --color-chart-2: var(----chart-2);
+
+  --color-chart-1: var(----chart-1);
+}
+
+/* `.light` on :root lets a subtree be pinned light inside a dark page (the
+   landing page's theme exhibit). The app only applies `.dark` to <html>. */
+:root,
+.light {
+  --radius: 0.625rem;
+
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+
+  --surface: hsl(0 0% 100%);
+  --surface-sunken: hsl(60 6% 96.5%);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+
+  --accent: hsl(221 100% 50%);
+  /* White, not near-black: `bg-accent text-accent-foreground` must be legible. */
+  --accent-foreground: hsl(0 0% 100%);
+
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: hsl(0 0% 100%);
+
+  --border: oklch(0.922 0 0);
+  --border-strong: hsl(0 0% 0% / 0.16);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+
+  --positive: hsl(142 76% 36%);
+  --negative: hsl(0 84% 60%);
+
+  /* The one dark band on the landing page (Nova section). --positive/--negative
+     are tuned for white paper, so the dark surface gets brighter variants. */
+  --ink: hsl(0 0% 5%);
+  --ink-foreground: hsl(60 10% 96%);
+  --ink-border: hsl(0 0% 100% / 0.12);
+  --ink-positive: hsl(142 65% 55%);
+  --ink-negative: hsl(0 85% 68%);
+
+  /* Categorical donut palette in a fixed order; always ships a legend. */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  /* A teal — hue-distance from all five above, and from the blue invested line. */
+  --chart-6: #2ba8a0;
+  /* New hues keep ~70-100° separation from every family above and each other. */
+  --chart-7: #9457d6;
+  --chart-8: #8db820;
+  --chart-9: #d64587;
+  --chart-10: #a1743c;
+  --chart-other: #898781;
+
+  /* The invested (cost-basis) line on the performance chart: darker than
+     --muted-foreground so it reads as data rather than chrome. */
+  --chart-invested: #52514e;
+  --chart-background: oklch(1 0 0);
+  --chart-foreground: oklch(0.145 0.004 285);
+  --chart-foreground-muted: oklch(0.55 0.014 260);
+  --chart-line-primary: var(--chart-1);
+  --chart-line-secondary: var(--chart-2);
+  --chart-crosshair: oklch(0.4 0.1828 274.34);
+  --chart-grid: oklch(0.9 0 0);
+  --chart-brush-border: var(--chart-grid);
+  --chart-tooltip-background: oklch(0.21 0.006 285 / 0.8);
+  --chart-tooltip-foreground: oklch(0.985 0 0);
+  --chart-tooltip-muted: oklch(0.65 0.01 260);
+  --chart-marker-background: oklch(0.97 0.005 260);
+  --chart-marker-border: oklch(0.85 0.01 260);
+  --chart-marker-foreground: oklch(0.3 0.01 260);
+  --chart-label: oklch(0.45 0.01 260);
+  --chart-scale-01: oklch(0.98 0.003 106);
+  --chart-scale-02: oklch(0.92 0.008 106);
+  --chart-scale-03: oklch(0.82 0.015 106);
+  --chart-scale-04: oklch(0.68 0.02 106);
+  --chart-scale-05: oklch(0.55 0.025 106);
+  --chart-scale-pattern-color: oklch(0.96 0.005 106);
+}
+
+@keyframes tradium-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* LONGHAND ON PURPOSE — `animation:` shorthand resets animation-delay, so
+   per-element [animation-delay:*] staggers would silently run at 0ms. */
+@utility animate-entry {
+  animation-name: tradium-slide-up;
+  animation-duration: 0.6s;
+  animation-timing-function: var(--ease-out-expo);
+  animation-fill-mode: both;
+}
+
+/* The hero's blurred middle line settling into focus. */
+@keyframes tradium-focus-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+    filter: blur(0.4em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0.055em);
+  }
+}
+
+@utility animate-focus-in {
+  animation-name: tradium-focus-in;
+  animation-duration: 1.1s;
+  animation-timing-function: ease-out;
+  animation-fill-mode: both;
+}
+
+/* The hero's slow entrance — a separate utility, not a slower animate-entry. */
+@keyframes tradium-rise {
+  from {
+    opacity: 0;
+    transform: translateY(22px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@utility animate-rise {
+  animation-name: tradium-rise;
+  animation-duration: 1.15s;
+  animation-timing-function: ease-out;
+  animation-fill-mode: both;
+}
+
+/* Crossfade over the shimmer when an image arrives; the box needs overflow-hidden. */
+@keyframes tradium-media-in {
+  from {
+    opacity: 0;
+    transform: scale(1.03);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@utility animate-media-in {
+  animation-name: tradium-media-in;
+  animation-duration: 1.1s;
+  animation-timing-function: ease-out;
+  animation-fill-mode: both;
+}
+
+@keyframes tradium-shimmer {
+  from {
+    background-position: 150% 0;
+  }
+  to {
+    background-position: -150% 0;
+  }
+}
+
+/* Price-change flash for watchlist rows: color-mix pulls the alpha from the
+   live --positive/--negative tokens so the flash survives dark mode. */
+@keyframes tradium-flash-up {
+  from {
+    background-color: color-mix(in srgb, var(--positive) 18%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@keyframes tradium-flash-down {
+  from {
+    background-color: color-mix(in srgb, var(--negative) 18%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.price-flash-up {
+  animation: tradium-flash-up 900ms ease-out;
+  border-radius: 4px;
+}
+
+.price-flash-down {
+  animation: tradium-flash-down 900ms ease-out;
+  border-radius: 4px;
+}
+
+/* Put on the box behind an image; drop the class on load. */
+@utility skeleton-shimmer {
+  background-color: hsl(60 5% 89%);
+  background-image: linear-gradient(
+    100deg,
+    transparent 35%,
+    hsl(0 0% 100% / 0.85) 50%,
+    transparent 65%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation-name: tradium-shimmer;
+  animation-duration: 1.6s;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+@utility num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* Recolour openalgo-heatmap via CSS — its SVG attribute fills lose to any class rule. */
+.allocation-map {
+  /* Tile labels — centred text is the discriminator: a layout invariant, so
+     future chrome fails closed. */
+  & text[text-anchor="middle"] {
+    fill: var(--foreground);
+  }
+
+  /* Sector name in each group header. --foreground, not --muted-foreground:
+     muted measures 4.40:1 at 10px bold on the bar and misses 4.5:1. */
+  & text[fill="#8b8f9c"] {
+    fill: var(--foreground);
+  }
+
+  /* Both hardcoded header-bar rects (#17171b / #211d12) in one rule. */
+  & rect[fill^="#"] {
+    fill: var(--surface-sunken);
+  }
+
+  /* The white hover ring, rescoped to tiles only — without [fill^="rgb"] the
+     sector header would draw a near-black outline fighting the blue highlight. */
+  & g:hover rect[fill^="rgb"] {
+    stroke: var(--foreground);
+  }
+}
+
+/* Honour the OS "reduce motion" setting app-wide. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-timeline: auto !important;
+    animation-range: normal !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+    @apply outline-ring/50;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    @apply bg-background text-foreground;
+  }
+
+  html {
+    @apply font-sans;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+  }
+
+  /* Gives plain <a>/<button> a real focus ring; the * rule above only sets colour. */
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+
+  /* Without these, every bg-surface card stays white while --background
+     flips near-black. */
+  --surface: oklch(0.205 0 0);
+  --surface-sunken: oklch(0.175 0 0);
+  --border-strong: hsl(0 0% 100% / 0.28);
+
+  /* Same hues as the light values, raised to read on near-black. */
+  --positive: hsl(142 65% 55%);
+  --negative: hsl(0 85% 68%);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  /* The brand blue lifted to clear --card by a wide margin; accent-foreground
+     flips to dark navy — white on this lighter blue measures under 3:1. */
+  --accent: hsl(221 100% 65%);
+  --accent-foreground: hsl(222 47% 11%);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  /* Categorical, not sequential: same five hue families as light mode, raised
+     in lightness — the donut is keyed by symbol, not by rank. */
+  --chart-1: oklch(0.70 0.13 250);
+  --chart-2: oklch(0.70 0.14 40);
+  --chart-3: oklch(0.68 0.13 160);
+  --chart-4: oklch(0.75 0.14 85);
+  --chart-5: oklch(0.70 0.10 350);
+  --chart-6: oklch(0.70 0.11 180);
+  --chart-7: oklch(0.65 0.15 300);
+  --chart-8: oklch(0.75 0.14 115);
+  --chart-9: oklch(0.65 0.14 330);
+  --chart-10: oklch(0.68 0.09 65);
+  --chart-background: oklch(0.145 0 0);
+  --chart-foreground: oklch(0.45 0 0);
+  --chart-foreground-muted: oklch(0.65 0.01 260);
+  --chart-crosshair: oklch(0.45 0 0);
+  --chart-grid: oklch(0.25 0 0);
+  --chart-brush-border: var(--chart-grid);
+  --chart-marker-background: oklch(0.25 0.01 260);
+  --chart-marker-border: oklch(0.4 0.01 260);
+  --chart-marker-foreground: oklch(0.9 0.01 260);
+  --chart-label: oklch(0.75 0.01 260);
+  --chart-scale-01: oklch(0.28 0.03 270);
+  --chart-scale-02: oklch(0.38 0.04 270);
+  --chart-scale-03: oklch(0.48 0.05 270);
+  --chart-scale-04: oklch(0.58 0.06 270);
+  --chart-scale-05: oklch(0.68 0.07 270);
+  --chart-scale-pattern-color: oklch(0.145 0 0);
+}

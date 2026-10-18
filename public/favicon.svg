@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" fill="#ffffff"/>
+  <!-- thick square-cut T, sharp edges -->
+  <rect x="6" y="7" width="20" height="4" fill="#0a0a0b"/>
+  <rect x="14" y="11" width="4" height="14" fill="#0a0a0b"/>
+  <!-- exact brand accent: hsl(221 100% 50%) -->
+  <circle cx="24" cy="24" r="2" fill="#0051ff"/>
+</svg>
