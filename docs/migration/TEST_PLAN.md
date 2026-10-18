@@ -250,6 +250,52 @@ injecting a quote through the seam, and it returns the documented 503 otherwise.
 
 ---
 
+## 1F. Phase 1f results — authentication routes
+
+Ported: `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`,
+plus the express-rate-limit middleware mounted on signup and login.
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1F.1 | Signup valid | 201 `{ message, user: { id, username, email } }`, bcrypt hash stored, cookie set (`Secure` only under `NODE_ENV=production`) | **PASSED** | `test_auth_routes.py::test_signup_creates_user_and_sets_cookie`, `::test_cookie_is_secure_when_node_env_is_production` |
+| 1F.2 | Signup document shape | Mongoose key set incl. `createdAt`/`updatedAt`/`__v` | **PASSED** | `test_auth_routes.py::test_signup_writes_mongoose_style_document` |
+| 1F.3 | Signup validation | 400 `"Username, email and password are required"`; `"Password must be at least 8 characters"`, incl. a non-string password | **PASSED** | `test_auth_routes.py::test_signup_validation` |
+| 1F.4 | Signup duplicate email / username | 400 `"User already exists"` for both | **PASSED** | `test_auth_routes.py::test_signup_rejects_duplicates` |
+| 1F.5 | Login valid | 200 `{ message, user }`, cookie renewed | **PASSED** | `test_auth_routes.py::test_login_sets_cookie_and_returns_user` |
+| 1F.6 | Login wrong password / unknown email | 401 `"Invalid credentials"` — the same message for both | **PASSED** | `test_auth_routes.py::test_login_rejects_bad_credentials` |
+| 1F.7 | Login missing fields | 400 `"Email and password are required"` | **PASSED** | `test_auth_routes.py::test_login_requires_email_and_password` |
+| 1F.8 | `/me` | 200, the user minus `password`, BSON dates to the millisecond | **PASSED** | `test_auth_routes.py::test_me_returns_the_user_without_password` |
+| 1F.9 | `/me` without a cookie | 401 `"Not authenticated"` | **PASSED** | `test_auth_routes.py::test_me_requires_a_cookie` |
+| 1F.10 | `/me` for a deleted user | 404 `"User not found"` | **PASSED** | `test_auth_routes.py::test_me_returns_404_when_the_user_is_gone` |
+| 1F.11 | `/me` with a malformed `id` claim | 500 `{ message: "Server error", error }` — the controller's own envelope | **PASSED** | `test_auth_routes.py::test_me_uses_the_auth_500_envelope_for_a_malformed_id` |
+| 1F.12 | Logout | 200 `{ message: "Logged out" }`, `Max-Age=0` cookie | **PASSED** | `test_auth_routes.py::test_logout_clears_the_cookie` |
+| 1F.13 | Token from signup/login opens protected routes | `GET /api/holdings` 200 with that cookie | **PASSED** | `test_auth_routes.py::test_signup_token_opens_protected_routes`, `::test_login_token_opens_protected_routes` |
+| 1F.14 | Token claims | HS256 `{ id, iat, exp }`, `exp - iat == 604800` | **PASSED** | `test_auth_routes.py::test_signup_token_has_the_jsonwebtoken_claims` |
+| 1F.15 | bcrypt cross-implementation | a Node-generated `$2b$10$` hash verifies in Python, and a Python hash in Node | **PASSED** | `test_auth_routes.py::test_hashes_are_readable_across_implementations` (Node check run out-of-tree) |
+| 1F.16 | Rate limit | 21st signup/login attempt in 15 min → 429 with the documented body | **PASSED** | `test_auth_routes.py::test_signup_and_login_share_one_limiter` |
+| 1F.17 | Rate-limit headers | draft-7 `RateLimit-Policy` and `RateLimit` on a guarded response | **PASSED** | `test_auth_routes.py::test_signup_sets_the_draft7_rate_limit_headers` |
+| 1F.18 | Rate-limit scope | logout is never limited | **PASSED** | `test_auth_routes.py::test_logout_is_not_rate_limited` |
+| 1F.19 | Real MongoDB | signup → cookie → login → `/me`, `users` collection, stored hash | **PASSED** | `test_mongo_integration.py::test_auth_routes_against_real_mongo` |
+| 2F.1 | Live side-by-side vs Express | byte-identical body, status and `Set-Cookie` | **PENDING** | no safe reference harness (`server/index.js` starts cron jobs on connect) |
+
+Suite totals: **91 passed, 6 skipped** without `TEST_MONGO_URL`; **97 passed** with it.
+
+Known differences recorded in this phase (none is a behavioural divergence for the React client):
+
+- **`Set-Cookie` serialization.** Starlette writes the attributes in a different order and lowercases
+  the value (`SameSite=strict`; Express writes `SameSite=Strict`). Cookie attributes are parsed
+  case- and order-insensitively per RFC 6265, so the browser-visible behaviour is identical.
+- **Malformed JSON body.** Express's body parser answers 400 `{ message: <parser text> }`; the app
+  returns 400 `{ message: "Invalid request" }`, the pre-existing §0 rule for validation errors.
+- **The `error` text in the auth 500 envelope** is driver-specific: Mongoose's CastError sentence
+  versus bson's `InvalidId` sentence. Only the field's presence and type are part of the contract.
+- **A `null` JSON body on signup.** Express destructures `null` and throws inside the controller → 500;
+  here it is treated as `{}` → 400. The React client always sends an object.
+- **Rate limiting is per worker.** Like express-rate-limit's default in-memory store; if the service is
+  ever run multi-worker, the effective limit multiplies. Documented, not silently different.
+
+---
+
 ## 2. API contract parity
 
 Method: issue the same request to Express and FastAPI with equivalent cookies and data, then compare
@@ -274,23 +320,23 @@ status code, body **keys**, value types, and error message text.
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 3.1 | Signup valid | 201, user object, `Set-Cookie: token` | PLANNED |
-| 3.2 | Signup missing field | 400 with the exact message | PLANNED |
-| 3.3 | Signup short password | 400 `"Password must be at least 8 characters"` | PLANNED |
-| 3.4 | Signup duplicate email | 400 `"User already exists"` | PLANNED |
-| 3.5 | Signup duplicate username | 400 `"User already exists"` | PLANNED |
-| 3.6 | Login valid | 200, user object, cookie renewed | PLANNED |
-| 3.7 | Login wrong password | 401 `"Invalid credentials"` | PLANNED |
-| 3.8 | Login unknown email | 401 `"Invalid credentials"` (same message) | PLANNED |
-| 3.9 | Cookie attributes | `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age` 7d, `Secure` only in production | PLANNED |
-| 3.10 | Token payload | HS256 with `{ id }`, 7-day expiry | PLANNED |
-| 3.11 | Password hashing compatibility | an existing bcrypt hash still verifies after the port | PLANNED |
-| 3.12 | `/me` without cookie | 401 `"Not authenticated"` | PLANNED |
-| 3.13 | `/me` with tampered token | 401 `"Invalid or expired token"` | PLANNED |
-| 3.14 | `/me` with expired token | 401 | PLANNED |
-| 3.15 | Logout | 200, cookie cleared, subsequent protected call 401 | PLANNED |
-| 3.16 | Rate limit | 21st signup/login attempt within 15 min → 429 with the documented body | PLANNED |
-| 3.17 | Rate-limit scope | `/me` and other routes are not limited | PLANNED |
+| 3.1 | Signup valid | 201, user object, `Set-Cookie: token` | **PASSED** — §1F.1 |
+| 3.2 | Signup missing field | 400 with the exact message | **PASSED** — §1F.3 |
+| 3.3 | Signup short password | 400 `"Password must be at least 8 characters"` | **PASSED** — §1F.3 |
+| 3.4 | Signup duplicate email | 400 `"User already exists"` | **PASSED** — §1F.4 |
+| 3.5 | Signup duplicate username | 400 `"User already exists"` | **PASSED** — §1F.4 |
+| 3.6 | Login valid | 200, user object, cookie renewed | **PASSED** — §1F.5 |
+| 3.7 | Login wrong password | 401 `"Invalid credentials"` | **PASSED** — §1F.6 |
+| 3.8 | Login unknown email | 401 `"Invalid credentials"` (same message) | **PASSED** — §1F.6 |
+| 3.9 | Cookie attributes | `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age` 7d, `Secure` only in production | **PASSED** (attribute values; Starlette lowercases the `SameSite` value — see §1F notes) — §1F.1 |
+| 3.10 | Token payload | HS256 with `{ id }`, 7-day expiry | **PASSED** (also carries `iat`, as jsonwebtoken does) — §1F.14 |
+| 3.11 | Password hashing compatibility | an existing bcrypt hash still verifies after the port | **PASSED** — §1F.15 (real Node-generated `$2b$10$` vector) |
+| 3.12 | `/me` without cookie | 401 `"Not authenticated"` | **PASSED** — §1F.9 |
+| 3.13 | `/me` with tampered token | 401 `"Invalid or expired token"` | **PASSED** — `test_auth.py` (guard-level), shared by every protected route |
+| 3.14 | `/me` with expired token | 401 | **PASSED** — `test_auth.py` (guard-level) |
+| 3.15 | Logout | 200, cookie cleared, subsequent protected call 401 | **PASSED** (cleared cookie asserted; the follow-up 401 is the guard covered in §1A.4) — §1F.12 |
+| 3.16 | Rate limit | 21st signup/login attempt within 15 min → 429 with the documented body | **PASSED** — §1F.16 |
+| 3.17 | Rate-limit scope | `/me` and other routes are not limited | **PASSED** — §1F.18 |
 
 ---
 

@@ -23,6 +23,9 @@ class Settings:
     jwt_secret: str
     host: str
     port: int
+    # NODE_ENV controls the `Secure` flag on the auth cookie, exactly as the
+    # Express controller's isProduction check does.
+    node_env: str
 
 
 def get_settings() -> Settings:
@@ -32,4 +35,5 @@ def get_settings() -> Settings:
         jwt_secret=os.getenv("JWT_SECRET", ""),
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
+        node_env=os.getenv("NODE_ENV", ""),
     )

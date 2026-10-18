@@ -13,6 +13,7 @@ afterwards.
 import os
 from datetime import datetime, timezone
 
+import bcrypt
 import jwt
 import pytest
 from bson import ObjectId
@@ -307,5 +308,41 @@ def test_write_routes_against_real_mongo(scratch_database, monkeypatch):
     assert scratch_database["funds"].find_one({"user": user_id})["available"] == 105000
     assert cancelled.status_code == 200
     assert scratch_database["orders"].find_one({"_id": ObjectId(limit.json()["_id"])})["status"] == "CANCELLED"
+
+
+def test_auth_routes_against_real_mongo(scratch_database, monkeypatch):
+    # Confirms the `users` collection resolves against a real MongoDB, and that
+    # signup -> cookie -> login -> protected route works end to end outside
+    # mongomock, including a stored bcrypt hash written by this app.
+    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+
+    app = create_app(database=scratch_database)
+
+    with TestClient(app) as client:
+        signup = client.post(
+            "/api/auth/signup",
+            json={"username": "deepak", "email": "deepak@example.com", "password": "hunter2hunter2"},
+        )
+        along_with_signup_cookie = client.get("/api/holdings")
+        login = client.post(
+            "/api/auth/login",
+            json={"email": "deepak@example.com", "password": "hunter2hunter2"},
+        )
+        me = client.get("/api/auth/me")
+
+    assert signup.status_code == 201
+    assert login.status_code == 200
+    assert login.json()["user"] == signup.json()["user"]
+    # The cookie a signup sets is already enough for the protected routes.
+    assert along_with_signup_cookie.status_code == 200
+
+    assert me.status_code == 200
+    returned = me.json()["user"]
+    assert set(returned) == {"_id", "username", "email", "createdAt", "updatedAt", "__v"}
+    assert returned["createdAt"].endswith("Z")
+
+    stored = scratch_database["users"].find_one({"email": "deepak@example.com"})
+    assert stored["password"].startswith("$2b$10$")
+    assert bcrypt.checkpw(b"hunter2hunter2", stored["password"].encode())
 
 
