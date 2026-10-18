@@ -1,7 +1,7 @@
 # Migration Status
 
-**Last updated:** 2026-10-18 (Phase 1d)
-**Current phase:** **Phase 1d — remaining read endpoints: funds transactions, portfolio history, instrument search, market overview**
+**Last updated:** 2026-10-18 (Phase 1e)
+**Current phase:** **Phase 1e — write endpoints: watchlist add/delete, funds transactions, order placement/cancel/exits, MIS square-off**
 **Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
 and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
@@ -13,8 +13,8 @@ and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 1d — remaining read endpoints (transactions, portfolio history, instrument search, market overview) |
-| FastAPI application | **started** — health, holdings, orders, watchlist, positions, funds, funds/transactions, portfolio/history, instruments/search, market/overview |
+| Phase | 1e — write endpoints (watchlist, funds transactions, orders, exits, square-off) |
+| FastAPI application | **started** — the 10 read routes plus the 7 write routes (watchlist add/delete, funds deposit/withdraw, order place/cancel/exits, MIS square-off) |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | unchanged |
 | Development MongoDB | **local** `mongodb://127.0.0.1:27017/tradium_fastapi_dev` via gitignored `api/.env` |
@@ -27,7 +27,7 @@ and the original repository are untouched.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **48 passed, 4 skipped** (default); **52 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **66 passed, 5 skipped** (default); **71 passed** with `TEST_MONGO_URL` — see §5 |
 
 ---
 
@@ -212,6 +212,70 @@ Nova remain out of scope.
 
 ---
 
+## 3E. Phase 1e — write endpoints
+
+All new code is under `api/`; `server/`, `src/`, and the original repository are untouched. The Express
+business rules are ported as-is: ownership checks, order states, cash blocks, the atomic merge of a
+second fill, refunds on cancel, the OCO cancellation of sibling exits, and the exact error strings.
+
+### Routes ported
+
+| Method | Route | Express source |
+|---|---|---|
+| `POST` | `/api/watchlist` | `watchlistRoutes.js` — symbol regex, duplicate guard, create |
+| `DELETE` | `/api/watchlist/:id` | `watchlistRoutes.js` — always 204 |
+| `POST` | `/api/funds/transactions` | `fundsRoutes.js` — deposit upsert / atomic withdrawal guard |
+| `POST` | `/api/orders` | `ordersRoutes.js` — validation, cash block, holdings check, create |
+| `POST` | `/api/orders/exits` | `ordersRoutes.js` — resolve the book, replace the old pair |
+| `DELETE` | `/api/orders/:id` | `ordersRoutes.js` — claim-and-cancel with refund |
+| `POST` | `/api/positions/:id/square-off` | `positionsRoutes.js` — live/`ltp` exit, release, ledger, closing order |
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `api/routes/watchlist.py` (edited) | adds `POST /api/watchlist` and `DELETE /api/watchlist/:id` |
+| `api/routes/funds.py` (edited) | adds `POST /api/funds/transactions` |
+| `api/routes/orders.py` (edited) | adds `POST /api/orders`, `POST /api/orders/exits`, `DELETE /api/orders/:id` |
+| `api/routes/positions.py` (edited) | adds `POST /api/positions/:id/square-off` |
+| `api/order_engine.py` | port of `server/utils/executeOrder.js`: `apply_fill`, `create_exit_pair`, `spawn_bracket_exits`, `cancel_sibling_exits` (the atomic `$set` pipeline merge for a second fill) |
+| `api/market_data.py` | the provider seam (`fetch_quote`); the market-data phase fills it in |
+| `api/documents.py` | `new_document` (Mongoose `createdAt`/`updatedAt`/`__v`) and `inc_funds` (upserted `$inc`) |
+| `api/js_compat.py` | JavaScript number rules: `Number()` coercion, `Number(x) || 0`, Indian money grouping |
+| `api/tests/test_watchlist.py`, `test_funds.py`, `test_orders.py`, `test_positions.py` (edited) | the focused write tests |
+| `api/tests/conftest.py` (edited) | adds `funds_factory` |
+| `api/tests/test_mongo_integration.py` (edited) | one real-MongoDB write flow incl. the merge pipeline |
+
+### Deferred dependency: the market-data provider
+
+`market_data.fetch_quote` returns `None` because Yahoo Finance (`server/jobs/priceSync.js`) is a
+separate phase. That is exactly the "provider returned no price" branch the Express code already
+handles, so it is ported rather than faked:
+
+- `POST /api/orders` with `type: "MARKET"` answers 503
+  `"No live price available for <symbol>, try again in a moment"` — no order, no debit. LIMIT/SL/SL-M
+  placement is independent of the provider and works now.
+- `POST /api/positions/:id/square-off` falls back to the stored `ltp`, which is the documented Express
+  fallback when `quote()` fails.
+
+No price is fabricated, and no external trading or brokerage side effect is invoked anywhere. The
+identical `apply_fill` logic *is* ported (it is required by `POST /api/orders/exits` and by a filling
+MARKET order) and is exercised in tests by injecting a quote through the seam.
+
+### Behaviour notes
+
+- **Mongoose validators are not re-implemented.** The routes perform the same *explicit* checks Express
+  performs and return the same 400/404/409/503 messages. Mongoose-only failures (a missing `name`, a
+  non-`NSE` `exchange` enum, a non-String value on a String path) would be a 500 in Express; here a
+  non-string `symbol` is accepted and stored as given. The React client always sends the typed fields.
+- **Numeric rendering.** JavaScript has one number type and `JSON.stringify(2500.0)` is `"2500"`, so
+  values written by a JS driver come back to PyMongo as floats. Whole floats should render as integers
+  to match Express exactly; that is left for the final parity phase (§9) rather than changing the
+  shared serializer mid-migration.
+- Known issue #4 in §4 (debit before a holdings check) is reproduced, not fixed.
+
+---
+
 ## 4. Known issues recorded (not fixed)
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. None has been
@@ -244,7 +308,10 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | New repo `git remote -v` | **empty** |
 | Pre-commit secret scan of all 9 staged files | no credential patterns matched |
 | Staged file set | 9 Markdown files only; no application file touched (2,683 insertions, 0 deletions) |
-| Application tests | **run:** 48 passed, 4 skipped; 52 passed with `TEST_MONGO_URL` |
+| Application tests | **run:** 66 passed, 5 skipped; 71 passed with `TEST_MONGO_URL` |
+| Registered routes (Phase 1e) | **verified** — 17 routes: the 10 reads plus 7 writes (`POST` watchlist, `DELETE` watchlist/:id, `POST` funds/transactions, `POST` orders, `POST` orders/exits, `DELETE` orders/:id, `POST` positions/:id/square-off) |
+| Write flow against a real MongoDB | **verified** — deposit, watchlist add/delete, two MARKET fills into one merged position, square-off, LIMIT place + cancel; scratch DB dropped afterwards |
+| Write residue in `tradium_fastapi_dev` | none — tests never touch the dev DB; it has no collections |
 | Local `mongod` reachability | **verified** — admin `ping` ok on `127.0.0.1:27017` |
 | Effective dev database name | **verified** — `tradium_fastapi_dev`, from a normal `create_app()` startup |
 | `zerodha` database | untouched — same 9 collections, no writes |
@@ -313,14 +380,16 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 8. Explicitly not approved / not done
 
-- No route beyond the ten read endpoints: `GET /api/health`, `GET /api/holdings`, `GET /api/orders`,
-  `GET /api/watchlist`, `GET /api/positions`, `GET /api/funds`, `GET /api/funds/transactions`,
-  `GET /api/portfolio/history`, `GET /api/instruments/search`, `GET /api/market/overview`.
-- No write or execution route (no POST/DELETE orders or watchlist, no `POST /api/funds/transactions`);
-  no live-Yahoo instrument route (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`), which is deferred
-  to the market-data phase.
+- No route beyond the seventeen ported routes: the 10 reads (`GET /api/health`, `GET /api/holdings`,
+  `GET /api/orders`, `GET /api/watchlist`, `GET /api/positions`, `GET /api/funds`,
+  `GET /api/funds/transactions`, `GET /api/portfolio/history`, `GET /api/instruments/search`,
+  `GET /api/market/overview`) and the 7 writes (`POST`/`DELETE /api/watchlist`,
+  `POST /api/funds/transactions`, `POST`/`DELETE /api/orders`, `POST /api/orders/exits`,
+  `POST /api/positions/:id/square-off`).
+- No live-Yahoo instrument route (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`), which is deferred
+  to the market-data phase; no Yahoo Finance call was made.
 - No write to the `zerodha` database and no production data copied into `tradium_fastapi_dev`.
-- No scheduled or background job of any kind; no Yahoo Finance call.
+- No scheduled or background job of any kind.
 - No Nova / Gemini / PydanticAI work.
 - No frontend change and no frontend-to-FastAPI connection.
 - No change to `server/`, `src/`, or any other original application file.
@@ -334,15 +403,19 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 1d complete (transactions, portfolio history, instrument search, market overview). Awaiting
-review.** Nothing further will be implemented without approval.
+**Phase 1e complete (write endpoints). Awaiting review.** Nothing further will be implemented without
+approval.
 
 Open items:
 
-1. Ten read routes are tested in isolation; a live Express-vs-FastAPI comparison is still
+1. All seventeen routes are tested in isolation; a live Express-vs-FastAPI comparison is still
    **PENDING** (no safe reference harness exists; `server/index.js` starts cron jobs on connect).
-2. The three live-Yahoo instrument routes remain **DEFERRED** to the market-data phase.
-3. Recommended next: an isolated Express reference harness to close the `PENDING` parity rows, then
-   the write/execution routes once separately approved. The `marketquotes` cache only holds data when
-   a sync job populates it, so `instruments/search` and `market/overview` will return empty results
-   until that phase exists — the routes themselves are complete and tested.
+2. The write routes that need the market-data provider (a filling `MARKET` order) are wired to the
+   `market_data.fetch_quote` seam and answer the documented 503 until that phase exists.
+3. The numeric-rendering nuance in §3E is an open parity item for the comparison harness.
+4. The three live-Yahoo instrument routes remain **DEFERRED** to the market-data phase.
+5. Recommended next: an isolated Express reference harness to close the `PENDING` parity rows (including
+   the numeric-rendering item), then the market-data phase (`marketquotes` sync + the three deferred
+   instrument routes). The `marketquotes` cache only holds data when a sync job populates it, so
+   `instruments/search` and `market/overview` return empty results until then. Auth routes
+   (`/api/auth/*`) and the Nova/Gemini work are separate phases.

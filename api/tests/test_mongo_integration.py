@@ -249,3 +249,63 @@ def test_portfolio_market_search_and_transactions_read_real_mongo_documents(
     assert [row["symbol"] for row in search.json()] == ["INFY"]
 
 
+def test_write_routes_against_real_mongo(scratch_database, monkeypatch):
+    # Confirms the write routes run against a real MongoDB, including the
+    # server-side aggregation pipeline that merges a second MIS fill.
+    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+    monkeypatch.setattr(
+        "api.routes.orders.fetch_quote",
+        lambda symbol: {"ltp": 1600.0, "dayChangePct": 0.0},
+    )
+
+    user_id = ObjectId()
+    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+    scratch_database["funds"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "available": 100000,
+         "createdAt": created, "updatedAt": created, "__v": 0}
+    )
+
+    token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
+    app = create_app(database=scratch_database)
+
+    with TestClient(app) as client:
+        cookie = {"token": token}
+
+        deposit = client.post("/api/funds/transactions",
+                              json={"kind": "DEPOSIT", "amount": 5000}, cookies=cookie)
+        added = client.post("/api/watchlist",
+                            json={"symbol": "INFY", "name": "Infosys"}, cookies=cookie)
+        removed = client.delete(f"/api/watchlist/{added.json()['_id']}", cookies=cookie)
+
+        market_order = {"symbol": "INFY", "name": "Infosys", "exchange": "NSE", "side": "BUY",
+                        "type": "MARKET", "product": "MIS", "qty": 10, "price": 0}
+        first_fill = client.post("/api/orders", json=market_order, cookies=cookie)
+        second_fill = client.post("/api/orders", json=market_order, cookies=cookie)
+
+        position = scratch_database["positions"].find_one({"user": user_id})
+        squared = client.post(f"/api/positions/{position['_id']}/square-off", cookies=cookie)
+
+        limit = client.post("/api/orders",
+                            json={"symbol": "TCS", "name": "TCS", "exchange": "NSE", "side": "BUY",
+                                  "type": "LIMIT", "product": "CNC", "qty": 1, "price": 100},
+                            cookies=cookie)
+        cancelled = client.delete(f"/api/orders/{limit.json()['_id']}", cookies=cookie)
+
+    assert deposit.status_code == 201
+    assert deposit.json()["funds"]["available"] == 105000
+    assert added.status_code == 201 and removed.status_code == 204
+    assert scratch_database["watchlists"].count_documents({"user": user_id}) == 0
+
+    assert first_fill.status_code == 201 and first_fill.json()["status"] == "EXECUTED"
+    assert second_fill.status_code == 201
+    # Both fills merged into a single position, which square-off then removed.
+    assert squared.status_code == 200
+    assert squared.json() == {"message": "Squared off INFY", "pnl": 0}
+    assert scratch_database["positions"].count_documents({"user": user_id}) == 0
+
+    # 100000 + 5000 - 16000 - 16000 + (1600*20) - 100 + 100 = 105000
+    assert scratch_database["funds"].find_one({"user": user_id})["available"] == 105000
+    assert cancelled.status_code == 200
+    assert scratch_database["orders"].find_one({"_id": ObjectId(limit.json()["_id"])})["status"] == "CANCELLED"
+
+

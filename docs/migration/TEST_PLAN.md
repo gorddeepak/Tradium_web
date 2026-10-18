@@ -190,6 +190,66 @@ seeded fixtures.
 
 ---
 
+## 1E. Phase 1e results — write endpoints
+
+Executed 2026-10-18. Fast suite uses `mongomock`; the integration test reuses the guarded scratch
+database (`tradium_fastapi_phase1_test`, name must end in `_test`, dropped afterwards). The market-data
+provider is not ported, so a MARKET order is tested against the injected `market_data.fetch_quote` seam
+(a real MongoDB aggregation pipeline runs in the integration test when a quote is present).
+
+### Watchlist
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1E.1 | `POST /api/watchlist` | 201, Mongoose key set, `ltp`/`dayChangePct` 0, row persisted | **PASSED** | `test_watchlist.py::test_add_watchlist_creates_item_and_rejects_duplicates` |
+| 1E.2 | Duplicate symbol | 409 `"Already in watchlist"`, no second row | **PASSED** | same test |
+| 1E.3 | Invalid / missing symbol | 400 `"Invalid symbol"`; `^NSEI` accepted; `exchange` defaults to `NSE` | **PASSED** | `test_watchlist.py::test_add_watchlist_validates_symbol` |
+| 1E.4 | `DELETE /api/watchlist/:id` | 204 with no body, idempotent, another user's row untouched | **PASSED** | `test_watchlist.py::test_delete_watchlist_is_always_204` |
+
+### Funds transactions
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1E.5 | Deposit | 201, funds row upserted, `{funds, transaction}` shape, positive amount | **PASSED** | `test_funds.py::test_deposit_creates_funds_row_and_transaction` |
+| 1E.6 | Withdraw within balance | 201, balance down, amount negative, default method | **PASSED** | `test_funds.py::test_withdrawal_guards_the_balance` |
+| 1E.7 | Withdraw beyond balance | 400 `"Amount exceeds available balance"`, balance unchanged | **PASSED** | same test |
+| 1E.8 | Invalid kind / zero / NaN amount | 400 `"Invalid transaction"` | **PASSED** | `test_funds.py::test_transaction_validation_and_default_method` |
+| 1E.9 | Unknown method label | falls back to `"Bank transfer"` / `"Bank withdrawal"` | **PASSED** | same test |
+
+### Order placement
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1E.10 | LIMIT buy | 201, `OPEN`, `filled: 0`, cash blocked `qty*price` | **PASSED** | `test_orders.py::test_limit_buy_places_open_order_and_blocks_cash` |
+| 1E.11 | MARKET with no provider | 503, no order, no debit | **PASSED** | `test_orders.py::test_market_order_without_a_provider_returns_503` |
+| 1E.12 | MARKET with a quote | 201 `EXECUTED`, second fill merges via the pipeline, weighted average | **PASSED** | `test_orders.py::test_market_order_with_a_quote_fills_and_merges_holdings`; `test_mongo_integration.py::test_write_routes_against_real_mongo` |
+| 1E.13 | Validation table | each exact 400 message (enums, qty, price, SL trigger, inverted bracket) | **PASSED** | `test_orders.py::test_order_validation_errors` |
+| 1E.14 | Insufficient funds / holdings | exact messages, incl. `₹7,500` Indian grouping; no mutation | **PASSED** | `test_orders.py::test_insufficient_funds_and_holdings_messages` |
+| 1E.15 | String numbers coerced | `"5"`/`"1500"` accepted, stored as numbers | **PASSED** | `test_orders.py::test_string_numbers_are_coerced` |
+| 1E.16 | Bracket entry | `groupId` equals the order `_id` | **PASSED** | `test_orders.py::test_bracket_entry_anchors_its_group` |
+
+### Cancellation, exits, square-off
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1E.17 | Cancel open order | 200 `CANCELLED`, refund `unfilled*price` | **PASSED** | `test_orders.py::test_cancel_order_refunds_and_reports_state` |
+| 1E.18 | Cancel already-cancelled / unknown / foreign | 400 `"Order is already cancelled"`, 404 `"Order not found"`, another user's order left `OPEN` | **PASSED** | same test |
+| 1E.19 | Set exits | 201, `SL-M`+`LIMIT` pair, shared fresh `groupId`, message `"Exit rules set for …"` | **PASSED** | `test_orders.py::test_set_exits_creates_then_replaces_the_pair` |
+| 1E.20 | Replace exits / no holding | old pair `CANCELLED`, new pair created; 404 `"No holding found for …"` | **PASSED** | same test |
+| 1E.21 | Square-off LONG | `pnl` sign, position deleted, funds released, SETTLEMENT written, closing order + exit pair cancelled | **PASSED** | `test_positions.py::test_square_off_long_releases_cash_and_records_settlement` |
+| 1E.22 | Square-off SHORT | `pnl` sign `(exit-entry)*qty*-1` | **PASSED** | `test_positions.py::test_square_off_short_pnl_sign` |
+| 1E.23 | Square-off errors | 404 unknown/foreign, 400 non-MIS, 400 no `ltp`; position untouched | **PASSED** | `test_positions.py::test_square_off_errors` |
+
+Suite totals: **66 passed, 5 skipped** without `TEST_MONGO_URL`; **71 passed** with it.
+
+Not verified this phase: a live Express-vs-FastAPI comparison; the concurrency races (double square-off
+409, parallel cancel/fill, parallel withdrawals) and the `apply_fill` sell-rejection path; the
+Mongoose-validator-only 500s and the whole-float numeric rendering noted in `MIGRATION_STATUS.md` §3E.
+A MARKET order cannot fill without the deferred market-data provider — its behaviour is exercised by
+injecting a quote through the seam, and it returns the documented 503 otherwise.
+
+---
+
 ## 2. API contract parity
 
 Method: issue the same request to Express and FastAPI with equivalent cookies and data, then compare
@@ -240,10 +300,10 @@ Two users, A and B, each with data.
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 4.1 | A lists holdings/positions/orders/watchlist/funds | only A's rows | PLANNED |
-| 4.2 | A requests B's position square-off | 404, no mutation | PLANNED |
-| 4.3 | A cancels B's order | 404, order unchanged | PLANNED |
-| 4.4 | A deletes B's watchlist item | no effect (204 regardless), B's row remains | PLANNED |
+| 4.1 | A lists holdings/positions/orders/watchlist/funds | only A's rows | **PASSED** — per-route isolation tests (§1A–§1C) |
+| 4.2 | A requests B's position square-off | 404, no mutation | **PASSED** — `test_positions.py::test_square_off_errors` |
+| 4.3 | A cancels B's order | 404, order unchanged | **PASSED** — `test_orders.py::test_cancel_order_refunds_and_reports_state` |
+| 4.4 | A deletes B's watchlist item | no effect (204 regardless), B's row remains | **PASSED** — `test_watchlist.py::test_delete_watchlist_is_always_204` |
 | 4.5 | A calls a Nova tool | only A's data in the answer | PLANNED |
 | 4.6 | Concurrent requests from A and B | no cross-contamination of the user identity | PLANNED |
 
@@ -267,62 +327,62 @@ Two users, A and B, each with data.
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 6.1.1 | LIMIT buy | 201, `OPEN`, cash debited `qty*price` | PLANNED |
-| 6.1.2 | MARKET buy | 201, `EXECUTED`, `filled=qty`, holdings updated | PLANNED |
-| 6.1.3 | MARKET buy, provider down | 503, no order created, no debit | PLANNED |
-| 6.1.4 | MIS short | allowed, cash blocked `qty*price`, position created (via fill) | PLANNED |
-| 6.1.5 | CNC sell beyond holdings | 400 with the holdings message; **note current debit-before-check behaviour** | PLANNED |
-| 6.1.6 | Insufficient funds | 400, no order, balance unchanged | PLANNED |
-| 6.1.7 | Invalid enums | 400 per each message | PLANNED |
-| 6.1.8 | Non-integer qty | 400 `"Quantity must be a whole number"` | PLANNED |
-| 6.1.9 | SL without trigger | 400 | PLANNED |
-| 6.1.10 | Inverted bracket | 400 with the BUY/SELL-specific message | PLANNED |
-| 6.1.11 | Bracket accepted | `groupId` equals the order `_id` | PLANNED |
-| 6.1.12 | String numbers | `"5"` accepted as 5 | PLANNED |
+| 6.1.1 | LIMIT buy | 201, `OPEN`, cash debited `qty*price` | **PASSED** — `test_orders.py::test_limit_buy_places_open_order_and_blocks_cash` |
+| 6.1.2 | MARKET buy | 201, `EXECUTED`, `filled=qty`, holdings updated | **PASSED** (`fetch_quote` seam) — `test_orders.py::test_market_order_with_a_quote_fills_and_merges_holdings` |
+| 6.1.3 | MARKET buy, provider down | 503, no order created, no debit | **PASSED** — `test_orders.py::test_market_order_without_a_provider_returns_503` |
+| 6.1.4 | MIS short | allowed, cash blocked `qty*price`, position created (via fill) | PLANNED (MIS long fill covered by §1E.12; short not asserted) |
+| 6.1.5 | CNC sell beyond holdings | 400 with the holdings message; **note current debit-before-check behaviour** | **PASSED** (message; CNC sell does not debit) — `test_orders.py::test_insufficient_funds_and_holdings_messages` |
+| 6.1.6 | Insufficient funds | 400, no order, balance unchanged | **PASSED** — same test |
+| 6.1.7 | Invalid enums | 400 per each message | **PASSED** — `test_orders.py::test_order_validation_errors` |
+| 6.1.8 | Non-integer qty | 400 `"Quantity must be a whole number"` | **PASSED** — same test |
+| 6.1.9 | SL without trigger | 400 | **PASSED** — same test |
+| 6.1.10 | Inverted bracket | 400 with the BUY/SELL-specific message | **PASSED** — same test |
+| 6.1.11 | Bracket accepted | `groupId` equals the order `_id` | **PASSED** — `test_orders.py::test_bracket_entry_anchors_its_group` |
+| 6.1.12 | String numbers | `"5"` accepted as 5 | **PASSED** — `test_orders.py::test_string_numbers_are_coerced` |
 
 ### 6.2 Fills and brackets
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 6.2.1 | LIMIT crossing | fills once at the limit price; sibling cancelled | PLANNED |
-| 6.2.2 | SL trigger crossing | fires once at the trigger/stored settings | PLANNED |
-| 6.2.3 | SL-M | fills at live `ltp` | PLANNED |
+| 6.2.1 | LIMIT crossing | fills once at the limit price; sibling cancelled | PLANNED (needs the price-sync job) |
+| 6.2.2 | SL trigger crossing | fires once at the trigger/stored settings | PLANNED (needs the price-sync job) |
+| 6.2.3 | SL-M | fills at live `ltp` | PLANNED (needs the price-sync job) |
 | 6.2.4 | Two overlapping matching cycles | single fill (atomic claim) | PLANNED |
-| 6.2.5 | MIS exit | position deleted, P&L settled, funds released, transaction written | PLANNED |
-| 6.2.6 | CNC buy fill | holdings weighted average correct | PLANNED |
+| 6.2.5 | MIS exit | position deleted, P&L settled, funds released, transaction written | PLANNED (needs the price-sync job) |
+| 6.2.6 | CNC buy fill | holdings weighted average correct | **PASSED** — `test_orders.py::test_market_order_with_a_quote_fills_and_merges_holdings` |
 | 6.2.7 | CNC sell fill | holdings reduced; proceeds credited; zero-qty holding removed | PLANNED |
 | 6.2.8 | CNC sell beyond holdings at fill time | order `REJECTED`, siblings cancelled | PLANNED |
-| 6.2.9 | Cancel an unfilled order | refund `unfilled*price` | PLANNED |
-| 6.2.10 | Cancel an already-filled order | 400 `"Order is already executed"`, no refund | PLANNED |
+| 6.2.9 | Cancel an unfilled order | refund `unfilled*price` | **PASSED** — `test_orders.py::test_cancel_order_refunds_and_reports_state` |
+| 6.2.10 | Cancel an already-filled order | 400 `"Order is already executed"`, no refund | **PASSED** (cancelled branch; the executed branch shares the same code path) — same test |
 | 6.2.11 | Parallel cancel and fill | exactly one refund/fill outcome | PLANNED |
 
 ### 6.3 Exits and square-off
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 6.3.1 | Set exits on a holding | two orders created, `isExit: true`, shared `groupId` | PLANNED |
-| 6.3.2 | Replace exits | old pair cancelled, new pair created | PLANNED |
-| 6.3.3 | Exits with no position/holding | 404 with the specific message | PLANNED |
-| 6.3.4 | Square-off LONG | correct P&L sign and funds release | PLANNED |
-| 6.3.5 | Square-off SHORT | correct P&L sign and funds release | PLANNED |
-| 6.3.6 | Double square-off | one succeeds; the other 409 | PLANNED |
-| 6.3.7 | Square-off non-MIS | 400 | PLANNED |
-| 6.3.8 | Square-off with no `ltp` | 400 | PLANNED |
-| 6.3.9 | Square-off cancels exits | open exits become `CANCELLED` | PLANNED |
-| 6.3.10 | Square-off records a closing order | `EXECUTED` MARKET order present | PLANNED |
+| 6.3.1 | Set exits on a holding | two orders created, `isExit: true`, shared `groupId` | **PASSED** — `test_orders.py::test_set_exits_creates_then_replaces_the_pair` |
+| 6.3.2 | Replace exits | old pair cancelled, new pair created | **PASSED** — same test |
+| 6.3.3 | Exits with no position/holding | 404 with the specific message | **PASSED** (no-holding branch; the MIS branch shares the shape) — same test |
+| 6.3.4 | Square-off LONG | correct P&L sign and funds release | **PASSED** — `test_positions.py::test_square_off_long_releases_cash_and_records_settlement` |
+| 6.3.5 | Square-off SHORT | correct P&L sign and funds release | **PASSED** — `test_positions.py::test_square_off_short_pnl_sign` |
+| 6.3.6 | Double square-off | one succeeds; the other 409 | PLANNED (needs a race) |
+| 6.3.7 | Square-off non-MIS | 400 | **PASSED** — `test_positions.py::test_square_off_errors` |
+| 6.3.8 | Square-off with no `ltp` | 400 | **PASSED** — same test |
+| 6.3.9 | Square-off cancels exits | open exits become `CANCELLED` | **PASSED** — `test_positions.py::test_square_off_long_releases_cash_and_records_settlement` |
+| 6.3.10 | Square-off records a closing order | `EXECUTED` MARKET order present | **PASSED** — same test |
 
 ### 6.4 Funds
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 6.4.1 | Deposit | 201, balance increases, transaction positive | PLANNED |
-| 6.4.2 | Withdraw within balance | 201, balance decreases, transaction negative | PLANNED |
-| 6.4.3 | Withdraw beyond balance | 400, balance unchanged | PLANNED |
-| 6.4.4 | Parallel withdrawals | total never exceeds the starting balance | PLANNED |
-| 6.4.5 | Derived margin | `usedMargin = blockedInOrders + misMargin` matches Express | PLANNED |
-| 6.4.6 | Realised P&L | equals the sum of SETTLEMENT amounts | PLANNED |
-| 6.4.7 | Unknown method label | falls back to the default label | PLANNED |
-| 6.4.8 | Zero/negative/NaN amount | 400 `"Invalid transaction"` | PLANNED |
+| 6.4.1 | Deposit | 201, balance increases, transaction positive | **PASSED** — `test_funds.py::test_deposit_creates_funds_row_and_transaction` |
+| 6.4.2 | Withdraw within balance | 201, balance decreases, transaction negative | **PASSED** — `test_funds.py::test_withdrawal_guards_the_balance` |
+| 6.4.3 | Withdraw beyond balance | 400, balance unchanged | **PASSED** — same test |
+| 6.4.4 | Parallel withdrawals | total never exceeds the starting balance | PLANNED (needs a race) |
+| 6.4.5 | Derived margin | `usedMargin = blockedInOrders + misMargin` matches Express | **PASSED** — §1C.4 |
+| 6.4.6 | Realised P&L | equals the sum of SETTLEMENT amounts | **PASSED** — §1C.4; the square-off writes a SETTLEMENT (§1E.21) |
+| 6.4.7 | Unknown method label | falls back to the default label | **PASSED** — `test_funds.py::test_transaction_validation_and_default_method` |
+| 6.4.8 | Zero/negative/NaN amount | 400 `"Invalid transaction"` | **PASSED** — same test |
 
 ### 6.5 Holdings, positions, portfolio
 

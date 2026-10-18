@@ -1,8 +1,9 @@
-"""Focused tests for GET /api/watchlist: content, isolation, shape.
+"""Focused tests for /api/watchlist: reads (content, isolation, shape) and the
+add/delete mutations (validation, duplicate guard, always-204 delete).
 
-The route returns natural order with no sort, so ordering is not asserted.
-Authentication and database-failure behaviour are shared with the holdings
-suite and not repeated here.
+The read route returns natural order with no sort, so ordering is not
+asserted. Authentication and database-failure behaviour are shared with the
+holdings suite and not repeated here.
 """
 
 from bson import ObjectId
@@ -60,3 +61,85 @@ def test_empty_watchlist_returns_empty_list(client, make_token, user_id):
     response = client.get("/api/watchlist", cookies={"token": make_token(user_id)})
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_add_watchlist_creates_item_and_rejects_duplicates(
+    client, database, make_token, user_id
+):
+    cookie = {"token": make_token(user_id)}
+
+    response = client.post(
+        "/api/watchlist",
+        json={"symbol": "INFY", "name": "Infosys", "exchange": "NSE"},
+        cookies=cookie,
+    )
+
+    assert response.status_code == 201
+    item = response.json()
+    assert set(item) == {
+        "_id",
+        "user",
+        "symbol",
+        "name",
+        "exchange",
+        "ltp",
+        "dayChangePct",
+        "createdAt",
+        "updatedAt",
+        "__v",
+    }
+    assert item["symbol"] == "INFY"
+    assert item["user"] == str(user_id)
+    assert item["ltp"] == 0
+    assert database["watchlists"].count_documents({"user": user_id}) == 1
+
+    duplicate = client.post(
+        "/api/watchlist", json={"symbol": "INFY", "name": "Other"}, cookies=cookie
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {"message": "Already in watchlist"}
+
+
+def test_add_watchlist_validates_symbol(client, database, make_token, user_id):
+    cookie = {"token": make_token(user_id)}
+
+    assert (
+        client.post(
+            "/api/watchlist", json={"symbol": "bad symbol!"}, cookies=cookie
+        ).status_code
+        == 400
+    )
+    assert client.post("/api/watchlist", json={}, cookies=cookie).json() == {
+        "message": "Invalid symbol"
+    }
+
+    # A leading ^ is allowed for index tickers, and exchange defaults to NSE.
+    index = client.post(
+        "/api/watchlist", json={"symbol": "^NSEI", "name": "NIFTY 50"}, cookies=cookie
+    )
+    assert index.status_code == 201
+    assert index.json()["exchange"] == "NSE"
+
+
+def test_delete_watchlist_is_always_204(
+    client, database, make_token, user_id, other_user_id, watchlist_factory
+):
+    cookie = {"token": make_token(user_id)}
+    mine = ObjectId()
+    theirs = ObjectId()
+    database["watchlists"].insert_many(
+        [
+            watchlist_factory(user_id, _id=mine, symbol="INFY"),
+            watchlist_factory(other_user_id, _id=theirs, symbol="TCS"),
+        ]
+    )
+
+    first = client.delete(f"/api/watchlist/{mine}", cookies=cookie)
+    assert first.status_code == 204
+    assert first.content == b""
+    assert database["watchlists"].count_documents({"_id": mine}) == 0
+
+    # Deleting again still 204, and another user's row is untouched.
+    assert client.delete(f"/api/watchlist/{mine}", cookies=cookie).status_code == 204
+    assert client.delete(f"/api/watchlist/{theirs}", cookies=cookie).status_code == 204
+    assert database["watchlists"].count_documents({"_id": theirs}) == 1

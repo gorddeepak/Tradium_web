@@ -199,3 +199,23 @@ def market_quote_factory():
         return document
 
     return _make
+
+
+@pytest.fixture
+def funds_factory():
+    """Build a funds document shaped like the Mongoose model."""
+    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+
+    def _make(user, available=0, **overrides):
+        document = {
+            "_id": ObjectId(),
+            "user": user,
+            "available": available,
+            "createdAt": created,
+            "updatedAt": created,
+            "__v": 0,
+        }
+        document.update(overrides)
+        return document
+
+    return _make

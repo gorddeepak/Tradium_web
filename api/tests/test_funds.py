@@ -1,5 +1,5 @@
 """Focused tests for the funds reads: derived keys, first-read creation,
-isolation, and the transaction ledger.
+isolation, and the transaction ledger, plus the deposit/withdrawal write.
 
 Authentication and database-failure behaviour are shared with the holdings
 suite and not repeated here.
@@ -152,3 +152,74 @@ def test_transactions_shape_and_empty(client, database, make_token, user_id):
         "__v",
     }
     assert body[0]["createdAt"] == "2026-09-01T04:15:30.123Z"
+
+
+def test_deposit_creates_funds_row_and_transaction(client, database, make_token, user_id):
+    cookie = {"token": make_token(user_id)}
+
+    response = client.post(
+        "/api/funds/transactions",
+        json={"kind": "DEPOSIT", "amount": 5000, "method": "UPI"},
+        cookies=cookie,
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body) == {"funds", "transaction"}
+    # `funds` is the raw document, without the derived keys GET adds.
+    assert set(body["funds"]) == {"_id", "user", "available", "createdAt", "updatedAt", "__v"}
+    assert body["funds"]["user"] == str(user_id)
+    assert body["funds"]["available"] == 5000
+    assert body["transaction"]["kind"] == "DEPOSIT"
+    assert body["transaction"]["method"] == "UPI"
+    assert body["transaction"]["amount"] == 5000
+    assert body["transaction"]["symbol"] == ""
+    assert body["transaction"]["status"] == "COMPLETED"
+
+    # The upserted row is visible through the funds read.
+    assert client.get("/api/funds", cookies=cookie).json()["available"] == 5000
+
+
+def test_withdrawal_guards_the_balance(client, database, make_token, user_id):
+    cookie = {"token": make_token(user_id)}
+    database["funds"].insert_one(_funds_doc(user_id, 1000))
+
+    ok = client.post(
+        "/api/funds/transactions",
+        json={"kind": "WITHDRAWAL", "amount": "400"},
+        cookies=cookie,
+    )
+    assert ok.status_code == 201
+    assert ok.json()["funds"]["available"] == 600
+    assert ok.json()["transaction"]["amount"] == -400
+    assert ok.json()["transaction"]["method"] == "Bank withdrawal"
+
+    too_much = client.post(
+        "/api/funds/transactions",
+        json={"kind": "WITHDRAWAL", "amount": 10000},
+        cookies=cookie,
+    )
+    assert too_much.status_code == 400
+    assert too_much.json() == {"message": "Amount exceeds available balance"}
+    assert database["funds"].find_one({"user": user_id})["available"] == 600
+
+
+def test_transaction_validation_and_default_method(client, make_token, user_id):
+    cookie = {"token": make_token(user_id)}
+
+    for payload in [
+        {"kind": "FEE", "amount": 100},
+        {"kind": "DEPOSIT", "amount": 0},
+        {"kind": "DEPOSIT", "amount": "abc"},
+    ]:
+        response = client.post("/api/funds/transactions", json=payload, cookies=cookie)
+        assert response.status_code == 400
+        assert response.json() == {"message": "Invalid transaction"}
+
+    # An unknown method label falls back to the generic text.
+    fallback = client.post(
+        "/api/funds/transactions",
+        json={"kind": "DEPOSIT", "amount": 100, "method": "Crypto"},
+        cookies=cookie,
+    )
+    assert fallback.json()["transaction"]["method"] == "Bank transfer"
