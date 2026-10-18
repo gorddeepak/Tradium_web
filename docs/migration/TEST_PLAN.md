@@ -39,7 +39,7 @@ comparing Express responses to FastAPI responses directly, using the same seeded
 
 | Item | Needed for | Status |
 |---|---|---|
-| Isolated MongoDB (local or scratch), never production | every parity test | **PLANNED** |
+| Isolated MongoDB (local or scratch), never production | every parity test | **AVAILABLE** — local `mongod` on 127.0.0.1:27017; `tradium_fastapi_phase1_test` used and dropped |
 | Seeded demo data: ≥2 users, holdings, positions, orders in each status, funds, transactions, snapshots | most tests | **PLANNED** |
 | Express reference running on a spare port, pointed at the scratch DB | parity tests | **PLANNED** |
 | FastAPI app running against the same scratch DB | Phase 1+ | **PLANNED** |
@@ -49,6 +49,35 @@ comparing Express responses to FastAPI responses directly, using the same seeded
 **Fixture policy:** create fixtures only in an isolated database with safe demo configuration. If that
 is not available, mark dependent tests `BLOCKED` and record the prerequisite. Never extract production
 data as a fixture.
+
+---
+
+## 1A. Phase 1a results — `GET /api/holdings`
+
+Executed 2026-10-18. Fast suite uses `mongomock`; the integration test uses a real local MongoDB at
+`mongodb://127.0.0.1:27017/tradium_fastapi_phase1_test`, refuses any database name not ending in
+`_test`, and drops it afterwards.
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1A.1 | App starts with an injected database | health 200, no real connection | **PASSED** | `test_health.py::test_app_starts_when_database_is_injected` |
+| 1A.2 | `/api/health` | 200 `{ ok: true }`, no auth | **PASSED** | `test_health.py::test_health_returns_ok_without_auth` |
+| 1A.3 | Unknown route | 404 `{ message: "Route not found" }` | **PASSED** | `test_health.py::test_unknown_route_matches_express_404_shape` |
+| 1A.4 | Missing cookie | 401 `{ message: "Not authenticated" }` | **PASSED** | `test_auth.py` (6 tests: missing, empty, wrong secret, expired, malformed, no `id`) |
+| 1A.5 | Invalid / expired token | 401 `{ message: "Invalid or expired token" }` | **PASSED** | same file |
+| 1A.6 | Valid token, no rows | 200 `[]` | **PASSED** | `test_auth.py`, `test_holdings.py` |
+| 1A.7 | User isolation | only the cookie user's rows | **PASSED** | `test_holdings.py::test_returns_only_the_cookie_users_holdings` |
+| 1A.8 | Caller-supplied `user`/`userId` ignored | token decides | **PASSED** | `test_holdings.py::test_user_id_from_query_or_body_is_ignored` |
+| 1A.9 | Response key set | same 13 keys as Mongoose, incl. `__v` | **PASSED** | `test_holdings.py::test_response_shape_matches_mongoose_serialization` |
+| 1A.10 | ObjectId → 24-char hex | no wrapper text | **PASSED** | `test_holdings.py`, `test_serialization.py` |
+| 1A.11 | Date → `YYYY-MM-DDTHH:MM:SS.mmmZ` UTC | exactly 3 decimals | **PASSED** | `test_serialization.py` (6 cases incl. IST input) |
+| 1A.12 | Malformed ObjectId claim | 500 `{ message: "Something went wrong" }` | **PASSED** | `test_holdings.py::test_malformed_user_id_in_token_returns_server_error` |
+| 1A.13 | Database failure | 500, generic message, no leak | **PASSED** | `test_database_errors.py` |
+| 1A.14 | Real MongoDB read | same shape/timestamps | **PASSED** | `test_mongo_integration.py` (1 passed) |
+| 2A.1 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | Express entry point starts cron jobs; a safe reference harness does not exist yet |
+| 2A.2 | `Set-Cookie` comparison from login | same attributes | **BLOCKED** | login route is not in Phase 1a |
+
+Suite totals: **23 passed, 1 skipped** without `TEST_MONGO_URL`; **24 passed** with it.
 
 ---
 

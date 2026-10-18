@@ -1,8 +1,9 @@
 # Migration Status
 
-**Last updated:** 2026-10-18 (Phase 0)
-**Current phase:** **Phase 0 — repository isolation and planning**
-**Application code modified:** **No.** The FastAPI implementation has not been started.
+**Last updated:** 2026-10-18 (Phase 1a)
+**Current phase:** **Phase 1a — FastAPI foundation and `GET /api/holdings`**
+**Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
+and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -12,11 +13,11 @@
 
 | Item | Value |
 |---|---|
-| Phase | 0 — isolation and planning |
-| FastAPI application | **not started** |
+| Phase | 1a — foundation and first read endpoint |
+| FastAPI application | **started** — `api/main.py`, config, db, auth, serialization, health, holdings |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | unchanged |
-| MongoDB | unchanged; not contacted |
+| MongoDB | app DB untouched; tests used mongomock and a dropped scratch database |
 | New repository path | `D:\deepak\coding\Full Stack Dev\Tradium-FastAPI` |
 | Intended GitHub repository | `tradium-fastapi` (private) |
 | GitHub push | **BLOCKED** — no `gh` CLI and no authenticated remote |
@@ -24,7 +25,7 @@
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **none in this repository** (nothing has been run; see §5) |
+| Tests executed | **23 passed, 1 skipped** (default); **24 passed** with `TEST_MONGO_URL` — see §5 |
 
 ---
 
@@ -86,6 +87,33 @@ No existing source file was edited, added to, or removed beyond these documents.
 
 ---
 
+## 3A. Phase 1a — files created
+
+New files only; nothing below `server/` or `src/` was edited.
+
+| File | Purpose |
+|---|---|
+| `api/main.py` | app factory, lifespan, Express-shaped error envelope, routers |
+| `api/config.py` | env-backed settings (`MONGO_URL`, `JWT_SECRET`, `HOST`, `PORT`) |
+| `api/db.py` | one PyMongo client, database injection for tests |
+| `api/auth.py` | `token` cookie → `jwt.decode` (HS256) → user id |
+| `api/serialization.py` | ObjectId → hex, datetime → `...mmmZ` UTC |
+| `api/routes/health.py` | `GET /api/health` → `{ ok: true }` |
+| `api/routes/holdings.py` | `GET /api/holdings`, filtered by the token's user |
+| `api/requirements.txt`, `api/requirements-dev.txt` | runtime and test dependencies |
+| `api/.env.example` | required variables, with a dedicated-test-DB note |
+| `api/tests/` | `conftest.py` plus 5 test modules |
+| `pytest.ini` | `testpaths = api/tests`, `pythonpath = .` |
+
+Dependencies: `fastapi 0.144.0`, `uvicorn 0.54.0`, `pymongo 4.19.0`, `PyJWT 2.15.1`,
+`python-dotenv 1.2.4`; dev: `pytest 9.1.1`, `httpx 0.28.1`, `mongomock 4.3.0`.
+Installed in a repository-local `.venv` (gitignored), not system-wide.
+
+Deliberately absent: orders, funds, jobs, Yahoo/market data, Nova, any second route, any frontend
+change, any deployment change. No scheduled job was enabled.
+
+---
+
 ## 4. Known issues recorded (not fixed)
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. None has been
@@ -118,8 +146,11 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | New repo `git remote -v` | **empty** |
 | Pre-commit secret scan of all 9 staged files | no credential patterns matched |
 | Staged file set | 9 Markdown files only; no application file touched (2,683 insertions, 0 deletions) |
-| Application tests | **not run — none exist** |
-| Lint / build in the new repo | **not run** (no dependencies installed) |
+| Application tests | **run:** 23 passed, 1 skipped; 24 passed with `TEST_MONGO_URL` |
+| Lint / build in the new repo | **not applicable** — no frontend dependencies installed |
+| Repository root / branch / remotes before writing | verified: `Tradium-FastAPI`, `migration/fastapi-backend`, **no remote** |
+| Scratch database after the integration run | absent from `list_database_names()`; `zerodha` untouched |
+| Express reference harness | **not run** — `server/index.js` starts cron jobs on connect |
 
 ---
 
@@ -180,9 +211,13 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 8. Explicitly not approved / not done
 
-- No FastAPI application, routes, models, or dependency installation.
-- No change to `server/`, `src/`, or any other application file.
-- No database migration, schema change, or data access.
+- No route beyond `GET /api/holdings` and `GET /api/health`.
+- No orders, execution, funds, history, instruments, or market-data route.
+- No scheduled or background job of any kind; no Yahoo Finance call.
+- No Nova / Gemini / PydanticAI work.
+- No frontend change and no frontend-to-FastAPI connection.
+- No change to `server/`, `src/`, or any other original application file.
+- No database migration, schema change, or write to the application database.
 - No Render service created, modified, or deployed.
 - No change to the original repository's history, branch, remotes, or working tree.
 - No merge of `migration/fastapi-backend` into `main`.
@@ -192,8 +227,12 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Awaiting review of Phase 0.** After approval:
+**Awaiting review of Phase 1a.** Nothing further will be implemented without approval.
 
-1. Resolve the GitHub blocker and push both branches (§6.1).
-2. Begin Phase 1 by creating the FastAPI skeleton, settings, Mongo access, and a single read route
-   (`GET /api/holdings`) with a parity test against the Express reference on an isolated database.
+Proposed Phase 1b, one route at a time, each with tests and a documented parity status:
+
+1. Confirm the parity gap that cannot be closed by the unit suite — add a safe Express reference
+   harness that boots the router without the cron jobs, then compare `GET /api/holdings` bodies on the
+   scratch database.
+2. Port `GET /api/orders` (authenticated read) and `GET /api/watchlist` next; both are read-only and
+   need no provider calls.
