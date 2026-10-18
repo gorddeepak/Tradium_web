@@ -144,3 +144,46 @@ def test_orders_and_watchlist_read_real_mongo_documents(scratch_database, monkey
     assert [item["symbol"] for item in watchlist.json()] == ["INFY"]
     assert watchlist.json()[0]["createdAt"] == "2026-09-01T04:15:30.123Z"
 
+
+def test_positions_and_funds_read_real_mongo_documents(scratch_database, monkeypatch):
+    # Confirms the collections the positions/funds routes use exist in a real
+    # MongoDB, and that the derived funds maths reads real BSON documents.
+    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+
+    user_id = ObjectId()
+    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+
+    scratch_database["positions"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
+         "exchange": "NSE", "side": "LONG", "product": "MIS", "qty": 5, "entry": 1500.0,
+         "ltp": 1520.0, "createdAt": created, "updatedAt": created, "__v": 0}
+    )
+    scratch_database["funds"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "available": 50000,
+         "createdAt": created, "updatedAt": created, "__v": 0}
+    )
+    scratch_database["transactions"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "kind": "SETTLEMENT",
+         "method": "INFY MIS square-off", "amount": -250.5, "symbol": "INFY",
+         "status": "COMPLETED", "createdAt": created, "updatedAt": created, "__v": 0}
+    )
+
+    token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
+    app = create_app(database=scratch_database)
+
+    with TestClient(app) as client:
+        positions = client.get("/api/positions", cookies={"token": token})
+        funds = client.get("/api/funds", cookies={"token": token})
+
+    assert positions.status_code == 200
+    assert [position["symbol"] for position in positions.json()] == ["INFY"]
+    assert positions.json()[0]["createdAt"] == "2026-09-01T04:15:30.123Z"
+
+    assert funds.status_code == 200
+    body = funds.json()
+    assert body["available"] == 50000
+    assert body["misMargin"] == 7500.0  # 1500 * 5
+    assert body["usedMargin"] == 7500.0  # no open orders
+    assert body["realizedPnl"] == -250.5
+
+

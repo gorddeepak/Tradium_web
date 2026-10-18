@@ -1,7 +1,7 @@
 # Migration Status
 
-**Last updated:** 2026-10-18 (Phase 1b)
-**Current phase:** **Phase 1b — read-only routes: `GET /api/orders` and `GET /api/watchlist`**
+**Last updated:** 2026-10-18 (Phase 1c)
+**Current phase:** **Phase 1c — local development database + `GET /api/positions` and `GET /api/funds`**
 **Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
 and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
@@ -13,11 +13,13 @@ and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 1b — orders and watchlist read endpoints |
-| FastAPI application | **started** — foundation plus health, holdings, orders, watchlist |
+| Phase | 1c — local dev database and the positions/funds reads |
+| FastAPI application | **started** — health, holdings, orders, watchlist, positions, funds |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | unchanged |
-| MongoDB | app DB untouched; tests used mongomock and a dropped scratch database |
+| Development MongoDB | **local** `mongodb://127.0.0.1:27017/tradium_fastapi_dev` via gitignored `api/.env` |
+| Test MongoDB | in-memory `mongomock` plus the guarded `*_test` scratch DB; `MONGO_URL` is never used |
+| Production MongoDB | never contacted; no data copied |
 | New repository path | `D:\deepak\coding\Full Stack Dev\Tradium-FastAPI` |
 | Intended GitHub repository | `tradium-fastapi` (private) |
 | GitHub push | **BLOCKED** — no `gh` CLI and no authenticated remote |
@@ -25,7 +27,7 @@ and the original repository are untouched.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **30 passed, 2 skipped** (default); **32 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **35 passed, 3 skipped** (default); **38 passed** with `TEST_MONGO_URL` — see §5 |
 
 ---
 
@@ -135,6 +137,47 @@ Nova, and any frontend or deployment change.
 
 ---
 
+## 3C. Phase 1c — local development database and positions/funds reads
+
+### Development database
+
+| Item | Value |
+|---|---|
+| Development connection string | `mongodb://127.0.0.1:27017/tradium_fastapi_dev` |
+| Effective database name | **`tradium_fastapi_dev`** |
+| Where it is configured | gitignored `api/.env` (`MONGO_URL`), loaded explicitly by `api/config.py` |
+| Connection mode | local `mongod` on `127.0.0.1:27017` |
+| Test database | `mongomock` (fast suite) and `tradium_fastapi_phase1_test` (guarded integration suite) |
+
+`api/config.py` now loads `api/.env` by absolute path instead of relying on python-dotenv's
+caller-directory search, which silently searched the working directory in some launch modes.
+`override=False` keeps real environment variables (a deployment's) ahead of the file. There is no
+Atlas or other remote fallback: without `MONGO_URL` the app still raises `RuntimeError`.
+
+The URI carries the database name, so there is no separate database-name setting to adapt.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `api/routes/positions.py` | `GET /api/positions`: `find({user})`, natural order |
+| `api/routes/funds.py` | `GET /api/funds`: `derivedFunds` port (creates an empty funds row on first read) |
+| `api/tests/test_positions.py` | isolation, 13-key shape, empty list |
+| `api/tests/test_funds.py` | derived maths, first-read creation, isolation |
+| `api/config.py` (edited) | explicit `api/.env` load |
+| `api/.env.example` (edited) | documents the local dev URI and the test-database rule |
+| `api/main.py` (edited) | registers the two new routers |
+| `api/tests/conftest.py` (edited) | adds `positions_factory` |
+| `api/tests/test_mongo_integration.py` (edited) | real-MongoDB read for positions + funds |
+
+Collections queried: `positions`, `funds`, `orders`, `transactions` (funds reads four). All were
+already present in the local collection metadata.
+
+Not ported: `GET /api/funds/transactions` (the other funds read), all write routes, jobs, market
+data, and Nova.
+
+---
+
 ## 4. Known issues recorded (not fixed)
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. None has been
@@ -167,7 +210,10 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | New repo `git remote -v` | **empty** |
 | Pre-commit secret scan of all 9 staged files | no credential patterns matched |
 | Staged file set | 9 Markdown files only; no application file touched (2,683 insertions, 0 deletions) |
-| Application tests | **run:** 30 passed, 2 skipped; 32 passed with `TEST_MONGO_URL` |
+| Application tests | **run:** 35 passed, 3 skipped; 38 passed with `TEST_MONGO_URL` |
+| Local `mongod` reachability | **verified** — admin `ping` ok on `127.0.0.1:27017` |
+| Effective dev database name | **verified** — `tradium_fastapi_dev`, from a normal `create_app()` startup |
+| `zerodha` database | untouched — same 9 collections, no writes |
 | Lint / build in the new repo | **not applicable** — no frontend dependencies installed |
 | Repository root / branch / remotes before writing | verified: `Tradium-FastAPI`, `migration/fastapi-backend`, **no remote** |
 | Scratch database after the integration run | absent from `list_database_names()`; `zerodha` untouched |
@@ -219,7 +265,8 @@ Phase 0 blocker.
 
 From `ARCHITECTURE_DECISIONS.md`:
 
-1. Exact MongoDB collection names (must be confirmed against an isolated database).
+1. ~~Exact MongoDB collection names~~ — **resolved**: confirmed read-only against the local database
+   metadata (`orders`, `watchlists`, `positions`, `funds`, `transactions`, `holdings`, …).
 2. Whether PydanticAI's `VercelAIAdapter` matches `@ai-sdk/react` 4.0.61.
 3. Whether Yahoo streaming delivers messages for exact `.NS` symbols.
 4. Which candle intervals/ranges `yfinance` returns identically.
@@ -232,10 +279,11 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 8. Explicitly not approved / not done
 
-- No route beyond the four read endpoints: `GET /api/health`, `GET /api/holdings`,
-  `GET /api/orders`, `GET /api/watchlist`.
-- No write or execution route (no POST/DELETE orders or watchlist), no funds, history, instruments,
-  or market-data route.
+- No route beyond the six read endpoints: `GET /api/health`, `GET /api/holdings`, `GET /api/orders`,
+  `GET /api/watchlist`, `GET /api/positions`, `GET /api/funds`.
+- No write or execution route (no POST/DELETE orders or watchlist, no `POST /api/funds/transactions`),
+  no `GET /api/funds/transactions`, history, instruments, or market-data route.
+- No write to the `zerodha` database and no production data copied into `tradium_fastapi_dev`.
 - No scheduled or background job of any kind; no Yahoo Finance call.
 - No Nova / Gemini / PydanticAI work.
 - No frontend change and no frontend-to-FastAPI connection.
@@ -250,12 +298,13 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 1b complete (orders + watchlist reads). Awaiting review.** Nothing further will be
-implemented without approval.
+**Phase 1c complete (local dev DB, positions + funds reads). Awaiting review.** Nothing further will
+be implemented without approval.
 
 Open items:
 
-1. `GET /api/orders` and `GET /api/watchlist` are implemented and tested in isolation; a live
-   Express-vs-FastAPI comparison is still **PENDING** (no safe reference harness exists).
-2. Recommended next: port `GET /api/positions` (read-only, same shape as holdings/orders), then move
-   to the funds read route. Write and execution routes stay out until separately approved.
+1. All six read routes are tested in isolation; a live Express-vs-FastAPI comparison is still
+   **PENDING** (no safe reference harness exists).
+2. Recommended next: port `GET /api/funds/transactions` (read-only, newest-first), then the remaining
+   read routes (`GET /api/portfolio/history`, instruments, market). Write and execution routes stay
+   out until separately approved.

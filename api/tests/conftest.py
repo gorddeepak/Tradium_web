@@ -144,3 +144,30 @@ def watchlist_factory():
         return document
 
     return _make
+
+
+@pytest.fixture
+def positions_factory():
+    """Build a position document shaped like the Mongoose model."""
+    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+
+    def _make(user, **overrides):
+        document = {
+            "_id": ObjectId(),
+            "user": user,
+            "symbol": "INFY",
+            "name": "Infosys",
+            "exchange": "NSE",
+            "side": "LONG",
+            "product": "MIS",
+            "qty": 5,
+            "entry": 1500.0,
+            "ltp": 1520.0,
+            "createdAt": created,
+            "updatedAt": created,
+            "__v": 0,
+        }
+        document.update(overrides)
+        return document
+
+    return _make

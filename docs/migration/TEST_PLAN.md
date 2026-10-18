@@ -109,6 +109,40 @@ Not verified for these routes: no live Express comparison; `POST`/`DELETE` behav
 
 ---
 
+## 1C. Phase 1c results — local dev database, `GET /api/positions`, `GET /api/funds`
+
+Executed 2026-10-18.
+
+### Development database configuration
+
+| # | Check | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1C.0a | `api/.env` load | `MONGO_URL` resolves at import | **PASSED** | `import api.config` → db name `tradium_fastapi_dev` |
+| 1C.0b | Local `mongod` reachable | admin `ping` ok | **PASSED** | `db.connect()` then `admin.command("ping")` |
+| 1C.0c | Normal startup selects the dev DB | `app.state.db.name == "tradium_fastapi_dev"` | **PASSED** | `create_app()` + lifespan, no injected database |
+| 1C.0d | Server is local | host `127.0.0.1:27017` | **PASSED** | `client.address` |
+| 1C.0e | Test DB stays separate | `_test`-suffixed guard intact | **PASSED** | integration fixture refuses non-`_test` names |
+| 1C.0f | `zerodha` untouched | same 9 collections | **PASSED** | `list_collection_names()` |
+
+### Endpoints
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1C.1 | `GET /api/positions` returns only the cookie user's rows | other user's rows absent | **PASSED** | `test_positions.py::test_returns_only_the_cookie_users_positions` |
+| 1C.2 | Position response key set | the 13 Mongoose keys incl. `__v` | **PASSED** | `test_positions.py::test_response_shape_matches_mongoose_serialization` |
+| 1C.3 | No positions | 200 `[]` | **PASSED** | `test_positions.py::test_empty_positions_returns_empty_list` |
+| 1C.4 | `GET /api/funds` derived maths | `usedMargin = blockedInOrders + misMargin`; correct `realizedPnl` | **PASSED** | `test_funds.py::test_derived_margins_and_realized_pnl` |
+| 1C.5 | First read creates an empty funds row | `available: 0`, row persisted | **PASSED** | `test_funds.py::test_creates_an_empty_funds_row_on_first_read` |
+| 1C.6 | Real MongoDB read of positions + funds | correct rows, BSON dates, maths | **PASSED** | `test_mongo_integration.py::test_positions_and_funds_read_real_mongo_documents` |
+| 2C.1 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | no safe reference harness |
+
+Suite totals: **35 passed, 3 skipped** without `TEST_MONGO_URL`; **38 passed** with it.
+
+Not verified: no live Express comparison; `GET /api/funds/transactions` and all write routes are not
+ported; nothing deployed.
+
+---
+
 ## 2. API contract parity
 
 Method: issue the same request to Express and FastAPI with equivalent cookies and data, then compare

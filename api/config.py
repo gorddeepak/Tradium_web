@@ -6,11 +6,15 @@ dotenv and exits when MONGO_URL is missing.
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load api/.env when running locally (gitignored, same idea as server/.env).
-load_dotenv()
+# Load api/.env explicitly, whatever the working directory. Without a path,
+# python-dotenv searches from the caller's directory and falls back to the
+# cwd in some launch modes, which is easy to get wrong. override=False keeps
+# real environment variables (e.g. a deployment's) ahead of this file.
+load_dotenv(Path(__file__).with_name(".env"))
 
 
 @dataclass(frozen=True)
