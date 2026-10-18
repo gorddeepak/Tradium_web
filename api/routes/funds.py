@@ -1,14 +1,15 @@
-"""Port of the read route in server/routes/fundsRoutes.js.
+"""Port of the read routes in server/routes/fundsRoutes.js.
 
-The Express route is:
-    router.get("/", protect, async (req, res) => {
-      res.json(await derivedFunds(req.userId));
-    });
+The Express routes are:
+    router.get("/", protect, ...)              // GET /api/funds
+    router.get("/transactions", protect, ...)  // GET /api/funds/transactions
 
-`derivedFunds` upserts a funds row with `available: 0` when the user has
-none, then computes the derived keys the frontend reads. `available` is free
-cash; `usedMargin` is derived, never stored. The other funds read
-(`GET /api/funds/transactions`) is not ported yet.
+`GET /api/funds` mirrors `derivedFunds`: it upserts a funds row with
+`available: 0` when the user has none, then computes the derived keys the
+frontend reads. `available` is free cash; `usedMargin` is derived, never
+stored. `GET /api/funds/transactions` is a plain newest-first read of the
+`transactions` collection. The write route (`POST /api/funds/transactions`)
+is not ported.
 """
 
 from datetime import datetime, timezone
@@ -65,3 +66,15 @@ def get_funds(
     result["misMargin"] = mis_margin
     result["realizedPnl"] = realized_pnl
     return to_json_value(result)
+
+
+@router.get("/api/funds/transactions")
+def list_transactions(
+    user_id: str = Depends(require_user),
+    db: Database = Depends(get_database),
+):
+    # The user field is stored as an ObjectId, so cast the token claim.
+    user = ObjectId(user_id)
+    # Express sorts newest first; the ledger renders in this order.
+    transactions = list(db["transactions"].find({"user": user}).sort("createdAt", -1))
+    return [to_json_value(transaction) for transaction in transactions]

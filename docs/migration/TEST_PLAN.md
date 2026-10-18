@@ -10,6 +10,7 @@
 | `PASSED` | Executed and observed correct |
 | `FAILED` | Executed and observed incorrect |
 | `BLOCKED` | Cannot run; prerequisite missing |
+| `DEFERRED` | Intentionally out of scope this phase; a dependency (e.g. a market-data provider) is missing |
 
 **Rules**
 
@@ -143,6 +144,52 @@ ported; nothing deployed.
 
 ---
 
+## 1D. Phase 1d results — transactions, portfolio history, instrument search, market overview
+
+Executed 2026-10-18. Fast suite uses `mongomock`; the integration test reuses the guarded scratch
+database (`tradium_fastapi_phase1_test`, name must end in `_test`, dropped afterwards).
+
+### Funds transactions
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1D.1 | `GET /api/funds/transactions` returns only the cookie user's rows | other user's rows absent | **PASSED** | `test_funds.py::test_transactions_are_newest_first_and_user_scoped` |
+| 1D.2 | Transactions newest first | `createdAt` descending | **PASSED** | same test |
+| 1D.3 | Transaction shape and empty list | 10 Mongoose keys incl. `__v`; `[]` when none | **PASSED** | `test_funds.py::test_transactions_shape_and_empty` |
+
+### Portfolio history
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1D.4 | No snapshots | today's live point only (holdings + MIS) | **PASSED** | `test_portfolio.py::test_live_point_only_when_no_snapshots` |
+| 1D.5 | Snapshots ascending, legacy rows | `label` `YYYY-MM-DD`; `invested: null` for pre-`invested` rows | **PASSED** | `test_portfolio.py::test_snapshots_ascending_with_null_invested_for_legacy_rows` |
+| 1D.6 | Duplicate today point | overwritten, not duplicated | **PASSED** | `test_portfolio.py::test_todays_snapshot_is_overwritten_not_duplicated` |
+| 1D.7 | Range fallbacks | unknown range behaves as 30 days | **PASSED** | `test_portfolio.py::test_unknown_range_falls_back_to_thirty_days` |
+
+### Instruments and market (cache-backed)
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1D.8 | Search matches symbol or name | case-insensitive; renamed keys `price`/`changePct` | **PASSED** | `test_instruments.py::test_matches_symbol_or_name_case_insensitively`, `::test_renames_fields_for_the_client` |
+| 1D.9 | Search regex characters | treated literally | **PASSED** | `test_instruments.py::test_limits_to_ten_and_treats_regex_characters_literally` |
+| 1D.10 | Search empty / whitespace `q` | `[]` | **PASSED** | `test_instruments.py::test_empty_query_returns_empty_list` |
+| 1D.11 | Search cap | at most 10 rows | **PASSED** | `test_instruments.py::test_limits_to_ten_and_treats_regex_characters_literally` |
+| 1D.12 | Overview cold cache | `asOf: null`, empty arrays | **PASSED** | `test_market.py::test_cold_cache_returns_nulls_and_empty_lists` |
+| 1D.13 | Overview index ordering | order from `data/nifty50.js`; `stocks` only `kind: "stock"` | **PASSED** | `test_market.py::test_indices_follow_seed_order_and_stocks_are_split_out` |
+| 1D.14 | Overview `asOf` + row keys | freshest `updatedAt`; Mongoose key set preserved | **PASSED** | `test_market.py::test_as_of_is_the_freshest_row_and_rows_keep_mongoose_keys` |
+| 1D.15 | Real MongoDB read | `portfoliosnapshots`, `marketquotes`, `transactions` resolve | **PASSED** | `test_mongo_integration.py::test_portfolio_market_search_and_transactions_read_real_mongo_documents` |
+| 1D.16 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | no safe reference harness |
+| 1D.17 | Live-Yahoo instrument routes (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`) | mapped Yahoo data | **DEFERRED** | market-data phase; no provider integration approved |
+
+Suite totals: **48 passed, 4 skipped** without `TEST_MONGO_URL`; **52 passed** with it.
+
+Note: `instruments/search` and `market/overview` read only the `marketquotes` cache. The cache is
+populated by a sync job that this phase does not port, so against the live dev database these routes
+return empty results until the market-data phase exists. Route behaviour and shape are verified with
+seeded fixtures.
+
+---
+
 ## 2. API contract parity
 
 Method: issue the same request to Express and FastAPI with equivalent cookies and data, then compare
@@ -209,7 +256,7 @@ Two users, A and B, each with data.
 | 5.1 | New Python-written document | includes `createdAt`/`updatedAt`/`__v` like Mongoose's | PLANNED |
 | 5.2 | Mixed old/new documents | both serialise without errors | PLANNED |
 | 5.3 | `PortfolioSnapshot.date` | stored as the IST day at UTC midnight | PLANNED |
-| 5.4 | History labels | `YYYY-MM-DD` matching the Express output for the same rows | PLANNED |
+| 5.4 | History labels | `YYYY-MM-DD` `label` for the same rows | **PASSED** (format only; live Express comparison PENDING — §1D.16) — `test_portfolio.py` |
 | 5.5 | Sorting | numeric/date ordering matches | PLANNED |
 
 ---
@@ -282,11 +329,11 @@ Two users, A and B, each with data.
 | # | Test | Expected | Status |
 |---|---|---|---|
 | 6.5.1 | Portfolio summary math | matches `portfolioMath` for the same data | PLANNED |
-| 6.5.2 | MIS components | value and invested match | PLANNED |
-| 6.5.3 | History with no snapshots | returns today's live point only | PLANNED |
-| 6.5.4 | History with legacy rows | `invested: null` and no zero drop | PLANNED |
-| 6.5.5 | History range fallbacks | unknown range behaves as 30 days | PLANNED |
-| 6.5.6 | Duplicate today point | overwritten, not duplicated | PLANNED |
+| 6.5.2 | MIS components | value and invested match | **PASSED** — `test_portfolio.py::test_live_point_only_when_no_snapshots` |
+| 6.5.3 | History with no snapshots | returns today's live point only | **PASSED** — same test |
+| 6.5.4 | History with legacy rows | `invested: null` and no zero drop | **PASSED** — `test_portfolio.py::test_snapshots_ascending_with_null_invested_for_legacy_rows` |
+| 6.5.5 | History range fallbacks | unknown range behaves as 30 days | **PASSED** — `test_portfolio.py::test_unknown_range_falls_back_to_thirty_days` |
+| 6.5.6 | Duplicate today point | overwritten, not duplicated | **PASSED** — `test_portfolio.py::test_todays_snapshot_is_overwritten_not_duplicated` |
 
 ---
 
@@ -294,17 +341,17 @@ Two users, A and B, each with data.
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 7.1 | Search matches symbol or name | case-insensitive, max 10, correct renamed keys | PLANNED |
-| 7.2 | Search with regex characters | treated literally | PLANNED |
-| 7.3 | Search with empty `q` | `[]` | PLANNED |
-| 7.4 | Lookup valid | mapped fields, uppercase symbol | PLANNED |
-| 7.5 | Lookup invalid | 404 `"Instrument not found"` | PLANNED |
-| 7.6 | Detail fields | same keys and mapping as Express | PLANNED |
-| 7.7 | Candles, all ranges | key set and IST shift identical | PLANNED |
-| 7.8 | Candles provider failure | 404 `"Could not fetch candle data"` | PLANNED |
-| 7.9 | Overview with cold cache | `asOf: null`, empty arrays | PLANNED |
-| 7.10 | Overview index ordering | order from `data/nifty50.js` | PLANNED |
-| 7.11 | Overview cache integrity | `stocks` contains only `kind: "stock"` | PLANNED |
+| 7.1 | Search matches symbol or name | case-insensitive, max 10, correct renamed keys | **PASSED** — `test_instruments.py` |
+| 7.2 | Search with regex characters | treated literally | **PASSED** — `test_instruments.py::test_limits_to_ten_and_treats_regex_characters_literally` |
+| 7.3 | Search with empty `q` | `[]` | **PASSED** — `test_instruments.py::test_empty_query_returns_empty_list` |
+| 7.4 | Lookup valid | mapped fields, uppercase symbol | **DEFERRED** — needs a market-data provider |
+| 7.5 | Lookup invalid | 404 `"Instrument not found"` | **DEFERRED** — needs a market-data provider |
+| 7.6 | Detail fields | same keys and mapping as Express | **DEFERRED** — needs a market-data provider |
+| 7.7 | Candles, all ranges | key set and IST shift identical | **DEFERRED** — needs a market-data provider |
+| 7.8 | Candles provider failure | 404 `"Could not fetch candle data"` | **DEFERRED** — needs a market-data provider |
+| 7.9 | Overview with cold cache | `asOf: null`, empty arrays | **PASSED** — `test_market.py::test_cold_cache_returns_nulls_and_empty_lists` |
+| 7.10 | Overview index ordering | order from `data/nifty50.js` | **PASSED** — `test_market.py::test_indices_follow_seed_order_and_stocks_are_split_out` |
+| 7.11 | Overview cache integrity | `stocks` contains only `kind: "stock"` | **PASSED** — same test |
 
 ---
 

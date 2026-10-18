@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
-from .routes import funds, health, holdings, orders, positions, watchlist
+from .routes import funds, health, holdings, instruments, market, orders, portfolio, positions, watchlist
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,9 @@ def create_app(database=None) -> FastAPI:
     app.include_router(watchlist.router)
     app.include_router(positions.router)
     app.include_router(funds.router)
+    app.include_router(portfolio.router)
+    app.include_router(instruments.router)
+    app.include_router(market.router)
     return app
 
 

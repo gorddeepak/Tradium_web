@@ -171,3 +171,31 @@ def positions_factory():
         return document
 
     return _make
+
+
+@pytest.fixture
+def market_quote_factory():
+    """Build a market-quote cache document shaped like the Mongoose model."""
+    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+
+    def _make(symbol="INFY", **overrides):
+        document = {
+            "_id": ObjectId(),
+            "symbol": symbol,
+            "name": "Infosys",
+            "kind": "stock",
+            "ltp": 1500.0,
+            "dayChange": 12.0,
+            "dayChangePct": 0.8,
+            "prevClose": 1488.0,
+            "volume": 10000,
+            "marketCap": 0,
+            "sector": "",
+            "createdAt": created,
+            "updatedAt": created,
+            "__v": 0,
+        }
+        document.update(overrides)
+        return document
+
+    return _make

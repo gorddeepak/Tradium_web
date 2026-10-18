@@ -1,4 +1,5 @@
-"""Focused tests for GET /api/funds: derived keys, first-read creation, isolation.
+"""Focused tests for the funds reads: derived keys, first-read creation,
+isolation, and the transaction ledger.
 
 Authentication and database-failure behaviour are shared with the holdings
 suite and not repeated here.
@@ -22,16 +23,17 @@ def _funds_doc(user, available):
     }
 
 
-def _transaction_doc(user, kind, amount):
+def _transaction_doc(user, kind, amount, created=CREATED):
     return {
         "_id": ObjectId(),
         "user": user,
         "kind": kind,
         "method": "Bank transfer",
         "amount": amount,
+        "symbol": "",
         "status": "COMPLETED",
-        "createdAt": CREATED,
-        "updatedAt": CREATED,
+        "createdAt": created,
+        "updatedAt": created,
         "__v": 0,
     }
 
@@ -105,3 +107,48 @@ def test_creates_an_empty_funds_row_on_first_read(client, database, make_token, 
     assert body["realizedPnl"] == 0
     # Express upserts the row during the read, so it now exists.
     assert database["funds"].count_documents({"user": user_id}) == 1
+
+
+def test_transactions_are_newest_first_and_user_scoped(
+    client, database, make_token, user_id, other_user_id
+):
+    older = datetime(2026, 9, 1, 4, 0, 0, tzinfo=timezone.utc)
+    newer = datetime(2026, 9, 2, 4, 0, 0, tzinfo=timezone.utc)
+    database["transactions"].insert_many(
+        [
+            _transaction_doc(user_id, "DEPOSIT", 100.0, created=older),
+            _transaction_doc(user_id, "SETTLEMENT", -50.0, created=newer),
+            _transaction_doc(other_user_id, "DEPOSIT", 999.0, created=newer),
+        ]
+    )
+
+    response = client.get("/api/funds/transactions", cookies={"token": make_token(user_id)})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [transaction["kind"] for transaction in body] == ["SETTLEMENT", "DEPOSIT"]
+    assert all(transaction["user"] == str(user_id) for transaction in body)
+
+
+def test_transactions_shape_and_empty(client, database, make_token, user_id):
+    empty = client.get("/api/funds/transactions", cookies={"token": make_token(user_id)})
+    assert empty.status_code == 200
+    assert empty.json() == []
+
+    database["transactions"].insert_one(_transaction_doc(user_id, "DEPOSIT", 100.0))
+
+    body = client.get("/api/funds/transactions", cookies={"token": make_token(user_id)}).json()
+    assert len(body) == 1
+    assert set(body[0]) == {
+        "_id",
+        "user",
+        "kind",
+        "method",
+        "amount",
+        "symbol",
+        "status",
+        "createdAt",
+        "updatedAt",
+        "__v",
+    }
+    assert body[0]["createdAt"] == "2026-09-01T04:15:30.123Z"

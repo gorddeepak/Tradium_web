@@ -1,7 +1,7 @@
 # Migration Status
 
-**Last updated:** 2026-10-18 (Phase 1c)
-**Current phase:** **Phase 1c — local development database + `GET /api/positions` and `GET /api/funds`**
+**Last updated:** 2026-10-18 (Phase 1d)
+**Current phase:** **Phase 1d — remaining read endpoints: funds transactions, portfolio history, instrument search, market overview**
 **Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
 and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
@@ -13,8 +13,8 @@ and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 1c — local dev database and the positions/funds reads |
-| FastAPI application | **started** — health, holdings, orders, watchlist, positions, funds |
+| Phase | 1d — remaining read endpoints (transactions, portfolio history, instrument search, market overview) |
+| FastAPI application | **started** — health, holdings, orders, watchlist, positions, funds, funds/transactions, portfolio/history, instruments/search, market/overview |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | unchanged |
 | Development MongoDB | **local** `mongodb://127.0.0.1:27017/tradium_fastapi_dev` via gitignored `api/.env` |
@@ -27,7 +27,7 @@ and the original repository are untouched.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **35 passed, 3 skipped** (default); **38 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **48 passed, 4 skipped** (default); **52 passed** with `TEST_MONGO_URL` — see §5 |
 
 ---
 
@@ -173,8 +173,42 @@ The URI carries the database name, so there is no separate database-name setting
 Collections queried: `positions`, `funds`, `orders`, `transactions` (funds reads four). All were
 already present in the local collection metadata.
 
-Not ported: `GET /api/funds/transactions` (the other funds read), all write routes, jobs, market
-data, and Nova.
+Not ported at the time: `GET /api/funds/transactions` (the other funds read), all write routes, jobs,
+market data, and Nova. `GET /api/funds/transactions` was ported in Phase 1d (§3D).
+
+---
+
+## 3D. Phase 1d — remaining read endpoints
+
+All new code is under `api/`; `server/`, `src/`, and the original repository are untouched.
+
+| File | Purpose |
+|---|---|
+| `api/routes/funds.py` (edited) | adds `GET /api/funds/transactions`: `find({user}).sort({createdAt: -1})` |
+| `api/routes/portfolio.py` | `GET /api/portfolio/history`: snapshot window, IST labels, MIS live point |
+| `api/routes/instruments.py` | `GET /api/instruments/search`: regex over the local quote cache |
+| `api/routes/market.py` | `GET /api/market/overview`: cached indices + stocks + `asOf` |
+| `api/tests/test_funds.py` (edited) | transaction ordering, isolation, shape, empty list |
+| `api/tests/test_portfolio.py` | live point, ascending snapshots, legacy `invested: null`, today overwrite, range fallback |
+| `api/tests/test_instruments.py` | symbol/name match, renamed keys, empty query, limit 10 + literal regex |
+| `api/tests/test_market.py` | index order, cold cache, `asOf`, row key set |
+| `api/main.py` (edited) | registers the three new routers |
+| `api/tests/conftest.py` (edited) | adds `market_quote_factory` |
+| `api/tests/test_mongo_integration.py` (edited) | real-MongoDB read of `portfoliosnapshots`, `marketquotes`, `transactions` |
+
+Collections queried: `transactions`, `portfoliosnapshots`, `holdings`, `positions`, `marketquotes`.
+All were already present in the local collection metadata.
+
+**Decision (labels):** `GET /api/portfolio/history` formats its `label` field with the IST calendar
+day (`UTC+05:30`). The Express code used `toLocaleDateString("en-CA")`, i.e. the server's local zone;
+`API_CONTRACTS` §0.5 states business-day logic uses IST and the snapshot job stores IST days at UTC
+midnight. IST reproduces the Express output for the intended environment and is deterministic.
+
+**Deferred (not ported):** the live-Yahoo instrument routes `GET /api/instruments/lookup/:symbol`,
+`GET /api/instruments/:symbol`, and `GET /api/instruments/:symbol/candles`. They require a market-data
+provider (Yahoo Finance), which is a separate phase (see `MARKET_DATA_PLAN.md`). `GET /api/portfolio`
+also has no other read route — `/history` is the only one. Write routes, order execution, jobs, and
+Nova remain out of scope.
 
 ---
 
@@ -210,7 +244,7 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | New repo `git remote -v` | **empty** |
 | Pre-commit secret scan of all 9 staged files | no credential patterns matched |
 | Staged file set | 9 Markdown files only; no application file touched (2,683 insertions, 0 deletions) |
-| Application tests | **run:** 35 passed, 3 skipped; 38 passed with `TEST_MONGO_URL` |
+| Application tests | **run:** 48 passed, 4 skipped; 52 passed with `TEST_MONGO_URL` |
 | Local `mongod` reachability | **verified** — admin `ping` ok on `127.0.0.1:27017` |
 | Effective dev database name | **verified** — `tradium_fastapi_dev`, from a normal `create_app()` startup |
 | `zerodha` database | untouched — same 9 collections, no writes |
@@ -279,10 +313,12 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 8. Explicitly not approved / not done
 
-- No route beyond the six read endpoints: `GET /api/health`, `GET /api/holdings`, `GET /api/orders`,
-  `GET /api/watchlist`, `GET /api/positions`, `GET /api/funds`.
-- No write or execution route (no POST/DELETE orders or watchlist, no `POST /api/funds/transactions`),
-  no `GET /api/funds/transactions`, history, instruments, or market-data route.
+- No route beyond the ten read endpoints: `GET /api/health`, `GET /api/holdings`, `GET /api/orders`,
+  `GET /api/watchlist`, `GET /api/positions`, `GET /api/funds`, `GET /api/funds/transactions`,
+  `GET /api/portfolio/history`, `GET /api/instruments/search`, `GET /api/market/overview`.
+- No write or execution route (no POST/DELETE orders or watchlist, no `POST /api/funds/transactions`);
+  no live-Yahoo instrument route (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`), which is deferred
+  to the market-data phase.
 - No write to the `zerodha` database and no production data copied into `tradium_fastapi_dev`.
 - No scheduled or background job of any kind; no Yahoo Finance call.
 - No Nova / Gemini / PydanticAI work.
@@ -298,13 +334,15 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 1c complete (local dev DB, positions + funds reads). Awaiting review.** Nothing further will
-be implemented without approval.
+**Phase 1d complete (transactions, portfolio history, instrument search, market overview). Awaiting
+review.** Nothing further will be implemented without approval.
 
 Open items:
 
-1. All six read routes are tested in isolation; a live Express-vs-FastAPI comparison is still
-   **PENDING** (no safe reference harness exists).
-2. Recommended next: port `GET /api/funds/transactions` (read-only, newest-first), then the remaining
-   read routes (`GET /api/portfolio/history`, instruments, market). Write and execution routes stay
-   out until separately approved.
+1. Ten read routes are tested in isolation; a live Express-vs-FastAPI comparison is still
+   **PENDING** (no safe reference harness exists; `server/index.js` starts cron jobs on connect).
+2. The three live-Yahoo instrument routes remain **DEFERRED** to the market-data phase.
+3. Recommended next: an isolated Express reference harness to close the `PENDING` parity rows, then
+   the write/execution routes once separately approved. The `marketquotes` cache only holds data when
+   a sync job populates it, so `instruments/search` and `market/overview` will return empty results
+   until that phase exists — the routes themselves are complete and tested.

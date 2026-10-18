@@ -187,3 +187,65 @@ def test_positions_and_funds_read_real_mongo_documents(scratch_database, monkeyp
     assert body["realizedPnl"] == -250.5
 
 
+def test_portfolio_market_search_and_transactions_read_real_mongo_documents(
+    scratch_database, monkeypatch
+):
+    # Confirms the newly used collection names (`portfoliosnapshots`,
+    # `marketquotes`, `transactions`) resolve against a real MongoDB.
+    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+
+    user_id = ObjectId()
+    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+
+    scratch_database["holdings"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
+         "exchange": "NSE", "qty": 2, "avgPrice": 100.0, "ltp": 110.0,
+         "dayChangePct": 0.0, "sector": "", "createdAt": created, "updatedAt": created, "__v": 0}
+    )
+    scratch_database["portfoliosnapshots"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "date": datetime(2026, 9, 1, tzinfo=timezone.utc),
+         "value": 200.0, "invested": 180.0, "misInvested": 0.0, "misValue": 0.0,
+         "createdAt": created, "updatedAt": created, "__v": 0}
+    )
+    scratch_database["marketquotes"].insert_many(
+        [
+            {"_id": ObjectId(), "symbol": "^NSEI", "name": "NIFTY 50", "kind": "index",
+             "ltp": 1.0, "dayChange": 0.0, "dayChangePct": 0.0, "prevClose": 0.0, "volume": 0,
+             "marketCap": 0, "sector": "", "createdAt": created, "updatedAt": created, "__v": 0},
+            {"_id": ObjectId(), "symbol": "INFY", "name": "Infosys", "kind": "stock",
+             "ltp": 110.0, "dayChange": 0.0, "dayChangePct": 0.0, "prevClose": 0.0, "volume": 0,
+             "marketCap": 0, "sector": "", "createdAt": created, "updatedAt": created, "__v": 0},
+        ]
+    )
+    scratch_database["transactions"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "kind": "DEPOSIT", "method": "UPI",
+         "amount": 5000.0, "symbol": "", "status": "COMPLETED",
+         "createdAt": created, "updatedAt": created, "__v": 0}
+    )
+
+    token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
+    app = create_app(database=scratch_database)
+
+    with TestClient(app) as client:
+        transactions = client.get("/api/funds/transactions", cookies={"token": token})
+        history = client.get("/api/portfolio/history", params={"range": "ALL"}, cookies={"token": token})
+        overview = client.get("/api/market/overview", cookies={"token": token})
+        search = client.get("/api/instruments/search", params={"q": "INF"}, cookies={"token": token})
+
+    assert transactions.status_code == 200
+    assert [row["kind"] for row in transactions.json()] == ["DEPOSIT"]
+    assert transactions.json()[0]["createdAt"] == "2026-09-01T04:15:30.123Z"
+
+    assert history.status_code == 200
+    labels = [point["label"] for point in history.json()]
+    assert "2026-09-01" in labels
+
+    assert overview.status_code == 200
+    assert [row["symbol"] for row in overview.json()["indices"]] == ["^NSEI"]
+    assert [row["symbol"] for row in overview.json()["stocks"]] == ["INFY"]
+    assert overview.json()["asOf"] == "2026-09-01T04:15:30.123Z"
+
+    assert search.status_code == 200
+    assert [row["symbol"] for row in search.json()] == ["INFY"]
+
+
