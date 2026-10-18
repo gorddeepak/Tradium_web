@@ -3,6 +3,8 @@
 **Last updated:** 2026-10-18 (Phase 0)
 **Current phase:** **Phase 0 — repository isolation and planning**
 **Application code modified:** **No.** The FastAPI implementation has not been started.
+**Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
+(`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
 ---
 
@@ -114,6 +116,8 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | Secret-pattern scan of tracked files | no matches |
 | New repo `git log` | one commit, baseline snapshot |
 | New repo `git remote -v` | **empty** |
+| Pre-commit secret scan of all 9 staged files | no credential patterns matched |
+| Staged file set | 9 Markdown files only; no application file touched (2,683 insertions, 0 deletions) |
 | Application tests | **not run — none exist** |
 | Lint / build in the new repo | **not run** (no dependencies installed) |
 
