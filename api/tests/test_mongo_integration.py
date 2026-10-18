@@ -101,3 +101,46 @@ def test_holdings_reads_real_mongo_documents(scratch_database, monkeypatch):
     # Real MongoDB stores BSON dates to the millisecond.
     assert holding["createdAt"] == "2026-09-01T04:15:30.123Z"
     assert holding["__v"] == 0
+
+
+def test_orders_and_watchlist_read_real_mongo_documents(scratch_database, monkeypatch):
+    # Confirms the collection names the routes rely on (`orders`, `watchlists`)
+    # exist in a real MongoDB; mongomock would accept any name.
+    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+
+    user_id = ObjectId()
+    other_user = ObjectId()
+    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+
+    scratch_database["orders"].insert_many(
+        [
+            {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "status": "OPEN",
+             "createdAt": created, "updatedAt": created, "__v": 0},
+            {"_id": ObjectId(), "user": other_user, "symbol": "TCS", "status": "OPEN",
+             "createdAt": created, "updatedAt": created, "__v": 0},
+        ]
+    )
+    scratch_database["watchlists"].insert_many(
+        [
+            {"_id": ObjectId(), "user": user_id, "symbol": "INFY",
+             "createdAt": created, "updatedAt": created, "__v": 0},
+            {"_id": ObjectId(), "user": other_user, "symbol": "TCS",
+             "createdAt": created, "updatedAt": created, "__v": 0},
+        ]
+    )
+
+    token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
+    app = create_app(database=scratch_database)
+
+    with TestClient(app) as client:
+        orders = client.get("/api/orders", cookies={"token": token})
+        watchlist = client.get("/api/watchlist", cookies={"token": token})
+
+    assert orders.status_code == 200
+    assert [order["symbol"] for order in orders.json()] == ["INFY"]
+    assert orders.json()[0]["createdAt"] == "2026-09-01T04:15:30.123Z"
+
+    assert watchlist.status_code == 200
+    assert [item["symbol"] for item in watchlist.json()] == ["INFY"]
+    assert watchlist.json()[0]["createdAt"] == "2026-09-01T04:15:30.123Z"
+

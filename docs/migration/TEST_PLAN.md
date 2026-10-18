@@ -81,6 +81,34 @@ Suite totals: **23 passed, 1 skipped** without `TEST_MONGO_URL`; **24 passed** w
 
 ---
 
+## 1B. Phase 1b results — `GET /api/orders` and `GET /api/watchlist`
+
+Executed 2026-10-18. Fast suite uses `mongomock`; the integration test reuses the guarded scratch
+database (`tradium_fastapi_phase1_test`, name must end in `_test`, dropped afterwards).
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1B.1 | `GET /api/orders` returns only the cookie user's orders | other user's rows absent | **PASSED** | `test_orders.py::test_returns_only_the_cookie_users_orders` |
+| 1B.2 | Orders newest first | `createdAt` descending | **PASSED** | `test_orders.py::test_orders_are_newest_first` |
+| 1B.3 | Order response key set | the 20 Mongoose keys incl. `__v` | **PASSED** | `test_orders.py::test_response_shape_matches_mongoose_serialization` |
+| 1B.4 | No orders | 200 `[]` | **PASSED** | `test_orders.py::test_empty_orders_returns_empty_list` |
+| 1B.5 | `GET /api/watchlist` returns only the cookie user's rows | other user's rows absent | **PASSED** | `test_watchlist.py::test_returns_only_the_cookie_users_watchlist` |
+| 1B.6 | Watchlist response key set | the 10 Mongoose keys incl. `__v` | **PASSED** | `test_watchlist.py::test_response_shape_matches_mongoose_serialization` |
+| 1B.7 | No watchlist rows | 200 `[]` | **PASSED** | `test_watchlist.py::test_empty_watchlist_returns_empty_list` |
+| 1B.8 | Real MongoDB read of `orders` + `watchlists` | correct rows, BSON dates to the ms | **PASSED** | `test_mongo_integration.py::test_orders_and_watchlist_read_real_mongo_documents` |
+| 2B.1 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | Express entry point starts cron jobs; no safe reference harness yet |
+
+Suite totals: **30 passed, 2 skipped** without `TEST_MONGO_URL`; **32 passed** with it.
+
+Auth rejection, token-claim isolation, malformed-claim 500 and database-failure 500 are shared with
+the holdings suite through the same `require_user` dependency and error handlers, so they are not
+re-tested per route.
+
+Not verified for these routes: no live Express comparison; `POST`/`DELETE` behaviour is out of scope
+(not ported); nothing deployed.
+
+---
+
 ## 2. API contract parity
 
 Method: issue the same request to Express and FastAPI with equivalent cookies and data, then compare

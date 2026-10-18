@@ -86,3 +86,61 @@ def holdings_factory():
         return document
 
     return _make
+
+
+@pytest.fixture
+def orders_factory():
+    """Build an order document shaped like the Mongoose model."""
+    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+
+    def _make(user, **overrides):
+        document = {
+            "_id": ObjectId(),
+            "user": user,
+            "symbol": "INFY",
+            "name": "Infosys",
+            "exchange": "NSE",
+            "side": "BUY",
+            "type": "LIMIT",
+            "product": "CNC",
+            "qty": 5,
+            "filled": 0,
+            "price": 1500.0,
+            "triggerPrice": 0,
+            "slTrigger": 0,
+            "tpPrice": 0,
+            "groupId": "",
+            "isExit": False,
+            "status": "OPEN",
+            "createdAt": created,
+            "updatedAt": created,
+            "__v": 0,
+        }
+        document.update(overrides)
+        return document
+
+    return _make
+
+
+@pytest.fixture
+def watchlist_factory():
+    """Build a watchlist document shaped like the Mongoose model."""
+    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+
+    def _make(user, **overrides):
+        document = {
+            "_id": ObjectId(),
+            "user": user,
+            "symbol": "INFY",
+            "name": "Infosys",
+            "exchange": "NSE",
+            "ltp": 1500.0,
+            "dayChangePct": 0.75,
+            "createdAt": created,
+            "updatedAt": created,
+            "__v": 0,
+        }
+        document.update(overrides)
+        return document
+
+    return _make

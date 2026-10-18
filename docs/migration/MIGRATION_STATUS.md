@@ -1,7 +1,7 @@
 # Migration Status
 
-**Last updated:** 2026-10-18 (Phase 1a)
-**Current phase:** **Phase 1a — FastAPI foundation and `GET /api/holdings`**
+**Last updated:** 2026-10-18 (Phase 1b)
+**Current phase:** **Phase 1b — read-only routes: `GET /api/orders` and `GET /api/watchlist`**
 **Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
 and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
@@ -13,8 +13,8 @@ and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 1a — foundation and first read endpoint |
-| FastAPI application | **started** — `api/main.py`, config, db, auth, serialization, health, holdings |
+| Phase | 1b — orders and watchlist read endpoints |
+| FastAPI application | **started** — foundation plus health, holdings, orders, watchlist |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | unchanged |
 | MongoDB | app DB untouched; tests used mongomock and a dropped scratch database |
@@ -25,7 +25,7 @@ and the original repository are untouched.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **23 passed, 1 skipped** (default); **24 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **30 passed, 2 skipped** (default); **32 passed** with `TEST_MONGO_URL` — see §5 |
 
 ---
 
@@ -109,8 +109,29 @@ Dependencies: `fastapi 0.144.0`, `uvicorn 0.54.0`, `pymongo 4.19.0`, `PyJWT 2.15
 `python-dotenv 1.2.4`; dev: `pytest 9.1.1`, `httpx 0.28.1`, `mongomock 4.3.0`.
 Installed in a repository-local `.venv` (gitignored), not system-wide.
 
-Deliberately absent: orders, funds, jobs, Yahoo/market data, Nova, any second route, any frontend
-change, any deployment change. No scheduled job was enabled.
+Absent at the end of Phase 1a: orders, funds, jobs, Yahoo/market data, Nova, any route beyond health
+and holdings, any frontend change, any deployment change. No scheduled job was enabled.
+
+---
+
+## 3B. Phase 1b — files created
+
+| File | Purpose |
+|---|---|
+| `api/routes/orders.py` | `GET /api/orders`: `find({user})` then `sort({createdAt: -1})` |
+| `api/routes/watchlist.py` | `GET /api/watchlist`: `find({user})`, natural order |
+| `api/tests/test_orders.py` | isolation, newest-first ordering, 20-key shape, empty list |
+| `api/tests/test_watchlist.py` | isolation, 10-key shape, empty list |
+| `api/main.py` (edited) | registers the two new routers |
+| `api/tests/conftest.py` (edited) | adds `orders_factory`, `watchlist_factory` |
+| `api/tests/test_mongo_integration.py` (edited) | real-MongoDB read of `orders` and `watchlists` |
+
+Collections queried: `orders` and `watchlists`, both confirmed present in the local database's
+collection metadata before the code was written.
+
+Still absent: the order write routes (`POST /api/orders`, `POST /api/orders/exits`,
+`DELETE /api/orders/:id`), the watchlist write routes, funds, positions, jobs, Yahoo/market data,
+Nova, and any frontend or deployment change.
 
 ---
 
@@ -146,7 +167,7 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | New repo `git remote -v` | **empty** |
 | Pre-commit secret scan of all 9 staged files | no credential patterns matched |
 | Staged file set | 9 Markdown files only; no application file touched (2,683 insertions, 0 deletions) |
-| Application tests | **run:** 23 passed, 1 skipped; 24 passed with `TEST_MONGO_URL` |
+| Application tests | **run:** 30 passed, 2 skipped; 32 passed with `TEST_MONGO_URL` |
 | Lint / build in the new repo | **not applicable** — no frontend dependencies installed |
 | Repository root / branch / remotes before writing | verified: `Tradium-FastAPI`, `migration/fastapi-backend`, **no remote** |
 | Scratch database after the integration run | absent from `list_database_names()`; `zerodha` untouched |
@@ -211,8 +232,10 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 8. Explicitly not approved / not done
 
-- No route beyond `GET /api/holdings` and `GET /api/health`.
-- No orders, execution, funds, history, instruments, or market-data route.
+- No route beyond the four read endpoints: `GET /api/health`, `GET /api/holdings`,
+  `GET /api/orders`, `GET /api/watchlist`.
+- No write or execution route (no POST/DELETE orders or watchlist), no funds, history, instruments,
+  or market-data route.
 - No scheduled or background job of any kind; no Yahoo Finance call.
 - No Nova / Gemini / PydanticAI work.
 - No frontend change and no frontend-to-FastAPI connection.
@@ -227,12 +250,12 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Awaiting review of Phase 1a.** Nothing further will be implemented without approval.
+**Phase 1b complete (orders + watchlist reads). Awaiting review.** Nothing further will be
+implemented without approval.
 
-Proposed Phase 1b, one route at a time, each with tests and a documented parity status:
+Open items:
 
-1. Confirm the parity gap that cannot be closed by the unit suite — add a safe Express reference
-   harness that boots the router without the cron jobs, then compare `GET /api/holdings` bodies on the
-   scratch database.
-2. Port `GET /api/orders` (authenticated read) and `GET /api/watchlist` next; both are read-only and
-   need no provider calls.
+1. `GET /api/orders` and `GET /api/watchlist` are implemented and tested in isolation; a live
+   Express-vs-FastAPI comparison is still **PENDING** (no safe reference harness exists).
+2. Recommended next: port `GET /api/positions` (read-only, same shape as holdings/orders), then move
+   to the funds read route. Write and execution routes stay out until separately approved.
