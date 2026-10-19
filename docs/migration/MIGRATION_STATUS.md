@@ -1,7 +1,7 @@
 # Migration Status
 
-**Last updated:** 2026-10-18 (Phase 1f)
-**Current phase:** **Phase 1f — authentication: signup, login, logout, `/me`, cookie handling, bcrypt and the auth rate limiter**
+**Last updated:** 2026-10-18 (Phase 2a)
+**Current phase:** **Phase 2a — historical market data only: the `GET /api/instruments/:symbol/candles` route**
 **Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
 and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
@@ -13,8 +13,8 @@ and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 1f — authentication routes (`/api/auth/*`), cookie/JWT parity, bcrypt, rate limiting |
-| FastAPI application | **started** — the 10 read routes, the 7 write routes, and the 4 auth routes (21 registered operations) |
+| Phase | 2a — historical candles (`GET /api/instruments/{symbol}/candles`); no quotes or streaming |
+| FastAPI application | **started** — the 11 read routes, the 7 write routes, and the 4 auth routes (22 registered operations) |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | unchanged |
 | Development MongoDB | **local** `mongodb://127.0.0.1:27017/tradium_fastapi_dev` via gitignored `api/.env` |
@@ -27,7 +27,7 @@ and the original repository are untouched.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **91 passed, 6 skipped** (default); **97 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **114 passed, 6 skipped** (default); **120 passed** with `TEST_MONGO_URL` — see §5 |
 
 ---
 
@@ -262,6 +262,10 @@ No price is fabricated, and no external trading or brokerage side effect is invo
 identical `apply_fill` logic *is* ported (it is required by `POST /api/orders/exits` and by a filling
 MARKET order) and is exercised in tests by injecting a quote through the seam.
 
+*Updated in Phase 2a (§3G):* `fetch_quote` still returns `None`, so all of the above is unchanged.
+Only `fetch_candles` was added to the module, so historical candles no longer wait on this phase —
+the quote-dependent behaviour above still does.
+
 ### Behaviour notes
 
 - **Mongoose validators are not re-implemented.** The routes perform the same *explicit* checks Express
@@ -344,6 +348,100 @@ Collection used: `users` (already present in the local collection metadata).
 
 ---
 
+## 3G. Phase 2a — historical candles
+
+**Goal:** port `GET /api/instruments/:symbol/candles` and nothing else. No WebSocket work, no quote
+cache, no lookup/detail routes, no change to any quote-dependent trading path.
+
+### Provider decision
+
+`yfinance` was evaluated first, as `MARKET_DATA_PLAN.md` §3.1 planned. It works — all eight ranges
+return data for both an Indian equity (`RELIANCE.NS`) and an index (`^NSEI`) — but for five of the
+eight ranges it returns a **different series** from the one Express serves:
+
+| `range` | interval | divergence |
+|---|---|---|
+| `1D` / `5D` / `6M` | `1m` / `5m` / `60m` | none — identical bars and values |
+| `SPARK` / `1Y` | `1d` | `time` shifted by 33,300 s: yfinance labels a daily bar at exchange midnight, Yahoo at the session open |
+| `1M` | `30m` | timestamps 900 s earlier *and* different OHLC — different bucketing, not a relabelling |
+| `5Y` / `ALL` | `1wk` / `1mo` | one bar short — the in-progress final period is dropped |
+
+Both symbols showed every divergence. Because the daily shift would move the candle chart's x-axis
+onto the previous day and `1M` prices would simply differ, using yfinance would have meant
+post-processing its output to reconstruct Yahoo's own bar boundaries. Measured results are in
+`MARKET_DATA_PLAN.md` §3.1.
+
+**Decision:** call the endpoint that `yahoo-finance2`'s `chart()` reads, directly, with `requests`.
+Same endpoint and same parameters as Express, so the bars match by construction; no pandas, no numpy.
+`requests==2.34.2` is the only new runtime dependency.
+
+### Routes ported
+
+| Route | Notes |
+|---|---|
+| `GET /api/instruments/{symbol}/candles` | query `range` (default `1M`); `exchange` is accepted and ignored, as Express does |
+
+### Files
+
+- `api/market_data.py` — **extended.** `fetch_candles`, `ticker_for`, `CANDLE_RANGES`,
+  `_request_chart`, `_candles_from_payload`, and the `MarketDataError` type. `fetch_quote` still
+  returns `None`, so MARKET orders and square-off behave exactly as in Phase 1e.
+- `api/routes/instruments.py` — the candles route added; `GET /api/instruments/search` untouched.
+- `api/tests/test_instrument_candles.py` — **new**, 23 tests, none of which touch the network.
+- `api/requirements.txt` — added `requests==2.34.2`.
+- `docs/migration/MARKET_DATA_PLAN.md` — §3.1 rewritten with the decision and the measurements.
+- `docs/migration/TEST_PLAN.md` — §1G.
+- `docs/migration/MIGRATION_STATUS.md` — this section.
+
+### Behaviour notes
+
+- **The request parameters are the library's, not the route's.** `instrumentRoutes.js` passes only
+  `period1` and `interval`, so `yahoo-finance2`'s defaults supply the rest:
+  `includePrePost=true`, `useYfid=true`, `events=div|split|earn`, `lang=en-US`. `includePrePost=true`
+  is load-bearing — with `false`, the `^NSEI` intraday series came back one bar longer than the
+  library's. Reproducing the library's exact query made all 16 comparisons agree.
+- **`time` is the bar's UTC epoch + 19800.** `meta.gmtoffset` is 19800 for these symbols, so Express's
+  fixed +5:30 shift is the bar's IST wall-clock. Unchanged.
+- **A range with no bars is `200 []`, not a 404** — that is what `res.json([])` produces. A provider
+  error object, a missing result, a non-2xx response and a non-JSON body all become the single
+  `404 {"message": "Could not fetch candle data"}` Express uses for every failure, an unknown symbol
+  included.
+- **Two additions Express does not have**, neither of which changes the bars: a browser
+  `User-Agent` (Yahoo rejects some clients without one) and a 20 s request timeout (Express has none
+  and would hold the request open).
+- **Yahoo's intraday retention is inherited, not corrected.** `1D` asks for 3 days of 1-minute bars
+  and receives one session; `5D` asks for 5 and receives three. Express behaves the same way.
+- **No caching**, matching Express: every request is a live call.
+- **The known numeric-rendering item is now reachable here too.** A whole float — a close of `1209.0`,
+  for instance — is rendered `1209.0` where JS `JSON.stringify` writes `1209`. Already recorded in §3E
+  for the reference-harness work; both parse to the same number.
+
+### Verification
+
+- `yahoo-finance2` was installed in a scratch directory **outside this repository**, its outgoing
+  chart URL was captured by wrapping `fetch`, and its `chart()` result was mapped with the exact code
+  from `server/routes/instrumentRoutes.js`. Compared against `api.market_data.fetch_candles`:
+  **16 / 16 identical** — 2 symbols × 8 ranges, matching bar count, first and last `time`, and first
+  and last OHLC.
+- A live smoke run through the real application (real network, real route, `mongomock` database)
+  returned 246 bars for `RELIANCE 1M`, 375 for `^NSEI 1D` and 5 for `^NSEI SPARK`; an unknown symbol
+  returned 404 `{"message": "Could not fetch candle data"}` and a missing cookie returned 401.
+- The evaluated dependency was then uninstalled and the suite re-run, so `requirements.txt` is
+  demonstrably sufficient: `pip check` reports no broken requirements and all tests pass without
+  yfinance, pandas or numpy present.
+
+### Not done in this phase
+
+- No WebSocket or streaming work of any kind, and no streaming feasibility test.
+- No `marketquotes` sync job, so `GET /api/instruments/search` and `GET /api/market/overview` still
+  return nothing against the live dev database.
+- `GET /api/instruments/lookup/:symbol` and `GET /api/instruments/:symbol` remain **DEFERRED**.
+- `fetch_quote` still returns `None`: MARKET orders still answer the documented 503 and square-off
+  still falls back to the stored `ltp`.
+- No CORS middleware, no frontend change, no response caching for candles.
+
+---
+
 ## 4. Known issues recorded (not fixed)
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. None has been
@@ -376,8 +474,13 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | New repo `git remote -v` | **empty** |
 | Pre-commit secret scan of all 9 staged files | no credential patterns matched |
 | Staged file set | 9 Markdown files only; no application file touched (2,683 insertions, 0 deletions) |
-| Application tests | **run:** 91 passed, 6 skipped; 97 passed with `TEST_MONGO_URL` |
+| Application tests (Phase 1f) | **run:** 91 passed, 6 skipped; 97 passed with `TEST_MONGO_URL` |
 | Registered routes (Phase 1f) | **verified** — 21 operations: the 10 reads, the 7 writes, and the 4 auth routes (`POST` signup/login/logout, `GET /me`) |
+| Application tests (Phase 2a) | **run:** 114 passed, 6 skipped; 120 passed with `TEST_MONGO_URL` |
+| Registered routes (Phase 2a) | **verified** — 22 operations: the 11 reads, the 7 writes and the 4 auth routes; the new one is `GET /api/instruments/{symbol}/candles` |
+| Candle parity vs `yahoo-finance2` | **verified** — 16/16 identical for `RELIANCE` and `^NSEI` across all eight ranges, against a scratch `yahoo-finance2` reference built outside this repository |
+| Candles through the real app over the live network | **verified** — 246 bars (`RELIANCE`/`1M`), 375 (`^NSEI`/`1D`), 5 (`^NSEI`/`SPARK`); unknown symbol → 404 with the Express message; no cookie → 401 |
+| `yfinance` and its pandas/numpy stack removed | **verified** — `pip check` reports no broken requirements and the suite still passes, so `requirements.txt` is sufficient |
 | Write flow against a real MongoDB | **verified** — deposit, watchlist add/delete, two MARKET fills into one merged position, square-off, LIMIT place + cancel; scratch DB dropped afterwards |
 | Auth round-trip against a real MongoDB | **verified** — signup → cookie → login → `/me` with the `users` collection; scratch DB dropped afterwards |
 | bcrypt cross-implementation | **verified** — an npm `bcrypt` hash verifies in Python and a Python hash verifies in the npm package (Node v22, out-of-tree) |
@@ -441,7 +544,9 @@ From `ARCHITECTURE_DECISIONS.md`:
    metadata (`orders`, `watchlists`, `positions`, `funds`, `transactions`, `holdings`, …).
 2. Whether PydanticAI's `VercelAIAdapter` matches `@ai-sdk/react` 4.0.61.
 3. Whether Yahoo streaming delivers messages for exact `.NS` symbols.
-4. Which candle intervals/ranges `yfinance` returns identically.
+4. ~~Which candle intervals/ranges `yfinance` returns identically~~ — **resolved (Phase 2a)**: three
+   of eight. `yfinance` was rejected for candles and Yahoo's chart endpoint is called directly; see
+   §3G and `MARKET_DATA_PLAN.md` §3.1.
 5. Whether Yahoo data is permitted for the intended display and deployment.
 6. The approved fallback if streaming fails.
 7. Current Render build/start configuration (not in the repository).
@@ -451,15 +556,18 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 8. Explicitly not approved / not done
 
-- No route beyond the twenty-one ported operations: the 10 reads (`GET /api/health`, `GET /api/holdings`,
+- No route beyond the twenty-two ported operations: the 11 reads (`GET /api/health`, `GET /api/holdings`,
   `GET /api/orders`, `GET /api/watchlist`, `GET /api/positions`, `GET /api/funds`,
   `GET /api/funds/transactions`, `GET /api/portfolio/history`, `GET /api/instruments/search`,
-  `GET /api/market/overview`), the 7 writes (`POST`/`DELETE /api/watchlist`,
-  `POST /api/funds/transactions`, `POST`/`DELETE /api/orders`, `POST /api/orders/exits`,
+  `GET /api/instruments/{symbol}/candles`, `GET /api/market/overview`), the 7 writes (`POST`/`DELETE
+  /api/watchlist`, `POST /api/funds/transactions`, `POST`/`DELETE /api/orders`, `POST /api/orders/exits`,
   `POST /api/positions/:id/square-off`) and the 4 auth routes (`POST /api/auth/signup`,
   `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`).
-- No live-Yahoo instrument route (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`), which is deferred
-  to the market-data phase; no Yahoo Finance call was made.
+- No live-quote instrument route (`/lookup/:symbol`, `/:symbol`), which is deferred to the quote phase.
+- No WebSocket, streaming, or push channel of any kind; no streaming feasibility test.
+- No `marketquotes` sync job, so the two cache-backed routes still read an empty cache.
+- No change to `market_data.fetch_quote`: it still returns `None`, so no price is fabricated and the
+  MARKET-order/square-off behaviour is unchanged.
 - No CORS middleware, and no change to the frontend's API origin.
 - No write to the `zerodha` database and no production data copied into `tradium_fastapi_dev`.
 - No scheduled or background job of any kind.
@@ -476,21 +584,26 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 1f complete (authentication). Awaiting review.** Nothing further will be implemented without
-approval.
+**Phase 2a complete (historical candles). Awaiting review.** Nothing further will be implemented
+without approval.
 
 Open items:
 
-1. All twenty-one operations are tested in isolation; a live Express-vs-FastAPI comparison is still
-   **PENDING** (no safe reference harness exists; `server/index.js` starts cron jobs on connect).
+1. The candles route is closed. All other operations are tested in isolation; a live
+   Express-vs-FastAPI comparison is still **PENDING** (no safe reference harness exists;
+   `server/index.js` starts cron jobs on connect). The candle comparison in §3G is the one parity
+   check that *has* been done against the real Express dependency rather than against documentation.
 2. The write routes that need the market-data provider (a filling `MARKET` order) are wired to the
    `market_data.fetch_quote` seam and answer the documented 503 until that phase exists.
-3. The numeric-rendering nuance in §3E is an open parity item for the comparison harness.
-4. The three live-Yahoo instrument routes remain **DEFERRED** to the market-data phase.
+3. The numeric-rendering nuance in §3E is an open parity item for the comparison harness. It now also
+   applies to candle prices.
+4. `GET /api/instruments/lookup/:symbol` and `GET /api/instruments/:symbol` remain **DEFERRED** to the
+   quote phase, which also needs the `marketquotes` sync job before the two cache-backed routes can
+   return anything.
 5. Cookie/JWT parity is verified from the FastAPI side, including that a FastAPI-issued cookie opens the
    protected routes. Cross-app cookie validation still needs the same `JWT_SECRET` as Express, and the
    header-level `Set-Cookie` comparison belongs to the reference-harness work (§1F.2F.1).
 6. Recommended next: an isolated Express reference harness to close the `PENDING` parity rows (including
-   the numeric-rendering item and `Set-Cookie`), then the market-data phase (`marketquotes` sync + the
-   three deferred instrument routes), then CORS plus the frontend switch-over. Nova/Gemini work remains
-   a separate later phase.
+   the numeric-rendering item and `Set-Cookie`); then the quote phase (`marketquotes` sync, the two
+   deferred instrument routes, `fetch_quote`); then CORS plus the frontend switch-over. Nova/Gemini work
+   and any streaming experiment remain separate later phases.

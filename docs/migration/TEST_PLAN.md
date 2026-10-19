@@ -296,6 +296,59 @@ Known differences recorded in this phase (none is a behavioural divergence for t
 
 ---
 
+## 1G. Phase 2a results — historical candles
+
+Ported: `GET /api/instruments/:symbol/candles`. Nothing else in this phase — no quotes, no streaming,
+no jobs.
+
+Suite totals: **114 passed, 6 skipped** without `TEST_MONGO_URL`; **120 passed** with it.
+
+### Candles
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1G.1 | Response shape | `[{ time, open, high, low, close }]`, no volume, `time` = bar epoch + 19800 | **PASSED** | `test_instrument_candles.py::test_returns_ohlc_only_and_shifts_timestamps_to_ist` |
+| 1G.2 | Bar parity against `yahoo-finance2` itself | identical bar count, first/last `time` and first/last OHLC, for 2 symbols × 8 ranges | **PASSED** | 16/16 comparisons; method in `MARKET_DATA_PLAN.md` §3.1 (scratch reference built outside the repo) |
+| 1G.3 | Request parity | the same query parameters the JS library sends, `includePrePost=true` included | **PASSED** | `test_instrument_candles.py::test_sends_the_same_query_parameters_as_yahoo_finance2` |
+| 1G.4 | Empty-bar filtering | bars with a null `open` are absent | **PASSED** | `test_instrument_candles.py::test_drops_bars_that_have_no_open_price` |
+| 1G.5 | Symbol convention | `^` passes through; everything else gets `.NS` | **PASSED** | `test_instrument_candles.py::test_index_symbols_keep_their_caret`, `::test_the_client_exchange_parameter_is_ignored` |
+| 1G.6 | All eight ranges | each `range` maps to its Express `days`/`interval` pair | **PASSED** | `test_instrument_candles.py::test_each_range_maps_to_the_express_interval` (8 parameters) |
+| 1G.7 | Default and unknown range | default `1M`; an unrecognised range falls back to 30 days / `1d` | **PASSED** | `test_instrument_candles.py::test_defaults_to_the_one_month_range`, `::test_an_unrecognised_range_falls_back_to_daily` |
+| 1G.8 | Range with no data | `200 []`, not an error | **PASSED** | `test_instrument_candles.py::test_a_symbol_with_no_trading_data_is_an_empty_list`, `::test_a_result_without_timestamps_is_an_empty_list` |
+| 1G.9 | Provider failure | 404 `{ message: "Could not fetch candle data" }` — the same message for an unknown symbol, a provider error object, a missing result, a non-2xx response and a non-JSON body | **PASSED** | `test_instrument_candles.py::test_provider_failure_is_the_express_404`, `::test_provider_error_object_is_a_404`, `::test_transport_failure_becomes_a_provider_error`, `::test_non_json_body_becomes_a_provider_error`, `::test_a_missing_result_is_a_provider_error` |
+| 1G.10 | Authentication | 401 `"Not authenticated"` without a cookie | **PASSED** | `test_instrument_candles.py::test_requires_authentication` |
+| 1G.11 | Live network, real app | 200 with real bars for an equity and an index | **PASSED** | out-of-tree smoke run: `RELIANCE`/`1M` 246 bars, `^NSEI`/`1D` 375, `^NSEI`/`SPARK` 5; unknown symbol 404, no cookie 401 |
+| 1G.12 | Dependency sufficiency | the suite passes with `yfinance`, pandas and numpy removed | **PASSED** | `pip check` clean after uninstalling; 120 passed |
+
+Observed bar counts on 2026-10-18 (market closed), through the implemented route:
+
+| `range` | `RELIANCE` | `^NSEI` |
+|---|---|---|
+| `1D` | 362 | 375 |
+| `5D` | 220 | 223 |
+| `SPARK` | 5 | 5 |
+| `1M` | 246 | 247 |
+| `6M` | 866 | 870 |
+| `1Y` | 246 | 245 |
+| `5Y` | 262 | 262 |
+| `ALL` | 241 | 231 |
+
+Yahoo's own intraday retention applies, and is inherited rather than corrected: `1D` requests 3 days
+of 1-minute bars and receives one session; `5D` requests 5 days and receives three.
+
+Known differences and additions recorded in this phase:
+
+- **A browser `User-Agent` and a 20 s timeout** are sent; Express sends neither. Neither changes the
+  bars that come back.
+- **Yahoo's intraday retention** is whatever the provider returns, so bar counts vary by session and
+  symbol. Not a divergence from Express.
+- **The numeric-rendering item from §5 now also applies to candle prices**: a whole float such as
+  `1209.0` is rendered `1209.0` where JS writes `1209`. Both parse to the same number.
+- **Live provider calls are not stubbed in the fast suite.** Every route test replaces
+  `_request_chart`, so the suite makes no network calls and does not depend on the internet.
+
+---
+
 ## 2. API contract parity
 
 Method: issue the same request to Express and FastAPI with equivalent cookies and data, then compare
@@ -453,8 +506,8 @@ Two users, A and B, each with data.
 | 7.4 | Lookup valid | mapped fields, uppercase symbol | **DEFERRED** — needs a market-data provider |
 | 7.5 | Lookup invalid | 404 `"Instrument not found"` | **DEFERRED** — needs a market-data provider |
 | 7.6 | Detail fields | same keys and mapping as Express | **DEFERRED** — needs a market-data provider |
-| 7.7 | Candles, all ranges | key set and IST shift identical | **DEFERRED** — needs a market-data provider |
-| 7.8 | Candles provider failure | 404 `"Could not fetch candle data"` | **DEFERRED** — needs a market-data provider |
+| 7.7 | Candles, all ranges | key set and IST shift identical | **PASSED** — §1G.1, §1G.2, §1G.6 (16/16 identical to `yahoo-finance2` for 2 symbols × 8 ranges) |
+| 7.8 | Candles provider failure | 404 `"Could not fetch candle data"` | **PASSED** — §1G.9 |
 | 7.9 | Overview with cold cache | `asOf: null`, empty arrays | **PASSED** — `test_market.py::test_cold_cache_returns_nulls_and_empty_lists` |
 | 7.10 | Overview index ordering | order from `data/nifty50.js` | **PASSED** — `test_market.py::test_indices_follow_seed_order_and_stocks_are_split_out` |
 | 7.11 | Overview cache integrity | `stocks` contains only `kind: "stock"` | **PASSED** — same test |

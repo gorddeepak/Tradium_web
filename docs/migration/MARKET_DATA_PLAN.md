@@ -1,7 +1,8 @@
 # Market Data Plan
 
-**Status:** investigation plan. No market-data code is written in Phase 0. Nothing below should be
-described as working until it has been tested and the result recorded.
+**Status:** Phase 2a (historical candles) is implemented and measured — see §3.1. Everything about
+live quotes, streaming and jobs (§3.2 – §3.5) is still a plan: nothing there should be described as
+working until it has been tested and the result recorded.
 
 ---
 
@@ -49,27 +50,107 @@ A live stream (if adopted) only addresses #3 (and possibly #4). It does not repl
 
 ## 3. Intended Python approach
 
-### 3.1 Historical data — `yfinance`
+### 3.1 Historical data — done in Phase 2a (direct Yahoo chart request, not `yfinance`)
 
-- Use for candles first, since it is the most likely to match `yahoo-finance2` (both read Yahoo data).
-- Implement the same eight range/interval pairs:
+**Decision: `api/market_data.py` calls Yahoo's chart endpoint directly with `requests`.** That is the
+same endpoint `yahoo-finance2`'s `chart()` reads, so the bars, the timestamps and the empty-bar
+filtering are the same by construction — and no pandas/numpy dependency is pulled in.
 
-  | `range` | days | interval |
-  |---|---|---|
-  | `1D` | 3 | `1m` |
-  | `5D` | 5 | `5m` |
-  | `SPARK` | 6 | `1d` |
-  | `1M` | 30 | `30m` |
-  | `6M` | 182 | `60m` |
-  | `1Y` | 365 | `1d` |
-  | `5Y` | 1825 | `1wk` |
-  | `ALL` | 7300 | `1mo` |
+`yfinance` was evaluated first, as planned, and it works: all eight ranges returned data for both an
+Indian equity (`RELIANCE.NS`) and an index (`^NSEI`). It was rejected because for five of the eight
+ranges it serves a **different series** from the one the Express route returns:
 
-- Reproduce: drop bars with no open, emit `time` as unix seconds **+19800** (IST), OHLC only, no
-  volume.
-- **Must test:** whether each interval is actually returned (Yahoo restricts intraday history), how
-  many bars come back, timezone metadata, and whether the first/last bars line up with
-  `yahoo-finance2`.
+| `range` | interval | divergence from `yahoo-finance2` |
+|---|---|---|
+| `1D` | `1m` | none — identical bar count, timestamps and values |
+| `5D` | `5m` | none |
+| `6M` | `60m` | none |
+| `SPARK` | `1d` | `time` off by 33300 s: yfinance labels a daily bar at exchange midnight, Yahoo labels it at the session open |
+| `1Y` | `1d` | same 33300 s shift |
+| `1M` | `30m` | timestamps 900 s earlier *and* different OHLC — different bucketing, not a relabelling |
+| `5Y` | `1wk` | one bar short: yfinance omits the in-progress final week |
+| `ALL` | `1mo` | one bar short, same reason |
+
+Measured 2026-10-18 (market closed) on both symbols; every divergence above appeared in both. The
+daily shift alone would move the candle chart's x-axis onto the previous day, and `1M` prices would
+simply be different — so using yfinance would mean post-processing its output to reverse-engineer
+Yahoo's own bar boundaries. A direct request reproduces them exactly instead, which is why it was
+chosen.
+
+#### Request contract
+
+The query parameters are the ones the library actually sends, which is not visible in the Express
+route: it passes only `period1` and `interval`, so the library's own defaults decide the rest.
+
+```
+GET https://query2.finance.yahoo.com/v8/finance/chart/{ticker}
+    ?useYfid=true&includePrePost=true&events=div%7Csplit%7Cearn&lang=en-US
+    &interval={interval}&period1={start}&period2={now}
+```
+
+`includePrePost=true` is load-bearing. With `false`, the `^NSEI` series came back one bar *longer*
+than the library's for every intraday range; switching to the library's own value made all
+comparisons agree. A browser `User-Agent` is sent as well, and unlike Express the call carries a 20 s
+timeout. Neither changes the bars.
+
+#### Range table
+
+Unchanged from the original plan; taken from `server/routes/instrumentRoutes.js`. An unrecognised
+range falls back to `{ days: 30, interval: "1d" }`, exactly as Express does.
+
+| `range` | days | interval |
+|---|---|---|
+| `1D` | 3 | `1m` |
+| `5D` | 5 | `5m` |
+| `SPARK` | 6 | `1d` |
+| `1M` | 30 | `30m` |
+| `6M` | 182 | `60m` |
+| `1Y` | 365 | `1d` |
+| `5Y` | 1825 | `1wk` |
+| `ALL` | 7300 | `1mo` |
+
+#### Mapping
+
+Mirrors `instrumentRoutes.js` exactly:
+
+- drop bars whose `open` is null — Yahoo pads intraday sessions with placeholder bars;
+- emit `time` as the bar's unix seconds **+ 19800** (IST) — `meta.gmtoffset` is 19800 for these
+  symbols, so this is the UTC epoch expressed as IST wall-clock;
+- emit `open`/`high`/`low`/`close` only: no volume, no `adjclose`, and no adjustment for splits or
+  dividends;
+- a result with no bars is `[]` with a 200, not an error, because that is what `res.json([])` does;
+- a provider error object, a missing result, a non-2xx response and a non-JSON body all raise
+  `MarketDataError`, which the route turns into `404 {"message": "Could not fetch candle data"}` —
+  the single message Express uses for *every* failure, an unknown symbol included.
+
+#### Observed bar counts
+
+From the 2026-10-18 run, via the implemented route:
+
+| `range` | `RELIANCE` | `^NSEI` |
+|---|---|---|
+| `1D` | 362 | 375 |
+| `5D` | 220 | 223 |
+| `SPARK` | 5 | 5 |
+| `1M` | 246 | 247 |
+| `6M` | 866 | 870 |
+| `1Y` | 246 | 245 |
+| `5Y` | 262 | 262 |
+| `ALL` | 241 | 231 |
+
+Yahoo caps intraday history by its own retention rather than by the requested window: the `1D`
+request asks for 3 days and comes back with one session, and `5D` asks for 5 days and comes back with
+three. That is the provider's behaviour and Express inherits it unchanged, so it is reproduced rather
+than corrected.
+
+#### How this was verified
+
+Rather than assume the two libraries agree, `yahoo-finance2` was installed in a scratch directory
+outside the repo, its outgoing chart URL was captured by wrapping `fetch`, and its `chart()` result
+was mapped with the exact code from `server/routes/instrumentRoutes.js`. That reference output was
+then compared with `api.market_data.fetch_candles` — 16 comparisons (2 symbols × 8 ranges), all
+identical on bar count, first/last `time`, and first/last OHLC. The scratch harness is not part of
+the repo.
 
 ### 3.2 Live prices — `yfinance.AsyncWebSocket` (separate experiment)
 
@@ -131,7 +212,8 @@ that the React app does not already consume.
 
 | Option | Requirement | Status |
 |---|---|---|
-| Keep polling Yahoo through `yfinance` | none beyond an HTTP client | default fallback |
+| Poll Yahoo's chart endpoint directly | an HTTP client only | **in use for candles (Phase 2a)** |
+| Poll Yahoo through `yfinance` | pandas + numpy | **rejected for candles** — a different series for 5 of the 8 ranges, see §3.1 |
 | Yahoo streaming via `AsyncWebSocket` | must pass the feasibility test | unproven |
 | Upstox | account, API access, approval, terms | **evaluate only after documenting requirements**; do not assume access |
 | Another broker/data API | account and terms | not evaluated |
@@ -146,8 +228,8 @@ Do not state that a provider is approved for this use until its terms have been 
 |---|---|---|
 | a | Does Yahoo's stream return messages for the exact Indian symbols (`.NS`) used here? | Feasibility test in §3.2 |
 | b | What is the update frequency and connection stability? | Same test, full session, logged |
-| c | Which candle intervals and historical ranges are retrievable through `yfinance`? | Matrix test across all eight ranges |
-| d | How do timestamps, field names and symbol formats normalise? | Compare against the current API output |
+| c | Which candle intervals and historical ranges are retrievable? | **Answered (Phase 2a):** all eight ranges return data, through `yfinance` and through the chart endpoint alike; see §3.1 |
+| d | How do timestamps, field names and symbol formats normalise? | **Answered (Phase 2a):** `time` = the bar's UTC epoch + 19800; fields are `time`/`open`/`high`/`low`/`close`; `^` symbols pass through and everything else gets `.NS`. Verified against `yahoo-finance2` itself; see §3.1 |
 | e | Is provider data permitted for the intended display and deployment? | Read the provider terms; record the conclusion |
 | f | If streaming fails, which fallback is approved, and what account/infrastructure does it need? | Decide with the user; record in ARCHITECTURE_DECISIONS |
 
@@ -157,8 +239,8 @@ Do not state that a provider is approved for this use until its terms have been 
 
 | Test | Expected |
 |---|---|
-| Candles for each of the eight ranges | Same key set; sane bar counts; timestamps carry the IST shift |
-| Empty-bar filtering | Bars without open are absent |
+| Candles for each of the eight ranges | Same key set; sane bar counts; timestamps carry the IST shift — **closed in Phase 2a**, see §3.1 |
+| Empty-bar filtering | Bars without open are absent — **closed in Phase 2a**, see §3.1 |
 | Instrument detail | Same field names; missing values omitted rather than nulled |
 | Lookup for an unknown symbol | 404 `{ message: "Instrument not found" }` |
 | MARKET order with a live quote | Fills at the quote; holdings/positions/funds updated |

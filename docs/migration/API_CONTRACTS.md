@@ -534,7 +534,12 @@ Missing values serialise as `undefined` → omitted from JSON.
   | `ALL` | 7300 | `1mo` |
   | anything else | 30 | `1d` |
 
-- **External:** Yahoo `chart(tickerFor(symbol), { period1, interval })`.
+- **External:** Yahoo `chart(tickerFor(symbol), { period1, interval })`, which resolves to
+  `GET https://query2.finance.yahoo.com/v8/finance/chart/{ticker}` with `useYfid=true`,
+  `includePrePost=true`, `events=div|split|earn`, `lang=en-US`, `interval`, `period1` and `period2`.
+  The library supplies those extra parameters as defaults — the route passes only `period1` and
+  `interval` — so they are part of the observed contract and are reproduced. See
+  [MARKET_DATA_PLAN.md](./MARKET_DATA_PLAN.md) §3.1.
 - **Response 200:** array; quotes with `open == null` are dropped:
 
   ```json
