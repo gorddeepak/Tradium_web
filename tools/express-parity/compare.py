@@ -253,6 +253,77 @@ def compare_jobs():
     return functional, informational
 
 
+# --------------------------------------------------------------------------- #
+# read routes (orders, watchlist, positions, funds, portfolio, market, search)
+# --------------------------------------------------------------------------- #
+
+
+def diff_values(a, b, path, functional, informational):
+    """Walk two parsed JSON values and record structural (functional) diffs."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        if set(a) != set(b):
+            functional.append(f"{path}: keys {sorted(a)} vs {sorted(b)}")
+        for key in sorted(set(a) & set(b)):
+            diff_values(a[key], b[key], f"{path}.{key}", functional, informational)
+        return
+    if isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            functional.append(f"{path}: length {len(a)} vs {len(b)}")
+        for index, (left, right) in enumerate(zip(a, b)):
+            diff_values(left, right, f"{path}[{index}]", functional, informational)
+        return
+    if a == b:
+        numbers = (
+            isinstance(a, (int, float))
+            and not isinstance(a, bool)
+            and isinstance(b, (int, float))
+            and not isinstance(b, bool)
+        )
+        if numbers and type(a) is not type(b):
+            spelling = lambda v: "int" if isinstance(v, int) else "float"  # noqa: E731
+            informational.append(
+                f"{path}: renders as {spelling(a)} in express, {spelling(b)} in fastapi "
+                f"(same JSON number)"
+            )
+        return
+    functional.append(f"{path}: {a!r} vs {b!r}")
+
+
+def compare_routes():
+    left = load("express_routes.json")
+    right = load("fastapi_routes.json")
+    functional = []
+    informational = []
+
+    by_a = {route["name"]: route for route in left["routes"]}
+    by_b = {route["name"]: route for route in right["routes"]}
+    if set(by_a) != set(by_b):
+        functional.append(f"route names {sorted(by_a)} vs {sorted(by_b)}")
+
+    for name in sorted(set(by_a) & set(by_b)):
+        a, b = by_a[name], by_b[name]
+        if a["status"] != b["status"]:
+            functional.append(f"{name}: status {a['status']} vs {b['status']}")
+            continue
+        ct_a = (a["contentType"] or "").split(";")[0]
+        ct_b = (b["contentType"] or "").split(";")[0]
+        if ct_a != ct_b:
+            informational.append(f"{name}: content-type {ct_a!r} vs {ct_b!r}")
+        try:
+            value_a = json.loads(a["bodyText"])
+            value_b = json.loads(b["bodyText"])
+        except json.JSONDecodeError:
+            if a["bodyText"] != b["bodyText"]:
+                functional.append(f"{name}: body {a['bodyText']!r} vs {b['bodyText']!r}")
+            continue
+        diff_values(value_a, value_b, name, functional, informational)
+        if a["bodyText"] != b["bodyText"] and not any(
+            line.startswith(name) for line in functional
+        ):
+            informational.append(f"{name}: raw bytes differ (JSON-equivalent)")
+    return functional, informational
+
+
 def report(title, functional, informational):
     print(f"=== {title} ===")
     if not functional and not informational:
@@ -272,6 +343,7 @@ def main():
         ("authentication", compare_auth()),
         ("numeric serialization", compare_numbers()),
         ("background jobs", compare_jobs()),
+        ("read routes", compare_routes()),
     ]
     for title, (functional, informational) in sections:
         report(title, functional, informational)

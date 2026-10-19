@@ -1,8 +1,9 @@
 # Deployment runbook — FastAPI + built frontend
 
-**Status:** Phase 4a prepared this runbook and the code it describes. Nothing here has been deployed,
+**Status:** Phase 4a prepared this runbook and the code it describes; Phase 4b re-checked every claim
+here against the implementation and added the operational notes below. Nothing here has been deployed,
 and the existing Express/Render service is untouched. See
-[MIGRATION_STATUS.md](./MIGRATION_STATUS.md) §3N for what was actually verified.
+[MIGRATION_STATUS.md](./MIGRATION_STATUS.md) §3N and §3O for what was actually verified.
 
 The target is one service that serves the API and the Vite build from a single origin, exactly as the
 Express server does today (one origin means the browser sends the auth cookie with no CORS preflight).
@@ -28,11 +29,16 @@ uvicorn api.main:app --host 0.0.0.0 --port "$PORT"
 ```
 
 - `PORT` is provided by the platform (defaults to `8000` for local runs).
-- Install Python dependencies from `api/requirements.txt` into a virtualenv first
-  (`pip install -r api/requirements.txt`).
+- Install Python dependencies into a virtualenv first. Runtime: `pip install -r api/requirements.txt`.
+  For the test suite as well: `pip install -r api/requirements-dev.txt` (it includes the runtime file).
+- **Python 3.13** is the interpreter the migration was built and tested on (`pydantic-ai-slim==2.57.0`,
+  FastAPI 0.144.0, Uvicorn 0.54.0). The platform must provide a compatible modern interpreter.
 - Run a **single** instance per database. Trading and market jobs are opt-in (§4), so multiple
   stateless API instances are safe **only while both job switches are unset**.
 - Health check: `GET /api/health` → `200 {"ok": true}`. It does no database or Yahoo work.
+- **Mongo is connected lazily.** The app starts and the health check answers `200` even when MongoDB is
+  unreachable; the failure appears on the first data request. Use a data-touching readiness probe (for
+  example a request to an authenticated route) if a database outage must fail the check.
 
 ## 3. Environment variables
 
@@ -106,9 +112,16 @@ The Express/Render service is not modified by this migration. To roll back, stop
 and point DNS/traffic back at the existing service; if the FastAPI service had been made the scheduler
 owner, turn its switches off and re-enable Express first so job ownership is never lost.
 
-## 8. Known blockers
+## 8. Known blockers and limitations
 
 - No deployment has been performed: this is documentation and locally verified code only.
-- The repository still has no Git remote and `gh` is not installed, so the branch is local-only.
+- The repository still has no Git remote and `gh` is not installed, so the branch is local-only (see
+  [MIGRATION_STATUS.md](./MIGRATION_STATUS.md) §6.1 for the publication steps).
 - HTTPS is required before any non-localhost deployment, because the production auth cookie is
   `Secure`.
+- The health check is liveness only: it passes while MongoDB is unreachable (§2). It is not a
+  readiness probe.
+- A missing file under `/assets/` returns a JSON 404 instead of the app shell — a deliberate, minor
+  divergence from Express (§5).
+- Multiple API instances must not each run the schedulers: at most one process may set each of
+  `MARKET_SYNC_ENABLED` and `TRADING_JOBS_ENABLED` (§4).

@@ -46,7 +46,12 @@ python fastapi_numbers.py
 node express_jobs.cjs
 python fastapi_jobs.py
 
-# 4. diff the results
+# 4. read-route bodies: orders, watchlist, positions, funds, funds/transactions,
+#    portfolio/history, market/overview, instruments/search
+node express_routes.cjs
+python fastapi_routes.py
+
+# 5. diff the results
 python compare.py
 ```
 
@@ -69,7 +74,10 @@ observe (a JSON number spelling, a header attribute).
 | `fastapi_numbers.py` | the same, over the real FastAPI route |
 | `express_jobs.cjs` | seeds `scenario.json`, runs `syncPrices()` + `recordDailySnapshot()`, dumps every collection with BSON types preserved |
 | `fastapi_jobs.py` | the same, through `sync_prices()` + `record_daily_snapshot()` |
-| `compare.py` | diffs the two job dumps, and the auth/number captures |
+| `routes_scenario.json` | the shared synthetic input for the read-route run (users, holdings, positions, watchlists, orders, funds, transactions, snapshots, quotes) |
+| `express_routes.cjs` | serves the real orders/watchlist/positions/funds/portfolio/market/instrument routers on an ephemeral port and captures each GET body |
+| `fastapi_routes.py` | the same requests against `create_app(database=...)` |
+| `compare.py` | diffs the job dumps, the auth/number captures and the read-route bodies |
 
 ## Notes
 
@@ -81,3 +89,5 @@ observe (a JSON number spelling, a header attribute).
 - `createdAt`/`updatedAt` are normalised away (they are wall-clock), and ObjectIds that were not
   seeded are normalised to `<oid>`. Seeded ids are kept, so cross-collection references are compared.
 - `_id` and `__v` are **not** normalised away, so the write shapes are still checked.
+- The route harness deliberately does **not** call the Yahoo-backed instrument routes
+  (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`), so the whole run stays offline.

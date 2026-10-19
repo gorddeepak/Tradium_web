@@ -41,9 +41,9 @@ comparing Express responses to FastAPI responses directly, using the same seeded
 | Item | Needed for | Status |
 |---|---|---|
 | Isolated MongoDB (local or scratch), never production | every parity test | **AVAILABLE** — local `mongod` on 127.0.0.1:27017; `tradium_fastapi_phase1_test` used and dropped |
-| Seeded demo data: ≥2 users, holdings, positions, orders in each status, funds, transactions, snapshots | most tests | **PLANNED** |
+| Seeded demo data: ≥2 users, holdings, positions, orders in each status, funds, transactions, snapshots | most tests | **AVAILABLE** — unit fixtures, plus the route harness fixture `tools/express-parity/routes_scenario.json` (Phase 4b) |
 | Express reference harness, pointed at a scratch DB | parity tests | **AVAILABLE** — `tools/express-parity/`; loads individual Express modules only, never `server/index.js`, so no cron job starts. Used in §1K |
-| FastAPI app running against the same scratch DB | Phase 1+ | **PLANNED** |
+| FastAPI app running against the same scratch DB | Phase 1+ | **AVAILABLE** — `create_app(database=...)` in tests and in the route harness (Phase 4b) |
 | Gemini key with quota | AI tests | **AVAILABLE** (Phase 3b) — injected into the process at runtime only; never written to a tracked file |
 | Recorded resolved npm versions | AI protocol tests | **AVAILABLE** — `ai@7.0.58`, `@ai-sdk/react@4.0.61`, `@ai-sdk/google@4.0.39` (Phase 3b) |
 
@@ -97,7 +97,7 @@ database (`tradium_fastapi_phase1_test`, name must end in `_test`, dropped after
 | 1B.6 | Watchlist response key set | the 10 Mongoose keys incl. `__v` | **PASSED** | `test_watchlist.py::test_response_shape_matches_mongoose_serialization` |
 | 1B.7 | No watchlist rows | 200 `[]` | **PASSED** | `test_watchlist.py::test_empty_watchlist_returns_empty_list` |
 | 1B.8 | Real MongoDB read of `orders` + `watchlists` | correct rows, BSON dates to the ms | **PASSED** | `test_mongo_integration.py::test_orders_and_watchlist_read_real_mongo_documents` |
-| 2B.1 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | the harness now exists (§1K) but these two routes have not been compared at the HTTP level yet |
+| 2B.1 | Live side-by-side vs Express on identical data | byte-identical body | **PASSED (Phase 4b)** | `tools/express-parity/` route harness: real `GET /api/orders` and `GET /api/watchlist` on both sides over the same seeded scratch data — byte-identical bodies, including order (`createdAt` desc) and Mongoose key sets. See §1K |
 
 Suite totals: **30 passed, 2 skipped** without `TEST_MONGO_URL`; **32 passed** with it.
 
@@ -105,8 +105,8 @@ Auth rejection, token-claim isolation, malformed-claim 500 and database-failure 
 the holdings suite through the same `require_user` dependency and error handlers, so they are not
 re-tested per route.
 
-Not verified for these routes: no live Express comparison; `POST`/`DELETE` behaviour is out of scope
-(not ported); nothing deployed.
+Not verified for these routes: `POST`/`DELETE` behaviour is out of scope (not ported); nothing deployed.
+The live Express comparison landed in Phase 4b (row 2B.1, §1K).
 
 ---
 
@@ -135,12 +135,13 @@ Executed 2026-10-18.
 | 1C.4 | `GET /api/funds` derived maths | `usedMargin = blockedInOrders + misMargin`; correct `realizedPnl` | **PASSED** | `test_funds.py::test_derived_margins_and_realized_pnl` |
 | 1C.5 | First read creates an empty funds row | `available: 0`, row persisted | **PASSED** | `test_funds.py::test_creates_an_empty_funds_row_on_first_read` |
 | 1C.6 | Real MongoDB read of positions + funds | correct rows, BSON dates, maths | **PASSED** | `test_mongo_integration.py::test_positions_and_funds_read_real_mongo_documents` |
-| 2C.1 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | the harness now exists (§1K) but these routes have not been compared at the HTTP level yet |
+| 2C.1 | Live side-by-side vs Express on identical data | byte-identical body | **PASSED (Phase 4b)** | route harness: `GET /api/positions` and `GET /api/funds` compared over the same seeded data — byte-identical, including the derived `usedMargin`/`blockedInOrders`/`misMargin`/`realizedPnl`. See §1K |
 
 Suite totals: **35 passed, 3 skipped** without `TEST_MONGO_URL`; **38 passed** with it.
 
-Not verified: no live Express comparison; `GET /api/funds/transactions` and all write routes are not
-ported; nothing deployed.
+Not verified here: nothing deployed. The live Express comparison landed in Phase 4b (row 2C.1, §1K);
+`GET /api/funds/transactions` and the write routes were ported in Phases 1d and 1e and are compared in
+Phase 4b (row 1D.16, §1K).
 
 ---
 
@@ -178,7 +179,7 @@ database (`tradium_fastapi_phase1_test`, name must end in `_test`, dropped after
 | 1D.13 | Overview index ordering | order from `data/nifty50.js`; `stocks` only `kind: "stock"` | **PASSED** | `test_market.py::test_indices_follow_seed_order_and_stocks_are_split_out` |
 | 1D.14 | Overview `asOf` + row keys | freshest `updatedAt`; Mongoose key set preserved | **PASSED** | `test_market.py::test_as_of_is_the_freshest_row_and_rows_keep_mongoose_keys` |
 | 1D.15 | Real MongoDB read | `portfoliosnapshots`, `marketquotes`, `transactions` resolve | **PASSED** | `test_mongo_integration.py::test_portfolio_market_search_and_transactions_read_real_mongo_documents` |
-| 1D.16 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | the harness now exists (§1K) but these routes have not been compared at the HTTP level yet |
+| 1D.16 | Live side-by-side vs Express on identical data | byte-identical body | **PASSED (Phase 4b)** | route harness: `GET /api/funds/transactions`, `GET /api/portfolio/history?range=1Y`, `GET /api/market/overview` and `GET /api/instruments/search` compared over the same seeded data — byte-identical, including the `invested: null` legacy row, the live point and the index ordering. See §1K |
 | 1D.17 | Live-Yahoo instrument routes (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`) | mapped Yahoo data | **DEFERRED** | market-data phase; no provider integration approved. Candles resolved in §1G; quotes in §1I |
 
 Suite totals: **48 passed, 4 skipped** without `TEST_MONGO_URL`; **52 passed** with it.
@@ -519,11 +520,19 @@ sides receive the same input.
 | 1K.21 | Snapshot MIS field **types** | same BSON type | **FAILED (cosmetic, accepted)** — `misInvested`/`misValue` are `int32` in Express when integral and always `double` here, because `misComponents` starts at `0` vs `0.0`. Values equal; nothing reads the type |
 | 1K.22 | Whole-run verdict | no functional difference | **PASSED** — `compare.py` reports `equivalent - no functional difference observed` |
 | 1K.23 | Isolation | no server, no cron, no Yahoo, no real DB | **PASSED** — `server/index.js` never required; scratch DBs dropped; `tradium_fastapi_dev` and `zerodha` untouched; original repo read-only |
+| 1K.24 | Read routes: orders + watchlist (Phase 4b) | byte-identical body | **PASSED** — same seeded user; orders newest-first with the full Mongoose key set incl. `__v`, watchlist rows identical |
+| 1K.25 | Read routes: positions + funds (Phase 4b) | byte-identical body | **PASSED** — `usedMargin 16940 = blockedInOrders 6240 + misMargin 10700`, `realizedPnl 1200.5` on both |
+| 1K.26 | Read routes: funds/transactions + portfolio/history (Phase 4b) | byte-identical body | **PASSED** — ledger newest-first; history carries the two snapshots (one `invested: null`) then today's live point |
+| 1K.27 | Read routes: market/overview + instruments/search (Phase 4b) | byte-identical body | **PASSED** — `asOf` = freshest `updatedAt`; indices in nifty50 order; search renames `ltp`→`price`, `dayChangePct`→`changePct`; blank `q` → `[]` |
+| 1K.28 | Route harness isolation (Phase 4b) | no server, no cron, no Yahoo, no real DB | **PASSED** — `server/index.js` never required; the Yahoo-backed instrument routes are not called; scratch DBs dropped |
 
-Not covered by this phase: HTTP-level bodies for orders, watchlist, positions, funds, portfolio history
-and the market routes (rows 1D.16, 1I.36, 2B.1, 2C.1 stay `PENDING`), the cron schedule itself, and the
-central error handler. CORS and the browser cutover were exercised separately in Phase 3a; see
-[MIGRATION_STATUS.md](./MIGRATION_STATUS.md) §3L.
+Phase 4b extended this harness to the GET-route bodies with `routes_scenario.json`,
+`express_routes.cjs` / `fastapi_routes.py` and a `read routes` section in `compare.py`; that run reported
+`identical`, so rows 1D.16, 2B.1 and 2C.1 are now `PASSED`.
+
+Still outside the harness: the Yahoo-backed instrument routes (row 1I.36 — they need the provider), the
+cron schedule itself, and the central error handler. CORS and the browser cutover were exercised
+separately in Phase 3a; see [MIGRATION_STATUS.md](./MIGRATION_STATUS.md) §3L.
 
 ---
 
@@ -534,16 +543,16 @@ status code, body **keys**, value types, and error message text.
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 2.1 | Every GET route: JSON key set | identical keys, including `_id`, `__v`, timestamps | PLANNED |
-| 2.2 | ObjectId fields | 24-char hex strings, no `ObjectId(...)` wrapper | PLANNED |
-| 2.3 | Timestamps | ISO-8601 UTC strings | PLANNED |
-| 2.4 | Enum values | casing preserved (`OPEN`, `LONG`, `CNC`, …) | PLANNED |
+| 2.1 | Every GET route: JSON key set | identical keys, including `_id`, `__v`, timestamps | **PASSED (Phase 4b, read routes)** — byte-identical bodies for orders, watchlist, positions, funds, funds/transactions, portfolio/history, market/overview and instruments/search (§1K rows 1K.24–1K.27). Write routes and the AI routes are covered by their own suites |
+| 2.2 | ObjectId fields | 24-char hex strings, no `ObjectId(...)` wrapper | **PASSED (Phase 4b, read routes)** — identical hex `_id`/`user` in every captured body |
+| 2.3 | Timestamps | ISO-8601 UTC strings | **PASSED (Phase 4b, read routes)** — identical `createdAt`/`updatedAt`/`date` strings |
+| 2.4 | Enum values | casing preserved (`OPEN`, `LONG`, `CNC`, …) | **PASSED (Phase 4b, read routes)** — `OPEN`, `EXECUTED`, `LONG`, `SHORT`, `MIS`, `CNC`, `SETTLEMENT`, `DEPOSIT`, `stock`, `index` all identical |
 | 2.5 | Error envelope | `{ message }` for normal routes, `{ error }` for the three assistant routes | **PARTIAL (Phase 3b)** — chat keeps Express's `{ error }` for 400/502/500/503; insight/briefing use the normal `{ message }` envelope for non-object bodies and for the new 503 missing-key case. Covered by `api/tests/test_assistant.py` |
 | 2.6 | Validation messages | exact strings from API_CONTRACTS §5.2 and §5.3, in the same order | PLANNED |
 | 2.7 | Status codes | 400/401/404/409/503 in the documented cases | PLANNED |
 | 2.8 | Money in messages | Indian grouping (`₹1,23,456`) | PLANNED |
-| 2.9 | `window` vs omitted | `invested: null` preserved; missing quote fields omitted | PLANNED |
-| 2.10 | List ordering | orders and transactions newest-first; history oldest-first | PLANNED |
+| 2.9 | `window` vs omitted | `invested: null` preserved; missing quote fields omitted | **PASSED (Phase 4b)** — portfolio history's legacy row renders `invested: null` on both sides (§1K row 1K.26) |
+| 2.10 | List ordering | orders and transactions newest-first; history oldest-first | **PASSED (Phase 4b)** — identical ordering in every captured list (§1K rows 1K.24, 1K.26) |
 
 ---
 

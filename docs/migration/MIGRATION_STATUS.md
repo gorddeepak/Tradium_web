@@ -1,10 +1,11 @@
 # Migration Status
 
-**Last updated:** 2026-10-19 (Phase 4a)
-**Current phase:** **Phase 4a — production static serving and deployment preparation**
+**Last updated:** 2026-10-19 (Phase 4b)
+**Current phase:** **Phase 4b — final pre-deployment readiness review**
 **Application code modified:** **Yes.** CORS settings and the Nova assistant under `api/`, static
 serving and the SPA fallback in `api/main.py`, the frontend API origin and signup call under `src/`;
-`server/` and the original repository are untouched.
+`server/` and the original repository are untouched. Phase 4b changed no application code — it added the
+read-route parity harness and untracked two local artifacts.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -14,7 +15,7 @@ serving and the SPA fallback in `api/main.py`, the frontend API origin and signu
 
 | Item | Value |
 |---|---|
-| Phase | 4a — production static serving and deployment preparation |
+| Phase | 4b — final pre-deployment readiness review |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
 | Market cache | `marketquotes` populated for **53/53** symbols in `tradium_fastapi_dev`; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
 | Trading jobs | per-minute `priceSync` (fills orders, settles MIS exits) and the daily 18:00 IST snapshot; **off unless `TRADING_JOBS_ENABLED` is set** |
@@ -31,8 +32,10 @@ serving and the SPA fallback in `api/main.py`, the frontend API origin and signu
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **269 passed, 8 skipped** (default); **277 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **269 passed, 8 skipped** (default); **277 passed** with `TEST_MONGO_URL` — see §5. Not rerun in Phase 4b (no application code changed) |
 | Express parity check | **run** — cookies, numeric rendering and job side effects compared against the original modules; **no functional difference** (§3K) |
+| Read-route parity check | **run (Phase 4b)** — orders, watchlist, positions, funds, funds/transactions, portfolio/history, market/overview and instruments/search compared live against Express on the same seeded data; **byte-identical** (§3O) |
+| Repository secret scan | **clean (Phase 4b)** — no credentials, API keys, private keys or `.env` files in tracked files; the real key/secret/URL from the original `.env` appear in none (§3O) |
 | Browser cutover check | **run** — signup, login, reload, logout and all six dashboard pages against a live FastAPI server (§3L) |
 | Nova browser check | **run** — dashboard briefing, a page insight, and chat with one- and two-tool turns against live Gemini (§3M) |
 | Production static check | **run** — the built SPA served by FastAPI: deep links, refresh, assets, login, same-origin API, Nova, and the `Secure` cookie (§3N) |
@@ -1162,6 +1165,87 @@ Build first: `npm run build` produced `dist/` (Vite 8.1.5, 59 assets). Then `uvi
 
 ---
 
+## 3O. Phase 4b — final pre-deployment readiness review
+
+**Goal:** resolve the remaining `PENDING`/`PARTIAL` test rows that touch auth, trading, data integrity
+or frontend integration; scan tracked files for secrets; and confirm the deployment guide matches the
+implementation. No application code was changed.
+
+### Read-route parity (closes rows 1D.16, 2B.1, 2C.1)
+
+The Phase 2e harness compared cookies, numeric rendering and job side effects but left the HTTP bodies of
+the ordinary read routes unchecked. Phase 4b extends it:
+
+| File | Change |
+|---|---|
+| `tools/express-parity/routes_scenario.json` | **new** — synthetic fixture: two users, holdings, MIS/CNC positions, watchlist rows, orders in several states, funds, SETTLEMENT/DEPOSIT transactions, snapshots (one legacy `invested: 0`) and `marketquotes` |
+| `tools/express-parity/express_routes.cjs` | **new** — boots only the orders/watchlist/positions/funds/portfolio/market/instrument routers on an ephemeral port and captures each GET body; `server/index.js` is never required |
+| `tools/express-parity/fastapi_routes.py` | **new** — the same requests through `create_app(database=...)` |
+| `tools/express-parity/compare.py` | `compare_routes()` — structural JSON comparison (keys, values, list order) and a `read routes` section |
+
+Run: `node express_routes.cjs`, `python fastapi_routes.py`, `python compare.py`. Result: **`identical`**
+— no functional difference and no number-spelling difference either.
+
+| Route | Observed (both sides) |
+|---|---|
+| `GET /api/orders` | 200, newest first, full Mongoose key set incl. `__v` |
+| `GET /api/watchlist` | 200, both rows |
+| `GET /api/positions` | 200, LONG/SHORT MIS + a CNC leg |
+| `GET /api/funds` | 200, `usedMargin 16940 = blockedInOrders 6240 + misMargin 10700`, `realizedPnl 1200.5` |
+| `GET /api/funds/transactions` | 200, newest first |
+| `GET /api/portfolio/history?range=1Y` | 200, two snapshots (one `invested: null`) then today's live point |
+| `GET /api/market/overview` | 200, `asOf` = freshest `updatedAt`, indices in `nifty50` order |
+| `GET /api/instruments/search?q=IN` | 200, renamed `price`/`changePct` |
+| `GET /api/instruments/search?q=` | 200, `[]` |
+
+The Yahoo-backed instrument routes (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`) are deliberately
+not called, so the harness stays offline; row 1I.36 stays `NOT RUN` (it needs the provider). The cron
+**schedule** and the central error handler remain outside the harness (rows 1J.33 and 8.13 stay
+`PARTIAL`).
+
+### Security and repository readiness
+
+- **No committed secrets.** A scan of every tracked file found no Google API key (`AIza…`), no AWS key,
+  no private key block, no credentials embedded in a `mongodb://`/`mongodb+srv://` URL, and no JWT. The
+  only matches for `JWT_SECRET=`/`API_KEY=` were the two `.env.example` placeholders and fake
+  `test-…`/`parity-…` values. The original repository's real `GOOGLE_GENERATIVE_AI_API_KEY`, `JWT_SECRET`
+  and `MONGO_URL` values appear in **none** of the tracked files; `.env` has never been committed.
+- **`.env` files**: only `api/.env.example` and `server/.env.example` are tracked (a scan of all history
+  for `.env`/`api/.env`/`server/.env` found nothing).
+- **Local artifacts untracked.** `CLAUDE.md` (already listed in `.gitignore`) and `.claude/launch.json`
+  were tracked anyway; both are now `git rm --cached`'d (the files remain on disk) and `.claude/` was
+  added to `.gitignore`. They are per-developer agent/editor files, not project files.
+- **Larger tracked files** are legitimate: the frontend screenshots (`src/assets/screenshots/*.png`,
+  ~3 MB total) and `package-lock.json`. No binary or archive is tracked accidentally.
+- **Dependency pinning**: `api/requirements.txt` pins all runtime packages (FastAPI, Uvicorn, PyMongo,
+  PyJWT, python-dotenv, bcrypt, requests, `pydantic-ai-slim[google]`). `api/requirements-dev.txt`
+  (already present) pins the test-only deps (`pytest`, `httpx`, `mongomock`) and pulls in the runtime
+  file with `-r requirements.txt`, so a fresh clone can install and run the suite.
+
+### Deployment readiness
+
+`docs/migration/DEPLOYMENT.md` was cross-checked against the code; the build/start commands, env-var
+names, `/api/health` endpoint, `Secure`-cookie behaviour, static-serving switch and the two scheduler
+switches all match. Notes added or confirmed:
+
+- **Python 3.13** is the interpreter the migration was built and tested on; the platform must provide a
+  compatible version (`pydantic-ai-slim==2.57.0`, FastAPI, Uvicorn).
+- **Mongo is connected lazily.** The app starts and `/api/health` answers `200` even when MongoDB is
+  unreachable; the failure surfaces on the first data request. Liveness therefore passes while a
+  database outage is invisible to the health check — an operational limitation, not a code defect.
+- **HTTPS is required** for any non-localhost host because the production auth cookie is `Secure`.
+- **Single scheduler owner**: leave `MARKET_SYNC_ENABLED` and `TRADING_JOBS_ENABLED` unset while Express
+  still runs; enable each on exactly one process at a deliberate cutover.
+
+### Not done in this phase
+
+- **No deployment** and no Render/GitHub changes; the branch is still local-only (no remote).
+- No application code changed, so the test suite was not rerun (`269 passed, 8 skipped` stands).
+- The `PARTIAL` AI rows (five-step cap, live provider 429/5xx) and the Express-defect rows 4–9 were left
+  as recorded; none is a publication or deployment blocker.
+
+---
+
 ## 4. Known issues recorded
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and
@@ -1270,19 +1354,25 @@ Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
 | Missing AI key while serving static (Phase 4a) | **verified** — static and API stay up; the three assistant routes return 503 |
 | Scheduler ownership at startup (Phase 4a) | **verified** — with both switches unset the startup log shows no job line; jobs stay opt-in |
 | Scratch database after Phase 4a | **dropped** — `tradium_fastapi_phase4a_test` absent; `tradium_fastapi_dev` and `zerodha` untouched |
+| Read-route parity (Phase 4b) | **verified** — 9 GET routes compared live against Express over one seeded fixture; `compare.py` reported `identical` (closes rows 1D.16, 2B.1, 2C.1) |
+| Route-harness isolation (Phase 4b) | **verified** — `server/index.js` never required, no Yahoo call, scratch `tradium_parity_*` databases dropped; none left behind |
+| Secret scan (Phase 4b) | **clean** — no API keys, private keys, credential URLs or JWTs in tracked files; the original `.env` values are absent; `.env` has never been committed |
+| Repository hygiene (Phase 4b) | **fixed** — `CLAUDE.md` and `.claude/launch.json` untracked (files kept on disk), `.claude/` added to `.gitignore` |
+| Application tests (Phase 4b) | **not rerun** — no application code changed, so `269 passed, 8 skipped` / `277` with `TEST_MONGO_URL` from Phase 4a stands |
 
 ---
 
 ## 6. Blockers
 
-### 6.1 GitHub publication — BLOCKED
+### 6.1 GitHub publication — BLOCKED (unchanged in Phase 4b)
 
 - `gh` is **not installed** on this machine (command not found).
 - No authenticated GitHub CLI session exists.
-- No remote is configured in the new repository.
+- No remote is configured in the new repository (`git remote -v` is empty).
 
 Nothing was worked around through the original repository, and no credentials were handled. The local
-repository is fully initialized and safe to push once a remote exists.
+repository is fully initialized and safe to push once a remote exists. Phase 4b confirmed the working
+tree contains no secrets and untracked the two local artifacts (`CLAUDE.md`, `.claude/launch.json`).
 
 **Manual steps (run from `D:\deepak\coding\Full Stack Dev\Tradium-FastAPI`):**
 
@@ -1293,10 +1383,12 @@ repository is fully initialized and safe to push once a remote exists.
 # 2. Add it as the only remote.
 git remote add origin https://github.com/<your-account>/tradium-fastapi.git
 
-# 3. Confirm the remote and branch before pushing.
-git remote -v
+# 3. Confirm the remote, the branches and a clean tree before pushing.
+git remote -v                      # exactly one URL, the NEW empty repo
+git branch -a                      # main and migration/fastapi-backend
 git branch --show-current          # expect: migration/fastapi-backend
-git log --oneline -1
+git status --short                 # expect: empty
+git log --oneline -1               # Phase 4b commit
 
 # 4. Push the baseline and the migration branch.
 git push -u origin main
@@ -1304,7 +1396,8 @@ git push -u origin migration/fastapi-backend
 ```
 
 Before pushing, confirm `git remote -v` shows exactly one URL and that it points at the **new** empty
-repository — not `gorddeepak/Tradium`.
+repository — not `gorddeepak/Tradium`. The repository is private; do not add the original
+repository as a remote or push to it.
 
 ### 6.2 Nothing else is blocking Phase 1
 
@@ -1377,10 +1470,10 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 4a complete (production static serving and deployment preparation). Awaiting review.** A Vite
-production build is now served by FastAPI with an SPA fallback and API isolation, the production
-configuration is documented in [DEPLOYMENT.md](./DEPLOYMENT.md), and the built app was verified locally
-including the `Secure` cookie and Nova. Nothing has been deployed.
+**Phase 4b complete (final pre-deployment readiness review). Awaiting review.** The last open parity
+rows for the ordinary read routes are now closed (byte-identical to Express), the tracked files are
+secret-free, and the deployment guide matches the implementation. The codebase is ready to publish to a
+new private repository and to deploy as a separate service once a remote and a platform are chosen.
 
 Open items:
 
@@ -1391,12 +1484,14 @@ Open items:
 0b. **The build is servable** (§3N): static serving matches Express (on with `NODE_ENV=production`,
    overridable with `SERVE_STATIC`), deep links and refreshes return the app shell, and `/api` is never
    shadowed. The one divergence is that a missing asset returns a JSON 404 instead of the shell.
+0c. **Read-route parity is closed** (§3O): orders, watchlist, positions, funds, funds/transactions,
+   portfolio/history, market/overview and instruments/search are byte-identical to Express on the same
+   seeded data. Only the Yahoo-backed instrument routes (row 1I.36), the cron schedule and the central
+   error handler remain outside the harness.
 
-1. **The harness blocker is gone for module-level comparisons.** `tools/express-parity/` now compares
-   auth cookies, `GET /api/holdings` JSON and the three jobs against the real Express modules without
-   booting the app or touching real data (§3K). The remaining `PENDING` rows are the *HTTP-level*
-   comparisons for orders, watchlist, positions, funds, portfolio history and the market routes; the
-   same harness can host them.
+1. **The harness blocker is gone.** `tools/express-parity/` compares auth cookies, `GET /api/holdings`
+   JSON, the three jobs and now the ordinary read-route bodies against the real Express modules without
+   booting the app or touching real data (§3K, §3O).
 2. **Quotes are not age-checked.** Missing, non-numeric, zero and negative prices are rejected; a
    quote that is minutes old is accepted, because a cutoff would have rejected a legitimately current
    `^BSESN` quote (§3I). Whether to add one — and at what threshold — is a decision, not a bug fix.
@@ -1413,11 +1508,12 @@ Open items:
 6. **The local cutover is complete** (§3L): CORS works with credentials, signup/login/reload/logout and
    all six dashboard pages were exercised in a browser against a live FastAPI process, and the signup
    caller now sends `{ username, email, password }`.
-7. **The build is servable and documented** (§3N): FastAPI serves `dist/` with an SPA fallback, and
-   [DEPLOYMENT.md](./DEPLOYMENT.md) lists the build/start commands, required environment variables,
-   scheduler ownership and the HTTPS requirement for the `Secure` cookie. Nothing is deployed.
+7. **Publication and deployment are the remaining actions.** The repository has no remote and `gh` is
+   not installed (§6.1), so publication is a manual step. The FastAPI service is unbuilt on any host;
+   [DEPLOYMENT.md](./DEPLOYMENT.md) records the build/start commands, the required environment
+   variables, scheduler ownership and the HTTPS requirement for the `Secure` cookie.
 8. Recommended next, in order:
-   1. The remaining HTTP-level parity rows, if wanted, using the committed harness.
+   1. Publish the branch to a new private GitHub repository (§6.1) — no code change needed.
    2. A deliberate deployment: a separate Render service (or equivalent) with `MONGO_URL`,
       `JWT_SECRET`, `GOOGLE_GENERATIVE_AI_API_KEY`, `NODE_ENV=production` and HTTPS, then flip the
       scheduler switches and the rollback target by explicit decision.
