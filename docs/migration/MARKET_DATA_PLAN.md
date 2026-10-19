@@ -1,8 +1,9 @@
 # Market Data Plan
 
-**Status:** Phase 2a (historical candles) is implemented and measured — see §3.1. Everything about
-live quotes, streaming and jobs (§3.2 – §3.5) is still a plan: nothing there should be described as
-working until it has been tested and the result recorded.
+**Status:** Phase 2a (historical candles) is implemented and measured — see §3.1. Phase 2b evaluated
+streaming and decided **not** to adopt it — see §3.2. Everything about the quote phase, the cache jobs
+and the provider adapter (§3.3 – §3.5) is still a plan: nothing there should be described as working
+until it has been tested and the result recorded.
 
 ---
 
@@ -23,7 +24,8 @@ working until it has been tested and the result recorded.
 
 Observed behaviour of the current integration:
 
-- All access is **polling**. There is no WebSocket anywhere in the codebase.
+- All access is **polling**. There is no WebSocket anywhere in the codebase. (Phase 2b evaluated
+  Yahoo's stream and chose not to adopt it — see §3.2.)
 - Symbol normalisation: `^`-prefixed index symbols pass through; everything else gets `.NS`.
 - Price sync fetches sequentially on purpose (rate-limit caution).
 - Market sync uses one batched call for 53 tickers with `validateResult: false`.
@@ -152,23 +154,115 @@ then compared with `api.market_data.fetch_candles` — 16 comparisons (2 symbols
 identical on bar count, first/last `time`, and first/last OHLC. The scratch harness is not part of
 the repo.
 
-### 3.2 Live prices — `yfinance.AsyncWebSocket` (separate experiment)
+### 3.2 Live prices — done in Phase 2b (streaming evaluated, not adopted)
 
-- **Hypothesis:** a WebSocket feed can replace the 1-minute poll for held symbols.
-- **This is a hypothesis, not a plan.** Historical working does not imply streaming working.
+**Verdict: the stream works for Indian symbols, but it cannot replace the polling jobs, and adopting
+it now would add a stateful always-on connection for no visible benefit. Recommendation: keep REST
+polling.** Evidence below.
 
-**Feasibility test (do this before designing anything):**
+The plan treated this as a hypothesis. It was tested during a live session on Monday 2026-10-19,
+13:57–14:11 IST (NSE open, 09:15–15:30), with `RELIANCE.NS`, `INFY.NS`, `TCS.NS`, `HDFCBANK.NS`,
+`^NSEI` and `^NSEBANK`.
 
-1. Subscribe to a small set of real Indian tickers (e.g. `RELIANCE.NS`, `INFY.NS`, `TCS.NS`) plus one
-   index if supported.
-2. Record whether any messages arrive at all.
-3. If messages arrive, record: field names, timestamp format/timezone, update frequency per symbol,
-   reconnection behaviour, and what happens when the network drops.
-4. Run for at least one full trading session before drawing conclusions.
-5. Record results verbatim in this file and in `MIGRATION_STATUS.md`.
+#### Verified
 
-**Kill criteria:** if no messages arrive for exact `.NS` symbols, or the connection is unstable, do
-not build on it. Keep polling and move to the fallback decision in §5.
+| Question | Result |
+|---|---|
+| Endpoint / auth | `wss://streamer.finance.yahoo.com/?version=2`; no auth, crumb or cookie needed. |
+| Do `.NS` symbols stream? | Yes — all four equities delivered frames. |
+| Do `^` indices stream? | Yes — `^NSEI` and `^NSEBANK`, at the highest rate of all. |
+| Frame format | Text frames only: `{"type":"pricing","message":"<base64 protobuf>"}`. |
+| Update rate | ~1 update/second/symbol. A 240 s run gave 190–242 frames per symbol; median gap 1.0 s, worst gap 6.0 s. |
+| Field names | `id`, `price`, `time`, `exchange` (`NSI`), `quote_type`, `market_hours`, `change`, `change_percent`; stocks also `day_volume`, `last_size`, `price_hint`. |
+| Timestamp | **zigzag `sint64` milliseconds** — not seconds, and not a plain varint (see the trap below). |
+| Price agreement | Stream vs the Phase 2a REST path: `RELIANCE` Δ0.4, `INFY` Δ0.0, `^NSEI` Δ0.3. |
+| Reconnect after an abrupt transport abort | Detected; handshake 1.77 s, first frame 2.40 s. |
+| Unsubscribe | Frames stop after one in-flight message per symbol. |
+| Concurrent connections | 3 from one host all streamed normally. |
+
+The prices were genuinely live rather than stale: `^NSEI` streamed `price=22889.05, change=-257.10`,
+and `price - change = 23146.15` — exactly the previous session's close.
+
+#### The timestamp trap
+
+`pricing.proto` declares `sint64 time = 3` and `sint64 day_volume = 9`, and protobuf encodes `sint64`
+as a **zigzag** varint. Reading `time` as a plain varint yields a plausible-looking integer that is
+off by a factor of two and decodes to a date in **2083**, with no error raised. `api/yahoo_stream.py`
+decodes zigzag explicitly, and a test pins it against real captured frames.
+
+#### What the stream does not provide
+
+This is the decisive finding. `marketSync` writes nine fields; the stream covers five of them:
+
+| Cache field | Stream | Notes |
+|---|---|---|
+| `ltp` | `price` | |
+| `dayChange` | `change` | |
+| `dayChangePct` | `change_percent` | |
+| `prevClose` | — | derivable as `price - change`; not sent directly |
+| `volume` | `day_volume` | stocks only; indices never send it |
+| `name`, `kind` | — | come from the static `data/nifty50` seed anyway |
+| `marketCap` | **absent** | drives the Markets table column and the heatmap sizing |
+| `sector` | **absent** | comes from `quoteSummary(assetProfile)` |
+
+`SectorHeatmap.jsx` filters `marketCap > 0`, so a streaming-only cache would blank the heatmap. The
+5-minute REST batch would have to keep running for `marketCap` and `sector` regardless, which removes
+most of the reason to add a second, stateful data path.
+
+#### Operational hazards
+
+- **Unsupported symbols fail silently.** Subscribing to `NOTAREALSYMBOL.NS` and `ZZZZ.NS` produced no
+  frames, no error frame and no rejection. Absence is the only signal, so a symbol that never updates
+  is indistinguishable from one whose market is closed. Any adoption must detect staleness per symbol
+  rather than trust the subscription.
+- **Silence is ambiguous.** No frames could mean a closed market, a delisted symbol, or a dead socket.
+  Only a heartbeat or a timestamp check tells them apart.
+- **A heartbeat is prudent.** 240 s with no re-subscribe was stable, but yfinance re-subscribes every
+  15 s and that is cheap insurance.
+- **No holiday calendar** exists in the app today, so "market open" means weekday plus 09:15–15:30.
+
+#### yfinance's own client
+
+`yfinance.live.AsyncWebSocket` does work against this stream (verified by running it, not just by
+reading it), but two defects matter:
+
+- It decodes with `MessageToDict`, which renders `int64`/`sint64` as **strings**, so `time` arrives as
+  `"1792399388000"` and `day_volume` as a string. Any arithmetic needs a cast first.
+- In `listen()`, the `except Exception` path sleeps 3 s and calls `_connect()`, but `_connect()`
+  returns early while `self._ws is not None`. After a clean close the `while True` loop can therefore
+  re-enter without establishing a fresh connection. **Read from source; not exercised.**
+
+Both are why the proof of concept decodes with a small standard-library parser instead of adopting
+the library.
+
+#### Decision
+
+**Do not adopt streaming in this phase. Keep REST polling as the cache's source of truth.**
+
+Reasons, in order of weight:
+
+1. `marketCap` and `sector` are only available over REST, so the batch job cannot be removed.
+2. The instrument page polls every 30 s (`useInstrument.jsx` `POLL_MS = 30000`). A 1 s feed behind a
+   30 s poll has no visible effect.
+3. Express parity is REST polling. A stateful always-on connection is new operational surface —
+   reconnect loops, per-symbol staleness detection, one socket per worker — for no user-visible gain.
+4. It would make the backend the authority for a value the frontend reads every 30 s anyway.
+
+**Smallest practical alternative if a genuine sub-minute requirement appears:** keep the REST batch
+for `marketCap`/`sector`, and use this stream only to refresh `ltp`/`dayChangePct`/`volume` for
+symbols currently on screen, with REST reconciliation. `api/yahoo_stream.py` (decoder only, standard
+library, tested against real frames) is the starting point; nothing is wired into the application and
+no socket is opened at runtime.
+
+#### Not verified
+
+- **A full trading session.** The soak was ~14 minutes, not 09:15–15:30. Long-run stability, behaviour
+  at the close, and reconnects over hours are unknown.
+- **Market open and close**, including whether frames stop cleanly at 15:30.
+- **A holiday or a weekend.** Only one live weekday session was observed.
+- **Network failures other than an abrupt local abort** — DNS loss, a proxy dropping long-lived
+  connections, a suspended laptop.
+- **Whether Yahoo's terms permit this use** — still open (§5e), and unchanged by these results.
 
 ### 3.3 Provider adapter
 
@@ -214,7 +308,8 @@ that the React app does not already consume.
 |---|---|---|
 | Poll Yahoo's chart endpoint directly | an HTTP client only | **in use for candles (Phase 2a)** |
 | Poll Yahoo through `yfinance` | pandas + numpy | **rejected for candles** — a different series for 5 of the 8 ranges, see §3.1 |
-| Yahoo streaming via `AsyncWebSocket` | must pass the feasibility test | unproven |
+| Keep REST polling for quotes | an HTTP client only | **recommended (Phase 2b)** — `marketCap`/`sector` need it anyway, see §3.2 |
+| Yahoo streaming via `AsyncWebSocket` | must pass the feasibility test | **works, not adopted** — the stream is real but cannot replace the batch; see §3.2 |
 | Upstox | account, API access, approval, terms | **evaluate only after documenting requirements**; do not assume access |
 | Another broker/data API | account and terms | not evaluated |
 
@@ -226,12 +321,12 @@ Do not state that a provider is approved for this use until its terms have been 
 
 | # | Question | How to answer |
 |---|---|---|
-| a | Does Yahoo's stream return messages for the exact Indian symbols (`.NS`) used here? | Feasibility test in §3.2 |
-| b | What is the update frequency and connection stability? | Same test, full session, logged |
+| a | Does Yahoo's stream return messages for the exact Indian symbols (`.NS`) used here? | **Answered (Phase 2b): yes** for `.NS` equities and `^` indices — see §3.2 |
+| b | What is the update frequency and connection stability? | **Partly answered (Phase 2b):** ~1 update/s/symbol, worst gap 6 s over a 14-minute run, reconnect in ~2 s. A full session is still unmeasured — see §3.2 |
 | c | Which candle intervals and historical ranges are retrievable? | **Answered (Phase 2a):** all eight ranges return data, through `yfinance` and through the chart endpoint alike; see §3.1 |
 | d | How do timestamps, field names and symbol formats normalise? | **Answered (Phase 2a):** `time` = the bar's UTC epoch + 19800; fields are `time`/`open`/`high`/`low`/`close`; `^` symbols pass through and everything else gets `.NS`. Verified against `yahoo-finance2` itself; see §3.1 |
-| e | Is provider data permitted for the intended display and deployment? | Read the provider terms; record the conclusion |
-| f | If streaming fails, which fallback is approved, and what account/infrastructure does it need? | Decide with the user; record in ARCHITECTURE_DECISIONS |
+| e | Is provider data permitted for the intended display and deployment? | Read the provider terms; record the conclusion — **still open**; Phase 2b did not settle it |
+| f | If streaming fails, which fallback is approved, and what account/infrastructure does it need? | **Answered (Phase 2b):** no new infrastructure. Keep REST polling; the stream stays an option, see §3.2 |
 
 ---
 
@@ -241,6 +336,8 @@ Do not state that a provider is approved for this use until its terms have been 
 |---|---|
 | Candles for each of the eight ranges | Same key set; sane bar counts; timestamps carry the IST shift — **closed in Phase 2a**, see §3.1 |
 | Empty-bar filtering | Bars without open are absent — **closed in Phase 2a**, see §3.1 |
+| Streamed quote for an `.NS` symbol | Real frames, sane price, decodable timestamp — **verified in Phase 2b**, see §3.2 |
+| Stream vs REST agreement | Prices within a tick — **verified in Phase 2b**, see §3.2 |
 | Instrument detail | Same field names; missing values omitted rather than nulled |
 | Lookup for an unknown symbol | 404 `{ message: "Instrument not found" }` |
 | MARKET order with a live quote | Fills at the quote; holdings/positions/funds updated |

@@ -349,6 +349,48 @@ Known differences and additions recorded in this phase:
 
 ---
 
+## 1H. Phase 2b results — WebSocket streaming proof of concept
+
+Evaluated only. **No route, job or cache write was added**, and no socket is opened at runtime.
+Outcome: **works, not adopted** — see `MARKET_DATA_PLAN.md` §3.2.
+
+Suite totals: **131 passed, 6 skipped** without `TEST_MONGO_URL`; **137 passed** with it.
+
+Live measurements on 2026-10-19, 13:57–14:11 IST (NSE open).
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1H.1 | Connection and subscription | `wss://streamer.finance.yahoo.com/?version=2` accepts a subscribe frame with no auth | **PASSED** | live probe; 88 frames in 40 s |
+| 1H.2 | `.NS` equities stream | frames for `RELIANCE.NS`, `INFY.NS`, `TCS.NS`, `HDFCBANK.NS` | **PASSED** | 190–216 frames per symbol per 240 s |
+| 1H.3 | `^` indices stream | frames for `^NSEI` and `^NSEBANK` | **PASSED** | 241 and 242 frames per 240 s |
+| 1H.4 | Frame and field parsing | base64 protobuf → `id`/`price`/`time`/`change`/`change_percent`/`exchange` | **PASSED** | `test_yahoo_stream.py::test_decodes_the_fields_the_cache_needs` |
+| 1H.5 | Timestamp handling | zigzag `sint64` **milliseconds**, plausible year, IST-aware | **PASSED** | `test_yahoo_stream.py::test_time_is_decoded_as_zigzag_milliseconds`, `::test_time_agrees_with_a_second_independent_frame` |
+| 1H.6 | Decoder matches the provider's own protobuf | field-by-field agreement with `PricingData` | **PASSED** | out-of-tree cross-check, 89 frames, 0 real disagreements |
+| 1H.7 | Stream vs REST price agreement | within a tick of the Phase 2a endpoint | **PASSED** | Δ0.4 / Δ0.0 / Δ0.3 for `RELIANCE` / `INFY` / `^NSEI` |
+| 1H.8 | Update frequency | ~1/s/symbol, no long stalls | **PASSED** | median gap 1.0 s, worst gap 6.0 s over 240 s |
+| 1H.9 | Reconnect after an abrupt abort | reconnects and resumes without operator action | **PASSED** | handshake 1.77 s, first frame 2.40 s |
+| 1H.10 | Unsubscribe | frames stop for unsubscribed symbols | **PASSED** | one in-flight frame each, then silence |
+| 1H.11 | Unsupported symbols are detected, not trusted | no price is invented for an unknown symbol | **PASSED** | 0 frames for `NOTAREALSYMBOL.NS`/`ZZZZ.NS`; `test_unusable_frames_raise_instead_of_returning_a_price` |
+| 1H.12 | Malformed frames are rejected | decoder raises instead of returning a price | **PASSED** | `test_yahoo_stream.py` (7 parametrised cases, plus a truncated payload) |
+| 1H.13 | Concurrent connections | more than one socket from one host is allowed | **PASSED** | 3/3 streamed |
+| 1H.14 | No new runtime dependency | the POC needs nothing beyond what is installed | **PASSED** | `websockets` already present via `uvicorn[standard]`; `pip check` clean after removing the evaluated stack |
+| 1H.15 | A **full** trading session | 09:15–15:30 stability, close behaviour | **NOT RUN** | the soak was ~14 minutes |
+| 1H.16 | Market open/close and holidays | frames start and stop correctly | **NOT RUN** | one live weekday session only |
+| 1H.17 | Other network failures | DNS loss, proxy drop, suspended host | **NOT RUN** | only an abrupt local abort was simulated |
+
+Findings that constrain any future adoption:
+
+- **`marketCap` and `sector` are never streamed.** `SectorHeatmap.jsx` filters `marketCap > 0`, and the
+  Markets table sorts by it, so a streaming-only cache would blank both. The REST batch is required
+  regardless.
+- **Unsupported symbols fail silently** — no error frame, no rejection, no data. Staleness must be
+  detected per symbol.
+- **`time` is zigzag-encoded.** A plain varint read silently yields a date in 2083.
+- **yfinance's client renders `time` and `day_volume` as strings**, and its `listen()` reconnect path
+  can re-enter without a fresh connection (read from source, not exercised).
+
+---
+
 ## 2. API contract parity
 
 Method: issue the same request to Express and FastAPI with equivalent cookies and data, then compare
@@ -526,6 +568,7 @@ Two users, A and B, each with data.
 | 8.6 | Sector backfill | at most 10 per run, no overwrite of known values | PLANNED |
 | 8.7 | Snapshot job | one row per user per day; rerun is idempotent | PLANNED |
 | 8.8 | Job ownership | only one process schedules jobs | PLANNED |
+| 8.9 | Streaming as a cache source | not adopted — `marketCap`/`sector` are REST-only (§1H) | **NOT APPLICABLE** — decision recorded in `MARKET_DATA_PLAN.md` §3.2 |
 | 8.9 | Startup first run | immediate sync like the current app | PLANNED |
 
 ---

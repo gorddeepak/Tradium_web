@@ -1,7 +1,7 @@
 # Migration Status
 
-**Last updated:** 2026-10-18 (Phase 2a)
-**Current phase:** **Phase 2a — historical market data only: the `GET /api/instruments/:symbol/candles` route**
+**Last updated:** 2026-10-19 (Phase 2b)
+**Current phase:** **Phase 2b — WebSocket streaming proof of concept: evaluated, not adopted**
 **Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
 and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
@@ -13,7 +13,7 @@ and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 2a — historical candles (`GET /api/instruments/{symbol}/candles`); no quotes or streaming |
+| Phase | 2b — WebSocket streaming proof of concept (evaluated, not adopted); candles remain the last ported route |
 | FastAPI application | **started** — the 11 read routes, the 7 write routes, and the 4 auth routes (22 registered operations) |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | unchanged |
@@ -27,7 +27,7 @@ and the original repository are untouched.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **114 passed, 6 skipped** (default); **120 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **131 passed, 6 skipped** (default); **137 passed** with `TEST_MONGO_URL` — see §5 |
 
 ---
 
@@ -432,13 +432,95 @@ Same endpoint and same parameters as Express, so the bars match by construction;
 
 ### Not done in this phase
 
-- No WebSocket or streaming work of any kind, and no streaming feasibility test.
+- No WebSocket or streaming work in this phase; streaming was evaluated separately in §3H.
 - No `marketquotes` sync job, so `GET /api/instruments/search` and `GET /api/market/overview` still
   return nothing against the live dev database.
 - `GET /api/instruments/lookup/:symbol` and `GET /api/instruments/:symbol` remain **DEFERRED**.
 - `fetch_quote` still returns `None`: MARKET orders still answer the documented 503 and square-off
   still falls back to the stored `ltp`.
 - No CORS middleware, no frontend change, no response caching for candles.
+
+---
+
+## 3H. Phase 2b — WebSocket streaming proof of concept
+
+**Goal:** find out whether Yahoo's stream can feed live prices, before any of it is designed in. No
+cache sync, no `fetch_quote`, no lookup/detail routes, no trading changes.
+
+### Verdict
+
+**The stream is real and works for Indian symbols, but it cannot replace the polling jobs, and
+adopting it now would add a stateful always-on connection for no visible benefit. Keep REST polling.**
+Full measurements in `MARKET_DATA_PLAN.md` §3.2.
+
+Tested live on Monday 2026-10-19, 13:57–14:11 IST, with the NSE open.
+
+### Files
+
+- `api/yahoo_stream.py` — **new.** A decoder for the wire format only: `decode_frame`, `quote_time`,
+  `StreamDecodeError`. Standard library, no network, not wired into any route or job.
+- `api/tests/test_yahoo_stream.py` — **new**, 17 tests.
+- `api/tests/fixtures/yahoo_stream_frames.json` — **new**, 9 real frames captured from the live
+  streamer, used as fixtures.
+- `docs/migration/MARKET_DATA_PLAN.md` — §3.2 rewritten with the results and the decision.
+- `docs/migration/TEST_PLAN.md` — §1H.
+
+### What was verified
+
+| Check | Result |
+|---|---|
+| Endpoint | `wss://streamer.finance.yahoo.com/?version=2`; no auth, crumb or cookie |
+| `.NS` equities stream | yes — `RELIANCE`, `INFY`, `TCS`, `HDFCBANK` |
+| `^` indices stream | yes — `^NSEI`, `^NSEBANK` |
+| Update rate | ~1/s/symbol; 190–242 frames per symbol per 240 s; worst gap 6.0 s |
+| Fields | `id`, `price`, `time`, `exchange`, `change`, `change_percent`, `quote_type`, `market_hours`; stocks add `day_volume`, `last_size`, `price_hint` |
+| Price agreement with the Phase 2a REST path | `RELIANCE` Δ0.4, `INFY` Δ0.0, `^NSEI` Δ0.3 |
+| Reconnect after an abrupt transport abort | handshake 1.77 s, first frame 2.40 s |
+| Unsubscribe | frames stop after one in-flight message |
+| Concurrent connections from one host | 3/3 streamed |
+| `yfinance.live.AsyncWebSocket` | works, run rather than read |
+
+Prices were live, not stale: `^NSEI` sent `price=22889.05, change=-257.10`, and
+`price - change = 23146.15`, exactly the previous session's close.
+
+### The two findings that decide this
+
+1. **`marketCap` and `sector` are never streamed.** `marketSync` writes nine fields; the stream
+   covers `ltp`, `dayChange`, `dayChangePct`, `volume` (stocks only) and a derivable `prevClose`. The
+   Markets page's `marketCap` column and the sector heatmap (`SectorHeatmap.jsx` filters
+   `marketCap > 0`) would go blank. The 5-minute REST batch must keep running for those two fields
+   regardless — which removes most of the reason to add a second data path.
+2. **Unsupported symbols fail silently.** Subscribing to `NOTAREALSYMBOL.NS` and `ZZZZ.NS` produced no
+   frames, no error and no rejection. Absence is the only signal, so a dead symbol is
+   indistinguishable from a closed market. Any future adoption must detect per-symbol staleness.
+
+### The timestamp trap
+
+`pricing.proto` declares `sint64 time = 3` and `sint64 day_volume = 9`; protobuf encodes `sint64` as
+a **zigzag** varint. Read as a plain varint, `time` decodes to a date in **2083** with no error
+raised. `api/yahoo_stream.py` decodes zigzag explicitly and a test pins it against captured frames.
+
+### Why not `yfinance`'s client
+
+It works, but it decodes via `MessageToDict`, which renders `int64`/`sint64` as **strings**
+(`time` arrives as `"1792399388000"`), and its `listen()` reconnect path can re-enter its loop without
+a fresh connection because `_connect()` returns early while `self._ws` is set. The decoder here is
+standard library, ~150 lines, and tested against real frames.
+
+### Dependencies
+
+**None added.** `websockets` was already present through `uvicorn[standard]`; `yfinance`, pandas and
+numpy were installed only to run the evaluation and were removed again afterwards. `pip check` is
+clean and the full suite passes without them.
+
+### Not verified
+
+- A **full trading session** — the soak was ~14 minutes, not 09:15–15:30. Behaviour at the close and
+  over hours is unknown.
+- **Market open/close** transitions, and a **holiday or weekend**.
+- **Network failures other than an abrupt local abort** (DNS loss, a proxy dropping long-lived
+  connections).
+- **Provider terms** for this use — still open (§7.5), unchanged by these results.
 
 ---
 
@@ -477,6 +559,12 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | Application tests (Phase 1f) | **run:** 91 passed, 6 skipped; 97 passed with `TEST_MONGO_URL` |
 | Registered routes (Phase 1f) | **verified** — 21 operations: the 10 reads, the 7 writes, and the 4 auth routes (`POST` signup/login/logout, `GET /me`) |
 | Application tests (Phase 2a) | **run:** 114 passed, 6 skipped; 120 passed with `TEST_MONGO_URL` |
+| Application tests (Phase 2b) | **run:** 131 passed, 6 skipped; 137 passed with `TEST_MONGO_URL` |
+| Yahoo streamer reachable for `.NS` symbols | **verified** — live session, 2026-10-19 13:57–14:11 IST; equities and `^` indices both streamed |
+| Stream vs REST price agreement | **verified** — Δ0.4 / Δ0.0 / Δ0.3 for `RELIANCE` / `INFY` / `^NSEI` |
+| Streamer reconnect after an abrupt abort | **verified** — handshake 1.77 s, first frame 2.40 s |
+| Streamer silently ignores unknown symbols | **verified** — no frames, no error, for `NOTAREALSYMBOL.NS` and `ZZZZ.NS` |
+| Evaluated streaming stack removed | **verified** — `pip check` clean, 137 tests pass without yfinance/pandas/numpy; no new dependency added |
 | Registered routes (Phase 2a) | **verified** — 22 operations: the 11 reads, the 7 writes and the 4 auth routes; the new one is `GET /api/instruments/{symbol}/candles` |
 | Candle parity vs `yahoo-finance2` | **verified** — 16/16 identical for `RELIANCE` and `^NSEI` across all eight ranges, against a scratch `yahoo-finance2` reference built outside this repository |
 | Candles through the real app over the live network | **verified** — 246 bars (`RELIANCE`/`1M`), 375 (`^NSEI`/`1D`), 5 (`^NSEI`/`SPARK`); unknown symbol → 404 with the Express message; no cookie → 401 |
@@ -543,7 +631,9 @@ From `ARCHITECTURE_DECISIONS.md`:
 1. ~~Exact MongoDB collection names~~ — **resolved**: confirmed read-only against the local database
    metadata (`orders`, `watchlists`, `positions`, `funds`, `transactions`, `holdings`, …).
 2. Whether PydanticAI's `VercelAIAdapter` matches `@ai-sdk/react` 4.0.61.
-3. Whether Yahoo streaming delivers messages for exact `.NS` symbols.
+3. ~~Whether Yahoo streaming delivers messages for exact `.NS` symbols~~ — **resolved (Phase 2b)**: it
+   does, for equities and indices, but it is **not adopted** because it cannot supply `marketCap` or
+   `sector` and is not needed at the frontend's 30 s poll interval; see §3H.
 4. ~~Which candle intervals/ranges `yfinance` returns identically~~ — **resolved (Phase 2a)**: three
    of eight. `yfinance` was rejected for candles and Yahoo's chart endpoint is called directly; see
    §3G and `MARKET_DATA_PLAN.md` §3.1.
@@ -564,7 +654,9 @@ From `ARCHITECTURE_DECISIONS.md`:
   `POST /api/positions/:id/square-off`) and the 4 auth routes (`POST /api/auth/signup`,
   `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`).
 - No live-quote instrument route (`/lookup/:symbol`, `/:symbol`), which is deferred to the quote phase.
-- No WebSocket, streaming, or push channel of any kind; no streaming feasibility test.
+- No WebSocket, streaming, or push channel **in the application**: no socket is opened at runtime and
+  no streamed data reaches the database. Phase 2b evaluated the stream offline and added only a
+  decoder module plus its tests.
 - No `marketquotes` sync job, so the two cache-backed routes still read an empty cache.
 - No change to `market_data.fetch_quote`: it still returns `None`, so no price is fabricated and the
   MARKET-order/square-off behaviour is unchanged.
@@ -584,15 +676,16 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 2a complete (historical candles). Awaiting review.** Nothing further will be implemented
-without approval.
+**Phase 2b complete (streaming evaluated, not adopted). Awaiting review.** Nothing further will be
+implemented without approval.
 
 Open items:
 
-1. The candles route is closed. All other operations are tested in isolation; a live
-   Express-vs-FastAPI comparison is still **PENDING** (no safe reference harness exists;
-   `server/index.js` starts cron jobs on connect). The candle comparison in §3G is the one parity
-   check that *has* been done against the real Express dependency rather than against documentation.
+1. The candles route is closed, and streaming has a decision. All other operations are tested in
+   isolation; a live Express-vs-FastAPI comparison is still **PENDING** (no safe reference harness
+   exists; `server/index.js` starts cron jobs on connect). The candle comparison in §3G is the one
+   parity check that *has* been done against the real Express dependency rather than against
+   documentation.
 2. The write routes that need the market-data provider (a filling `MARKET` order) are wired to the
    `market_data.fetch_quote` seam and answer the documented 503 until that phase exists.
 3. The numeric-rendering nuance in §3E is an open parity item for the comparison harness. It now also
@@ -603,7 +696,8 @@ Open items:
 5. Cookie/JWT parity is verified from the FastAPI side, including that a FastAPI-issued cookie opens the
    protected routes. Cross-app cookie validation still needs the same `JWT_SECRET` as Express, and the
    header-level `Set-Cookie` comparison belongs to the reference-harness work (§1F.2F.1).
-6. Recommended next: an isolated Express reference harness to close the `PENDING` parity rows (including
-   the numeric-rendering item and `Set-Cookie`); then the quote phase (`marketquotes` sync, the two
-   deferred instrument routes, `fetch_quote`); then CORS plus the frontend switch-over. Nova/Gemini work
-   and any streaming experiment remain separate later phases.
+6. Recommended next: the **quote phase** — port `marketquotes` sync (REST batch, keeping
+   `marketCap`/`sector`), `fetch_quote`, and the two deferred instrument routes. Streaming is
+   deliberately left out; `api/yahoo_stream.py` is available if a sub-minute requirement ever appears.
+   Then an isolated Express reference harness, then CORS plus the frontend switch-over. Nova/Gemini
+   work remains a separate later phase.
