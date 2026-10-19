@@ -10,6 +10,9 @@ real orders: a full-stack playground for MERN + AI tool-calling.
 > `.venv/Scripts/python.exe -m uvicorn api.main:app --reload --port 8000`, then
 > `npm run dev` here. The Express quick start below is retained as the original
 > reference. See [docs/migration/MIGRATION_STATUS.md](docs/migration/MIGRATION_STATUS.md).
+> A production build (`npm run build`) is served by FastAPI itself when
+> `NODE_ENV=production` or `SERVE_STATIC=true`; see
+> [docs/migration/DEPLOYMENT.md](docs/migration/DEPLOYMENT.md).
 
 ## Stack
 

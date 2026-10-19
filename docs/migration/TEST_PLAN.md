@@ -732,12 +732,12 @@ See [AI_INTEGRATION_PLAN.md](./AI_INTEGRATION_PLAN.md) §10 for the full matrix.
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 10.1 | `npm run lint` | passes | PLANNED |
-| 10.2 | `npm run build` | passes; `dist/` produced | PLANNED |
-| 10.3 | Production mode serves SPA | deep link returns `index.html` | PLANNED |
-| 10.4 | `/api` is not swallowed by the SPA fallback | API still reachable | PLANNED |
-| 10.5 | Every page renders against FastAPI | no console errors beyond known states | PLANNED |
-| 10.6 | Login → dashboard → trade → logout | end-to-end without code changes | PLANNED |
+| 10.1 | `npm run lint` | passes | **PASSED** — clean in Phase 3a and 4a |
+| 10.2 | `npm run build` | passes; `dist/` produced | **PASSED (Phase 4a)** — Vite 8.1.5, `dist/` with 59 assets |
+| 10.3 | Production mode serves SPA | deep link returns `index.html` | **PASSED (Phase 4a)** — `/dashboard`, `/login`, `/dashboard/holdings` return the shell; refresh works; covered by `api/tests/test_static.py` |
+| 10.4 | `/api` is not swallowed by the SPA fallback | API still reachable | **PASSED (Phase 4a)** — `/api/health` returns `{"ok":true}`; unknown `/api/*` returns JSON 404 |
+| 10.5 | Every page renders against FastAPI | no console errors beyond known states | **PASSED (Phase 3a/4a)** — all six pages against FastAPI empty (3a) and with seeded data in the served build (4a) |
+| 10.6 | Login → dashboard → trade → logout | end-to-end without code changes | **PARTIAL (Phase 3a/4a)** — login/reload/logout verified in the browser; order placement verified at the API level (Phase 1), not clicked through the served UI |
 
 ---
 
@@ -745,9 +745,9 @@ See [AI_INTEGRATION_PLAN.md](./AI_INTEGRATION_PLAN.md) §10 for the full matrix.
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 11.1 | Env var parity | every required name present | PLANNED |
-| 11.2 | Health endpoint | 200 `{ ok: true }` | PLANNED |
-| 11.3 | Cold start | app serves after a fresh boot | PLANNED |
-| 11.4 | Rollback | previous service still works | PLANNED |
+| 11.1 | Env var parity | every required name present | **PASSED (Phase 4a)** — required + optional names documented in `DEPLOYMENT.md` §3 and `api/.env.example` |
+| 11.2 | Health endpoint | 200 `{ ok: true }` | **PASSED** — `/api/health` returns `{"ok":true}` (no DB or Yahoo work) |
+| 11.3 | Cold start | app serves after a fresh boot | **PASSED (Phase 4a, local)** — a fresh `uvicorn` process served the build, API and Nova; not yet on a deployed host |
+| 11.4 | Rollback | previous service still works | **PASSED by design** — the Express/Render service is untouched, so it remains the rollback target; no switch was executed |
 
 Do not run any deployment test against the existing production service in Phase 0.

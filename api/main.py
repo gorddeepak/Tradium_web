@@ -6,16 +6,18 @@ Run locally:
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
-from .config import get_cors_origins
+from .config import get_cors_origins, serve_static_enabled
 from .rate_limit import AuthRateLimitMiddleware
 from .routes import (
     assistant,
@@ -39,6 +41,43 @@ from .scheduler import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The Vite build output. `npm run build` writes it here; it is gitignored.
+DIST_DIR = Path(__file__).resolve().parents[1] / "dist"
+
+
+def _serve_frontend(app: FastAPI) -> None:
+    """Serve the Vite build with an SPA fallback, like Express in production.
+
+    API routers are registered before this, so ``/api`` always reaches them and
+    an unknown ``/api`` path gets the JSON 404 instead of index.html. Enabled by
+    ``SERVE_STATIC`` or ``NODE_ENV=production`` (see ``serve_static_enabled``).
+    """
+    if not serve_static_enabled():
+        return
+
+    index_file = DIST_DIR / "index.html"
+    if not index_file.is_file():
+        # The API is still usable; the deployment is missing `npm run build`.
+        logger.warning("Static serving is on but %s is missing; run `npm run build`", index_file)
+        return
+
+    assets_dir = DIST_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        # Reached only when no route or mount above matched.
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        # Any real file in dist/ (favicon.svg, icons) is returned as-is; a path
+        # that is not a file is a client-side route, so send the app shell.
+        candidate = (DIST_DIR / full_path).resolve()
+        if full_path and candidate.is_file() and DIST_DIR in candidate.parents:
+            return FileResponse(candidate)
+        return FileResponse(index_file)
 
 
 def create_app(database=None) -> FastAPI:
@@ -130,6 +169,9 @@ def create_app(database=None) -> FastAPI:
     app.include_router(market.router)
     app.include_router(auth.router)
     app.include_router(assistant.router)
+
+    # Registered last so the SPA fallback never shadows an API route.
+    _serve_frontend(app)
     return app
 
 

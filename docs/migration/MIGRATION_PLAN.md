@@ -244,6 +244,11 @@ during verification.
 
 Prove the whole system, then deploy on a **separate** service.
 
+**Progress (Phase 4a):** the frontend build and production static serving are done and verified locally,
+and [DEPLOYMENT.md](./DEPLOYMENT.md) records the required environment, scheduler ownership and rollback
+plan. The deployment itself (a new service, HTTPS, scheduler switchover) is **not** done and still needs
+explicit approval.
+
 ### Prerequisites
 
 - Phases 1–3 accepted.

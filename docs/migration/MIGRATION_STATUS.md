@@ -1,9 +1,10 @@
 # Migration Status
 
-**Last updated:** 2026-10-19 (Phase 3b)
-**Current phase:** **Phase 3b — Nova assistant and insight endpoints**
-**Application code modified:** **Yes.** CORS settings and the Nova assistant under `api/`, the frontend
-API origin and signup call under `src/`; `server/` and the original repository are untouched.
+**Last updated:** 2026-10-19 (Phase 4a)
+**Current phase:** **Phase 4a — production static serving and deployment preparation**
+**Application code modified:** **Yes.** CORS settings and the Nova assistant under `api/`, static
+serving and the SPA fallback in `api/main.py`, the frontend API origin and signup call under `src/`;
+`server/` and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -13,13 +14,13 @@ API origin and signup call under `src/`; `server/` and the original repository a
 
 | Item | Value |
 |---|---|
-| Phase | 3b — Nova chat, page insights and dashboard briefing |
-| FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations) |
+| Phase | 4a — production static serving and deployment preparation |
+| FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
 | Market cache | `marketquotes` populated for **53/53** symbols in `tradium_fastapi_dev`; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
 | Trading jobs | per-minute `priceSync` (fills orders, settles MIS exits) and the daily 18:00 IST snapshot; **off unless `TRADING_JOBS_ENABLED` is set** |
 | Express backend | unchanged, retained in-tree as reference |
-| Frontend | **switched** to FastAPI on `localhost:8000`; `VITE_API_URL` still overrides |
-| CORS | Vite dev origins (5173-5177) with credentials; `CORS_ORIGINS` overrides for deployed origins |
+| Frontend | **switched** to FastAPI on `localhost:8000`; a production build is now **served by FastAPI** (SPA fallback) when `SERVE_STATIC`/`NODE_ENV=production`; `VITE_API_URL` still overrides |
+| CORS | Vite dev origins (5173-5177) with credentials; `CORS_ORIGINS` overrides for deployed origins; a same-origin production build needs neither |
 | Development MongoDB | **local** `mongodb://127.0.0.1:27017/tradium_fastapi_dev` via gitignored `api/.env` |
 | Test MongoDB | in-memory `mongomock` plus the guarded `*_test` scratch DB; `MONGO_URL` is never used |
 | Production MongoDB | never contacted; no data copied |
@@ -30,10 +31,11 @@ API origin and signup call under `src/`; `server/` and the original repository a
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **259 passed, 8 skipped** (default); **267 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **269 passed, 8 skipped** (default); **277 passed** with `TEST_MONGO_URL` — see §5 |
 | Express parity check | **run** — cookies, numeric rendering and job side effects compared against the original modules; **no functional difference** (§3K) |
 | Browser cutover check | **run** — signup, login, reload, logout and all six dashboard pages against a live FastAPI server (§3L) |
 | Nova browser check | **run** — dashboard briefing, a page insight, and chat with one- and two-tool turns against live Gemini (§3M) |
+| Production static check | **run** — the built SPA served by FastAPI: deep links, refresh, assets, login, same-origin API, Nova, and the `Secure` cookie (§3N) |
 
 ---
 
@@ -1088,6 +1090,78 @@ rather than failing on the missing `used` field.
 
 ---
 
+## 3N. Phase 4a — production static serving and deployment preparation
+
+**Goal:** serve the Vite production build from FastAPI with correct SPA fallback and API isolation,
+document the production configuration, and verify the built app locally.
+
+### Changes
+
+| File | Change |
+|---|---|
+| `api/main.py` | `DIST_DIR`, `_serve_frontend()` (optional `/assets` mount + `GET /{full_path:path}` SPA fallback), wired in after the routers so it can never shadow `/api` |
+| `api/config.py` | `serve_static_enabled()` — `SERVE_STATIC` override, else `NODE_ENV=production` (Express parity) |
+| `api/.env.example` | documents `SERVE_STATIC` and its relationship to `NODE_ENV` |
+| `api/tests/test_static.py` | **new** — 10 tests over a throwaway `dist/`: root/deep-link shell, assets, root files, known-API passthrough, unknown-API JSON 404, bare `/api`, default-off, missing build, production-mode default, flag precedence |
+| `docs/migration/DEPLOYMENT.md` | **new** — build/start commands, env-var table, cookie/CORS notes, scheduler ownership, static behaviour, local production run, rollback |
+
+No change was made to `src/`; the production build already calls the API at the relative `/api` path
+(Phase 3a), which is what makes same-origin serving work.
+
+### Behaviour
+
+- Static serving is **off by default**; it turns on with `SERVE_STATIC=true` or `NODE_ENV=production`.
+  The separate switch lets a local run serve the real build without also forcing the `Secure` cookie.
+- `/assets/*` is served by a `StaticFiles` mount; other real files in `dist/` (e.g. `/favicon.svg`) are
+  returned directly; every other non-`/api` path gets `dist/index.html`.
+- `/api` and `/api/*` always reach FastAPI. A known route is untouched; an unknown one returns the JSON
+  `{"message": "Route not found"}`, never the app shell.
+- A missing `dist/index.html` logs a warning and leaves the API running (no crash).
+- **Deliberate divergence:** a missing file under `/assets/` returns the JSON 404, whereas Express's
+  fallback would return `index.html`. Missing assets should not resolve to HTML.
+
+### Verification against a live server
+
+Build first: `npm run build` produced `dist/` (Vite 8.1.5, 59 assets). Then `uvicorn api.main:app` on
+`127.0.0.1:8000` with `NODE_ENV=production`, `SERVE_STATIC=true`, a scratch database
+`tradium_fastapi_phase4a_test`, and a runtime-injected Gemini key. Browser origin `http://localhost:8000`.
+
+| Check | Observed |
+|---|---|
+| `GET /` | 200 `text/html`; the SPA boots with no console errors |
+| `GET /dashboard`, `/login`, `/dashboard/holdings` (deep links) | 200 `text/html` (app shell) |
+| Refresh on `/dashboard/positions` | 200, dashboard and data reload |
+| `GET /assets/index-*.js` | 200 `text/javascript`, full size; `/favicon.svg` 200 `image/svg+xml` |
+| `GET /api/health` | 200 `{"ok":true}` (not shadowed) |
+| `GET /api/nope`, `GET /api` | 404 `application/json` `{"message":"Route not found"}` |
+| Browser network | only the expected logged-out `/api/auth/me` 401; all assets and data requests 200 |
+| Login through the UI, `NODE_ENV=production` | 200; cookie stored over `http://localhost`; app reached `/dashboard` |
+| `Set-Cookie` (production) | `token=…; HttpOnly; Max-Age=604800; Path=/; SameSite=strict; Secure` |
+| Same-origin API | data requests to `/api/holdings`, `/api/positions`, `/api/orders`, `/api/watchlist`, `/api/funds`, `/api/portfolio/history` all 200 with no CORS preflight |
+| Dashboard briefing | rendered with real numbers (net worth ₹1,13,150, day P&L +₹503.57) |
+| Holdings page insight | "RELIANCE led today's gains with a 1.25% increase, offsetting INFY's 1.5% drop…" |
+| Nova chat | `getFunds` tool card + grounded answer (₹50,000 available, ₹7,350 blocked) |
+| Missing AI key | `/`, `/dashboard`, `/api/health` still 200/`ok`; briefing/insight 503 `{"message":"AI is not configured"}`, chat 503 `{"error":"AI is not configured"}` |
+| Scheduler ownership | startup log shows the app only; no market-sync or trading-job line (both switches unset) |
+
+### Files and checks
+
+- `.venv/Scripts/python.exe -m pytest -q`: **269 passed, 8 skipped**; **277 passed** with `TEST_MONGO_URL`.
+- `npm run lint`: **pass**; `npm run build`: **pass**.
+- Scratch database `tradium_fastapi_phase4a_test`: **dropped** after the run.
+- `tradium_fastapi_dev` and `zerodha` were not written to in this phase.
+
+### Not done in this phase
+
+- **No deployment.** No Render service was created, modified, or repointed; the existing Express service
+  and the original repository are untouched, and no Git remote was configured.
+- Multiple API instances would need a single-instance constraint unless both job switches stay unset;
+  that is documented, not enforced in code.
+- No HTTPS termination, reverse proxy, or `TrustedHost`/proxy-header configuration; the production
+  cookie is `Secure`, so a non-localhost deployment needs HTTPS in front of it.
+
+---
+
 ## 4. Known issues recorded
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and
@@ -1187,6 +1261,15 @@ Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
 | Tool-defect fixes (Phase 3b) | **verified** — `qty`, case-insensitive uppercase status and derived blocked margin all showed in the live two-tool answer |
 | Missing-key behaviour (Phase 3b) | **verified** — all three routes return 503 when `GOOGLE_GENERATIVE_AI_API_KEY` is unset |
 | Scratch database after Phase 3b | **dropped** — `tradium_fastapi_phase3b_test` absent; `tradium_fastapi_dev` and `zerodha` untouched |
+| Application tests (Phase 4a) | **run:** 269 passed, 8 skipped; 277 passed with `TEST_MONGO_URL`; the 10 new static tests cover deep links, assets, API passthrough, JSON 404s, default-off and missing-build handling |
+| Frontend build (Phase 4a) | **pass** — `npm run lint` clean and `npm run build` produced `dist/` (Vite 8.1.5, 59 assets) |
+| Static serving over HTTP (Phase 4a) | **verified** — `/` and deep links (`/dashboard`, `/login`, `/dashboard/holdings`) return the app shell; `/assets/*` and `/favicon.svg` return their files; `NODE_ENV=production` alone enables it |
+| API isolation (Phase 4a) | **verified** — `/api/health` returns `{"ok":true}`; `/api` and unknown `/api/*` return the JSON 404, never the SPA shell |
+| Production cookie (Phase 4a) | **verified** — `NODE_ENV=production` sets `Secure; HttpOnly; SameSite=strict; Path=/; Max-Age=604800`, and the browser kept the session over `http://localhost` |
+| Same-origin production browser flow (Phase 4a) | **verified** — login, all six dashboard pages, briefing, a page insight and a Nova tool call against the FastAPI-served build with no CORS |
+| Missing AI key while serving static (Phase 4a) | **verified** — static and API stay up; the three assistant routes return 503 |
+| Scheduler ownership at startup (Phase 4a) | **verified** — with both switches unset the startup log shows no job line; jobs stay opt-in |
+| Scratch database after Phase 4a | **dropped** — `tradium_fastapi_phase4a_test` absent; `tradium_fastapi_dev` and `zerodha` untouched |
 
 ---
 
@@ -1280,7 +1363,8 @@ From `ARCHITECTURE_DECISIONS.md`:
   frontend mount were never executed.
 - No AI model *generation* beyond the three Nova routes; no agentic features, background AI jobs,
   embeddings, or vector store. Insight and briefing fire only on page visit/data change.
-- No production frontend deployment, no FastAPI static `dist/` mount, and no deployed CORS origin.
+- No production frontend deployment and no deployed CORS origin; FastAPI now **can** serve `dist/`
+  with an SPA fallback (Phase 4a), but no service was deployed.
 - No change to `server/` or the original repository; `src/` changed only for the API origin and the
   signup call (§3L).
 - No database migration, schema change, or write to the application database.
@@ -1293,9 +1377,10 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 3b complete (Nova assistant, insights and briefing). Awaiting review.** The React app now runs
-end-to-end against FastAPI in local development, including the assistant. Nothing further will be
-implemented without approval.
+**Phase 4a complete (production static serving and deployment preparation). Awaiting review.** A Vite
+production build is now served by FastAPI with an SPA fallback and API isolation, the production
+configuration is documented in [DEPLOYMENT.md](./DEPLOYMENT.md), and the built app was verified locally
+including the `Secure` cookie and Nova. Nothing has been deployed.
 
 Open items:
 
@@ -1303,6 +1388,9 @@ Open items:
    protocols as Express, the six tools return request-scoped data, and four Express tool defects were
    fixed deliberately with tests. The step cap is configured but not adversarially probed, and there
    is no provider retry policy.
+0b. **The build is servable** (§3N): static serving matches Express (on with `NODE_ENV=production`,
+   overridable with `SERVE_STATIC`), deep links and refreshes return the app shell, and `/api` is never
+   shadowed. The one divergence is that a missing asset returns a JSON 404 instead of the shell.
 
 1. **The harness blocker is gone for module-level comparisons.** `tools/express-parity/` now compares
    auth cookies, `GET /api/holdings` JSON and the three jobs against the real Express modules without
@@ -1325,11 +1413,14 @@ Open items:
 6. **The local cutover is complete** (§3L): CORS works with credentials, signup/login/reload/logout and
    all six dashboard pages were exercised in a browser against a live FastAPI process, and the signup
    caller now sends `{ username, email, password }`.
-7. Remaining before a production cutover: FastAPI does not serve `dist/` yet. Either add the static
-   mount (planned for Phase 4) or deploy the frontend separately and list its origin in `CORS_ORIGINS`.
+7. **The build is servable and documented** (§3N): FastAPI serves `dist/` with an SPA fallback, and
+   [DEPLOYMENT.md](./DEPLOYMENT.md) lists the build/start commands, required environment variables,
+   scheduler ownership and the HTTPS requirement for the `Secure` cookie. Nothing is deployed.
 8. Recommended next, in order:
    1. The remaining HTTP-level parity rows, if wanted, using the committed harness.
-   2. FastAPI static `dist/` serving, as the first production-cutover item.
+   2. A deliberate deployment: a separate Render service (or equivalent) with `MONGO_URL`,
+      `JWT_SECRET`, `GOOGLE_GENERATIVE_AI_API_KEY`, `NODE_ENV=production` and HTTPS, then flip the
+      scheduler switches and the rollback target by explicit decision.
    3. A step-cap probe and a live provider-error probe to close the two `PARTIAL` rows in
       `AI_INTEGRATION_PLAN.md` §11, if wanted.
    4. Any remaining Express-defect decisions (orders debit/refund, `settleMisExit` partial fill).

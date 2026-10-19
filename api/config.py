@@ -39,6 +39,20 @@ def get_cors_origins() -> list[str]:
     return origins or list(VITE_DEV_ORIGINS)
 
 
+def serve_static_enabled() -> bool:
+    """Whether to serve the built frontend from ``dist/``.
+
+    Express serves ``dist/`` only when ``NODE_ENV=production``. The same default
+    applies here, but ``SERVE_STATIC`` can override it either way: a local run
+    can serve the real build without also turning on the ``Secure`` cookie flag,
+    which an http:// browser would otherwise drop.
+    """
+    override = os.getenv("SERVE_STATIC", "").strip().lower()
+    if override:
+        return override in {"1", "true", "yes", "on"}
+    return os.getenv("NODE_ENV", "").strip() == "production"
+
+
 @dataclass(frozen=True)
 class Settings:
     mongo_url: str
