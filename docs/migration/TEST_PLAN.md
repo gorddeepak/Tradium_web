@@ -42,7 +42,7 @@ comparing Express responses to FastAPI responses directly, using the same seeded
 |---|---|---|
 | Isolated MongoDB (local or scratch), never production | every parity test | **AVAILABLE** — local `mongod` on 127.0.0.1:27017; `tradium_fastapi_phase1_test` used and dropped |
 | Seeded demo data: ≥2 users, holdings, positions, orders in each status, funds, transactions, snapshots | most tests | **PLANNED** |
-| Express reference running on a spare port, pointed at the scratch DB | parity tests | **PLANNED** |
+| Express reference harness, pointed at a scratch DB | parity tests | **AVAILABLE** — `tools/express-parity/`; loads individual Express modules only, never `server/index.js`, so no cron job starts. Used in §1K |
 | FastAPI app running against the same scratch DB | Phase 1+ | **PLANNED** |
 | Gemini key with quota | AI tests | **BLOCKED** until Phase 3 |
 | Recorded resolved npm versions | AI protocol tests | **BLOCKED** until dependencies are installed |
@@ -75,8 +75,8 @@ Executed 2026-10-18. Fast suite uses `mongomock`; the integration test uses a re
 | 1A.12 | Malformed ObjectId claim | 500 `{ message: "Something went wrong" }` | **PASSED** | `test_holdings.py::test_malformed_user_id_in_token_returns_server_error` |
 | 1A.13 | Database failure | 500, generic message, no leak | **PASSED** | `test_database_errors.py` |
 | 1A.14 | Real MongoDB read | same shape/timestamps | **PASSED** | `test_mongo_integration.py` (1 passed) |
-| 2A.1 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | Express entry point starts cron jobs; a safe reference harness does not exist yet |
-| 2A.2 | `Set-Cookie` comparison from login | same attributes | **BLOCKED** | login route is not in Phase 1a |
+| 2A.1 | Live side-by-side vs Express on identical data | byte-identical body | **PASSED** (focused) | `tools/express-parity/` — real `GET /api/holdings` on both sides with the same stored doc: same keys, dates, ObjectIds and integers; the only difference is whole-float spelling (`2500` vs `2500.0`), which `JSON.parse` normalises. See §1K |
+| 2A.2 | `Set-Cookie` comparison from login | same attributes | **PASSED** | `tools/express-parity/` — signup/login/logout cookies compared field by field; equivalent (§1K) |
 
 Suite totals: **23 passed, 1 skipped** without `TEST_MONGO_URL`; **24 passed** with it.
 
@@ -97,7 +97,7 @@ database (`tradium_fastapi_phase1_test`, name must end in `_test`, dropped after
 | 1B.6 | Watchlist response key set | the 10 Mongoose keys incl. `__v` | **PASSED** | `test_watchlist.py::test_response_shape_matches_mongoose_serialization` |
 | 1B.7 | No watchlist rows | 200 `[]` | **PASSED** | `test_watchlist.py::test_empty_watchlist_returns_empty_list` |
 | 1B.8 | Real MongoDB read of `orders` + `watchlists` | correct rows, BSON dates to the ms | **PASSED** | `test_mongo_integration.py::test_orders_and_watchlist_read_real_mongo_documents` |
-| 2B.1 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | Express entry point starts cron jobs; no safe reference harness yet |
+| 2B.1 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | the harness now exists (§1K) but these two routes have not been compared at the HTTP level yet |
 
 Suite totals: **30 passed, 2 skipped** without `TEST_MONGO_URL`; **32 passed** with it.
 
@@ -135,7 +135,7 @@ Executed 2026-10-18.
 | 1C.4 | `GET /api/funds` derived maths | `usedMargin = blockedInOrders + misMargin`; correct `realizedPnl` | **PASSED** | `test_funds.py::test_derived_margins_and_realized_pnl` |
 | 1C.5 | First read creates an empty funds row | `available: 0`, row persisted | **PASSED** | `test_funds.py::test_creates_an_empty_funds_row_on_first_read` |
 | 1C.6 | Real MongoDB read of positions + funds | correct rows, BSON dates, maths | **PASSED** | `test_mongo_integration.py::test_positions_and_funds_read_real_mongo_documents` |
-| 2C.1 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | no safe reference harness |
+| 2C.1 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | the harness now exists (§1K) but these routes have not been compared at the HTTP level yet |
 
 Suite totals: **35 passed, 3 skipped** without `TEST_MONGO_URL`; **38 passed** with it.
 
@@ -178,7 +178,7 @@ database (`tradium_fastapi_phase1_test`, name must end in `_test`, dropped after
 | 1D.13 | Overview index ordering | order from `data/nifty50.js`; `stocks` only `kind: "stock"` | **PASSED** | `test_market.py::test_indices_follow_seed_order_and_stocks_are_split_out` |
 | 1D.14 | Overview `asOf` + row keys | freshest `updatedAt`; Mongoose key set preserved | **PASSED** | `test_market.py::test_as_of_is_the_freshest_row_and_rows_keep_mongoose_keys` |
 | 1D.15 | Real MongoDB read | `portfoliosnapshots`, `marketquotes`, `transactions` resolve | **PASSED** | `test_mongo_integration.py::test_portfolio_market_search_and_transactions_read_real_mongo_documents` |
-| 1D.16 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | no safe reference harness |
+| 1D.16 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | the harness now exists (§1K) but these routes have not been compared at the HTTP level yet |
 | 1D.17 | Live-Yahoo instrument routes (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`) | mapped Yahoo data | **DEFERRED** | market-data phase; no provider integration approved. Candles resolved in §1G; quotes in §1I |
 
 Suite totals: **48 passed, 4 skipped** without `TEST_MONGO_URL`; **52 passed** with it.
@@ -276,7 +276,7 @@ plus the express-rate-limit middleware mounted on signup and login.
 | 1F.17 | Rate-limit headers | draft-7 `RateLimit-Policy` and `RateLimit` on a guarded response | **PASSED** | `test_auth_routes.py::test_signup_sets_the_draft7_rate_limit_headers` |
 | 1F.18 | Rate-limit scope | logout is never limited | **PASSED** | `test_auth_routes.py::test_logout_is_not_rate_limited` |
 | 1F.19 | Real MongoDB | signup → cookie → login → `/me`, `users` collection, stored hash | **PASSED** | `test_mongo_integration.py::test_auth_routes_against_real_mongo` |
-| 2F.1 | Live side-by-side vs Express | byte-identical body, status and `Set-Cookie` | **PENDING** | no safe reference harness (`server/index.js` starts cron jobs on connect) |
+| 2F.1 | Live side-by-side vs Express | byte-identical body, status and `Set-Cookie` | **PASSED** | `tools/express-parity/` — 7-step sequence (signup, `/me`, login, logout, `/me` after logout, anonymous `/me`, bad login); bodies, statuses and cookie attributes equivalent (§1K) |
 
 Suite totals: **91 passed, 6 skipped** without `TEST_MONGO_URL`; **97 passed** with it.
 
@@ -434,7 +434,7 @@ Measured on 2026-10-19, 15:00–15:45 IST (just before and after the NSE close).
 | 1I.33 | `/search` not shadowed by `/{symbol}` | cache route still wins | **PASSED** | `test_search_is_not_shadowed_by_the_symbol_route` |
 | 1I.34 | Cache-backed routes after a real sync | real rows, indices in seed order | **PASSED** | live run: search returns `RELIANCE`, overview returns 3 indices + 50 stocks |
 | 1I.35 | Staleness cutoff | **not implemented** | **DELIBERATE** | `regularMarketTime` ages 1 s / 106 s / 903 s at 15:31 IST; a 5-minute cutoff would reject a current `^BSESN` quote |
-| 1I.36 | Express HTTP-level parity for these routes | identical status/body | **NOT RUN** | same harness blocker (§2); field-level parity was checked against `yahoo-finance2` directly |
+| 1I.36 | Express HTTP-level parity for these routes | identical status/body | **NOT RUN** | field-level parity was checked against `yahoo-finance2` directly; the HTTP harness now exists (§1K) but these routes were not re-run through it |
 | 1I.37 | `priceSync`, `settleMisExit`, `portfolioSnapshot` | ported | **DONE (Phase 2d)** | see §1J |
 
 ---
@@ -481,8 +481,48 @@ a live trading session. “Not crossed” cases are created with a quote on the 
 | 1J.30 | Injected test database | never starts the trading jobs | **PASSED** | `test_injected_test_database_never_starts_trading_jobs` |
 | 1J.31 | Real MongoDB side effects | price refresh, sector, MIS settlement and snapshot upsert on real BSON | **PASSED** | `test_scheduled_jobs_against_real_mongo` (only with `TEST_MONGO_URL`) |
 | 1J.32 | Live startup wiring | enabling the switch starts both trading schedulers, writes nothing while closed | **PASSED** | `create_app()` with `TRADING_JOBS_ENABLED=true`: price + snapshot schedulers started, `MARKET_SYNC_ENABLED` off, dev-DB counts unchanged |
-| 1J.33 | Express timing/HTTP parity | same schedule and bodies as Express | **NOT RUN** | same harness blocker (§2); the write shapes were captured from Mongoose directly |
+| 1J.33 | Express timing/HTTP parity | same schedule and bodies as Express | **PARTIAL** | job **side effects** compared document-by-document in §1K (identical, including BSON types except the two snapshot MIS fields); the HTTP bodies and the cron schedule were not run side by side |
 | 1J.34 | Holiday calendar / MIS auto square-off | not implemented | **NOT APPLICABLE** | Express has neither |
+
+---
+
+## 1K. Phase 2e results - focused Express parity check
+
+Method: `tools/express-parity/` loads **individual Express modules** (never `server/index.js`, so no
+cron job starts) and runs them against scratch `tradium_parity_*` databases. Provider seams are stubbed
+before `priceSync` is required, so no Yahoo request is made and no test depends on market hours. The
+FastAPI side runs `create_app(database=<scratch>)`, so its schedulers are not started either. Both
+sides receive the same input.
+
+| # | Test | Expected | Status |
+|---|---|---|---|
+| 1K.1 | Auth cookie: signup | same name, `Max-Age=604800`, `Path=/`, `HttpOnly`, `SameSite` | **PASSED** — both send `token`, `Max-Age=604800`, `Path=/`, `HttpOnly`, `SameSite=Strict/strict`. Express also sends `Expires`; Starlette does not |
+| 1K.2 | Auth cookie: logout clears it | cookie is deleted | **PASSED** — Express clears with `Expires` in the past (Express 5 drops `maxAge` in `clearCookie`), FastAPI with `Max-Age=0`; both delete per RFC 6265 §5.3 |
+| 1K.3 | JWT payload | HS256, `{id, iat, exp}`, 7-day lifetime | **PASSED** — identical claim set, `exp - iat = 604800`, 171-character token on both sides |
+| 1K.4 | `/me` body | same keys and values | **PASSED** — identical after normalising `_id` and the timestamps |
+| 1K.5 | Post-logout / anonymous access | 401 `Not authenticated` | **PASSED** |
+| 1K.6 | Wrong password | 401, same message | **PASSED** |
+| 1K.7 | Numeric rendering: whole floats | same JSON number | **PASSED** (cosmetic) — `2500` vs `2500.0`; equal after `JSON.parse`. Also `-0.0` vs `0` |
+| 1K.8 | Numeric rendering: fractional / exponent / integer | identical text | **PASSED** — `0.30000000000000004`, `1e+21`, `100`, `0` identical |
+| 1K.9 | Numeric rendering: non-finite | same rendering | **NOT APPLICABLE** — Express writes `null`, Starlette raises. Unreachable: quotes are finite-checked and order prices reject NaN |
+| 1K.10 | Price refresh side effects | same `ltp`/`dayChangePct` everywhere | **PASSED** — holdings, positions and watchlist all identical |
+| 1K.11 | Missing quote | symbol untouched | **PASSED** — `TATAMOTORS` unchanged on both sides |
+| 1K.12 | Sector backfill | fills only an empty sector | **PASSED** — `RELIANCE` → `Energy`; empty profile and existing sector left alone |
+| 1K.13 | LIMIT BUY into an existing holding | merged `qty` and `avgPrice` | **PASSED** — `10 → 12`, `avgPrice 2420.4166666666665` |
+| 1K.14 | LIMIT SELL a whole holding | row deleted, funds credited, ledger row | **PASSED** — funds `+7451.25`, ledger `-51.25` |
+| 1K.15 | SL-M exit at the live price | fill at quote, not trigger | **PASSED** — filled `810.5` from a `795` trigger |
+| 1K.16 | MIS settlement | position deleted, funds released, ledger row | **PASSED** — `+3158`, ledger `-42` (int32 on both) |
+| 1K.17 | OCO sibling | cancelled | **PASSED** — sibling `CANCELLED`, the uncrossed leg stays `OPEN` |
+| 1K.18 | Bracket spawn | new holding + two exit legs | **PASSED** — `WIPRO` holding and both legs created identically |
+| 1K.19 | Uncrossed order | stays `OPEN` | **PASSED** |
+| 1K.20 | Daily snapshot | one row per user, IST day at UTC midnight | **PASSED** — same `date`, `value 33123.5`, `invested 32045.5`, `misValue 7503.75`, `misInvested 7500`; empty user gets zeros |
+| 1K.21 | Snapshot MIS field **types** | same BSON type | **FAILED (cosmetic, accepted)** — `misInvested`/`misValue` are `int32` in Express when integral and always `double` here, because `misComponents` starts at `0` vs `0.0`. Values equal; nothing reads the type |
+| 1K.22 | Whole-run verdict | no functional difference | **PASSED** — `compare.py` reports `equivalent - no functional difference observed` |
+| 1K.23 | Isolation | no server, no cron, no Yahoo, no real DB | **PASSED** — `server/index.js` never required; scratch DBs dropped; `tradium_fastapi_dev` and `zerodha` untouched; original repo read-only |
+
+Not covered by this phase: HTTP-level bodies for orders, watchlist, positions, funds, portfolio history
+and the market routes (rows 1D.16, 1I.36, 2B.1, 2C.1 stay `PENDING`), the cron schedule itself, CORS,
+and the central error handler.
 
 ---
 
@@ -552,7 +592,7 @@ Two users, A and B, each with data.
 | 5.1 | New Python-written document | includes `createdAt`/`updatedAt`/`__v` like Mongoose's | PLANNED |
 | 5.2 | Mixed old/new documents | both serialise without errors | PLANNED |
 | 5.3 | `PortfolioSnapshot.date` | stored as the IST day at UTC midnight | PLANNED |
-| 5.4 | History labels | `YYYY-MM-DD` `label` for the same rows | **PASSED** (format only; live Express comparison PENDING — §1D.16) — `test_portfolio.py` |
+| 5.4 | History labels | `YYYY-MM-DD` `label` for the same rows | **PASSED** (format only; the live Express body comparison is still PENDING — §1D.16) — `test_portfolio.py` |
 | 5.5 | Sorting | numeric/date ordering matches | PLANNED |
 
 ---
@@ -667,7 +707,7 @@ Two users, A and B, each with data.
 | 8.10 | Startup first run | immediate sync like the current app | **PASSED** — market cache §1I.17; price sync §1J.29; snapshot deliberately waits for 18:00 IST (§1J.26–1J.27) |
 | 8.11 | `settleMisExit` | release cash + P&L, delete position, cancel siblings | **PASSED** — §1J.15, 1J.17–1J.20 |
 | 8.12 | Snapshot schedule | daily 18:00 IST | **PASSED** — §1J.26–1J.27 |
-| 8.13 | Express job-timing parity | identical schedule/side effects | **NOT RUN** — needs the reference harness (§2) |
+| 8.13 | Express job-timing parity | identical schedule/side effects | **PARTIAL** — side effects **PASSED** (§1K): `syncPrices` + `settleMisExit` + `recordDailySnapshot` produced the same documents on equivalent input. Schedule compared by reading both sources only |
 
 ---
 

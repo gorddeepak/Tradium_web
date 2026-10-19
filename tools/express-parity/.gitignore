@@ -1,0 +1,3 @@
+# Captures written by the harness. They contain only synthetic data from
+# scenario.json, but they are regenerated on every run and need not be tracked.
+out/

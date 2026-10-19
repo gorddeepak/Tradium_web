@@ -1,0 +1,254 @@
+{
+  "_comment": "Shared synthetic input for the priceSync / MIS settlement / portfolioSnapshot parity run. Whole numbers are written without a decimal point so both languages store int32; fractional values store as double.",
+  "now": "2026-09-01T04:15:30.123Z",
+  "seededIds": [
+    "652f1c9b8a1e4d3c2b1a0f01",
+    "652f1c9b8a1e4d3c2b1a0f02",
+    "652f1c9b8a1e4d3c2b1a2001",
+    "652f1c9b8a1e4d3c2b1a2002",
+    "652f1c9b8a1e4d3c2b1a2003",
+    "652f1c9b8a1e4d3c2b1a3001",
+    "652f1c9b8a1e4d3c2b1a3002",
+    "652f1c9b8a1e4d3c2b1a4001",
+    "652f1c9b8a1e4d3c2b1a4002",
+    "652f1c9b8a1e4d3c2b1a5001",
+    "652f1c9b8a1e4d3c2b1a5002",
+    "652f1c9b8a1e4d3c2b1a5003",
+    "652f1c9b8a1e4d3c2b1a5004",
+    "652f1c9b8a1e4d3c2b1a5005",
+    "652f1c9b8a1e4d3c2b1a5006",
+    "652f1c9b8a1e4d3c2b1a6001"
+  ],
+  "users": [
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a0f01",
+      "username": "u1",
+      "email": "u1@example.com",
+      "password": "$2b$10$notarealhashnotarealhashnotarealhashnotarealhash"
+    },
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a0f02",
+      "username": "u2",
+      "email": "u2@example.com",
+      "password": "$2b$10$notarealhashnotarealhashnotarealhashnotarealhash"
+    }
+  ],
+  "holdings": [
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a2001",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "RELIANCE",
+      "name": "Reliance Industries",
+      "exchange": "NSE",
+      "qty": 10,
+      "avgPrice": 2400.5,
+      "ltp": 2400.5,
+      "dayChangePct": 0.5,
+      "sector": ""
+    },
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a2002",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "INFY",
+      "name": "Infosys",
+      "exchange": "NSE",
+      "qty": 5,
+      "avgPrice": 1500.5,
+      "ltp": 1500.5,
+      "dayChangePct": 0.5,
+      "sector": "Technology"
+    },
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a2003",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "TATAMOTORS",
+      "name": "Tata Motors",
+      "exchange": "NSE",
+      "qty": 2,
+      "avgPrice": 900.25,
+      "ltp": 900.25,
+      "dayChangePct": 0.25,
+      "sector": ""
+    }
+  ],
+  "positions": [
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a3001",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "INFY",
+      "name": "Infosys",
+      "exchange": "NSE",
+      "side": "LONG",
+      "product": "MIS",
+      "qty": 5,
+      "entry": 1500,
+      "ltp": 1490.5
+    },
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a3002",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "SBIN",
+      "name": "State Bank of India",
+      "exchange": "NSE",
+      "side": "SHORT",
+      "product": "MIS",
+      "qty": 4,
+      "entry": 800,
+      "ltp": 800.5
+    }
+  ],
+  "watchlists": [
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a4001",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "INFY",
+      "name": "Infosys",
+      "exchange": "NSE",
+      "ltp": 1499.5,
+      "dayChangePct": 0.1
+    },
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a4002",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "TATAMOTORS",
+      "name": "Tata Motors",
+      "exchange": "NSE",
+      "ltp": 900.25,
+      "dayChangePct": 0.25
+    }
+  ],
+  "orders": [
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a5001",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "RELIANCE",
+      "name": "Reliance Industries",
+      "exchange": "NSE",
+      "side": "BUY",
+      "type": "LIMIT",
+      "product": "CNC",
+      "qty": 2,
+      "filled": 0,
+      "price": 2520,
+      "triggerPrice": 0,
+      "slTrigger": 0,
+      "tpPrice": 0,
+      "groupId": "",
+      "isExit": false,
+      "status": "OPEN"
+    },
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a5002",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "INFY",
+      "name": "Infosys",
+      "exchange": "NSE",
+      "side": "SELL",
+      "type": "LIMIT",
+      "product": "CNC",
+      "qty": 5,
+      "filled": 0,
+      "price": 1490.25,
+      "triggerPrice": 0,
+      "slTrigger": 0,
+      "tpPrice": 0,
+      "groupId": "",
+      "isExit": false,
+      "status": "OPEN"
+    },
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a5003",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "SBIN",
+      "name": "State Bank of India",
+      "exchange": "NSE",
+      "side": "BUY",
+      "type": "SL-M",
+      "product": "MIS",
+      "qty": 4,
+      "filled": 0,
+      "price": 795,
+      "triggerPrice": 795,
+      "slTrigger": 0,
+      "tpPrice": 0,
+      "groupId": "g1",
+      "isExit": true,
+      "status": "OPEN"
+    },
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a5004",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "SBIN",
+      "name": "State Bank of India",
+      "exchange": "NSE",
+      "side": "SELL",
+      "type": "LIMIT",
+      "product": "MIS",
+      "qty": 4,
+      "filled": 0,
+      "price": 1000,
+      "triggerPrice": 0,
+      "slTrigger": 0,
+      "tpPrice": 0,
+      "groupId": "g1",
+      "isExit": true,
+      "status": "OPEN"
+    },
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a5005",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "WIPRO",
+      "name": "Wipro",
+      "exchange": "NSE",
+      "side": "BUY",
+      "type": "LIMIT",
+      "product": "CNC",
+      "qty": 3,
+      "filled": 0,
+      "price": 400,
+      "triggerPrice": 0,
+      "slTrigger": 380,
+      "tpPrice": 430,
+      "groupId": "g2",
+      "isExit": false,
+      "status": "OPEN"
+    },
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a5006",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "symbol": "RELIANCE",
+      "name": "Reliance Industries",
+      "exchange": "NSE",
+      "side": "BUY",
+      "type": "LIMIT",
+      "product": "CNC",
+      "qty": 1,
+      "filled": 0,
+      "price": 2400,
+      "triggerPrice": 0,
+      "slTrigger": 0,
+      "tpPrice": 0,
+      "groupId": "",
+      "isExit": false,
+      "status": "OPEN"
+    }
+  ],
+  "funds": [
+    {
+      "_id": "652f1c9b8a1e4d3c2b1a6001",
+      "user": "652f1c9b8a1e4d3c2b1a0f01",
+      "available": 100000.5
+    }
+  ],
+  "quotes": {
+    "RELIANCE": { "ltp": 2510.25, "dayChangePct": 1.5 },
+    "INFY": { "ltp": 1500.75, "dayChangePct": 0.75 },
+    "SBIN": { "ltp": 810.5, "dayChangePct": -0.4 },
+    "WIPRO": { "ltp": 395.25, "dayChangePct": 2 }
+  },
+  "missingQuoteSymbols": ["TATAMOTORS"],
+  "sectors": {
+    "RELIANCE": "Energy",
+    "TATAMOTORS": ""
+  }
+}

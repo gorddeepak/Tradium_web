@@ -1,7 +1,7 @@
 # Migration Status
 
-**Last updated:** 2026-10-19 (Phase 2d)
-**Current phase:** **Phase 2d — remaining scheduled jobs**
+**Last updated:** 2026-10-19 (Phase 2e)
+**Current phase:** **Phase 2e — focused Express parity check**
 **Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
 and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
@@ -13,7 +13,7 @@ and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 2d — every route and every background job in the Express app is now ported |
+| Phase | 2e — every route and background job ported; focused Express parity check complete |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, and the 4 auth routes (24 registered operations) |
 | Market cache | `marketquotes` populated for **53/53** symbols in `tradium_fastapi_dev`; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
 | Trading jobs | per-minute `priceSync` (fills orders, settles MIS exits) and the daily 18:00 IST snapshot; **off unless `TRADING_JOBS_ENABLED` is set** |
@@ -30,6 +30,7 @@ and the original repository are untouched.
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
 | Tests executed | **242 passed, 8 skipped** (default); **250 passed** with `TEST_MONGO_URL` — see §5 |
+| Express parity check | **run** — cookies, numeric rendering and job side effects compared against the original modules; **no functional difference** (§3K) |
 
 ---
 
@@ -274,10 +275,12 @@ the quote-dependent behaviour above still does.
   performs and return the same 400/404/409/503 messages. Mongoose-only failures (a missing `name`, a
   non-`NSE` `exchange` enum, a non-String value on a String path) would be a 500 in Express; here a
   non-string `symbol` is accepted and stored as given. The React client always sends the typed fields.
-- **Numeric rendering.** JavaScript has one number type and `JSON.stringify(2500.0)` is `"2500"`, so
-  values written by a JS driver come back to PyMongo as floats. Whole floats should render as integers
-  to match Express exactly; that is left for the final parity phase (§9) rather than changing the
-  shared serializer mid-migration.
+- **Numeric rendering. Resolved in Phase 2e (§3K).** JavaScript has one number type and
+  `JSON.stringify(2500.0)` is `"2500"`, so a whole float renders as `2500` in Express and as `2500.0`
+  here. Measured on the same stored document: `JSON.parse` maps both to the same IEEE-754 double, so no
+  client can observe the difference. **Cosmetic; `to_json_value` left unchanged.** The one behavioural
+  edge — a non-finite value renders as `null` in Express but raises in Starlette — is unreachable
+  through any write path (see §3K).
 - Known issue #4 in §4 (debit before a holdings check) is reproduced, not fixed.
 
 ---
@@ -415,8 +418,8 @@ Same endpoint and same parameters as Express, so the bars match by construction;
   and receives one session; `5D` asks for 5 and receives three. Express behaves the same way.
 - **No caching**, matching Express: every request is a live call.
 - **The known numeric-rendering item is now reachable here too.** A whole float — a close of `1209.0`,
-  for instance — is rendered `1209.0` where JS `JSON.stringify` writes `1209`. Already recorded in §3E
-  for the reference-harness work; both parse to the same number.
+  for instance — is rendered `1209.0` where JS `JSON.stringify` writes `1209`. Closed in §3K: both parse
+  to the same double, so it is cosmetic.
 
 ### Verification
 
@@ -669,7 +672,8 @@ recorded as a known gap in `MARKET_DATA_PLAN.md` §5, not as parity that was ach
 
 - No `priceSync` (including `settleMisExit`), no `portfolioSnapshot`, no holiday calendar.
 - No WebSocket, no streaming, no change to the frontend.
-- No Express-vs-FastAPI HTTP-level parity run — still **PENDING**, same harness blocker.
+- No Express-vs-FastAPI HTTP-level parity run in this phase — the rate limiter, cookies and numeric
+  rendering were compared later in §3K.
 - The scheduler is not enabled by default, and nothing was enabled against any deployment.
 
 ---
@@ -789,10 +793,153 @@ rupee P&L is stored as an integer rather than a BSON double. JSON output is unaf
 
 ### Not done in this phase
 
-- No Express-vs-FastAPI HTTP or timing parity run — still **PENDING**, same harness blocker.
+- No Express-vs-FastAPI HTTP or timing parity run — the focused check in §3K covers the job *side
+  effects* and the snapshot/auth surfaces only; the remaining HTTP comparison rows are still
+  **PENDING**.
 - No holiday calendar, no auto square-off of open MIS positions at the close (Express has neither).
 - No change to the frontend, no deployment, and no switch enabled anywhere.
 - No scheduler dependency added; the three loops remain plain threads.
+
+---
+
+## 3K. Phase 2e — focused Express parity check
+
+**Goal:** settle the three parity uncertainties that were still `PENDING` — the auth `Set-Cookie`
+header, whole-float JSON rendering, and the database side effects of the three scheduled jobs — without
+starting the Express application and without touching the original repository or any real data.
+
+### Method
+
+The harness lives in `tools/express-parity/` and is read-only.
+
+- **`server/index.js` is never loaded.** It is the only file that registers cron jobs, so the harness
+  imports the smallest modules instead: `routes/authRoutes`, `routes/holdingsRoutes`,
+  `jobs/priceSync`, `jobs/portfolioSnapshot`.
+- **The two provider seams are stubbed before `priceSync` is required**, by intercepting
+  `Module._load`: `yahoo-finance2` becomes a fake class driven by `scenario.json`, and
+  `utils/marketHours.isMarketOpen` returns `true`. No Yahoo request is made.
+- **Every run uses a scratch database** (`tradium_parity_*`), dropped before and after. The dev
+  database `tradium_fastapi_dev` and the `zerodha` database are never opened.
+- **The original checkout is read-only** (`ZERODHA_SERVER`). This repository's `server/` copy has no
+  `node_modules`, so the harness loads the original tree's installed dependencies; all 38 `server/`
+  source files were confirmed identical to this repository's copies apart from line endings first.
+- **Both sides build the same documents.** `scenario.json` is the single shared input: two users, three
+  holdings, two MIS positions (LONG and SHORT), two watchlist rows, six OPEN orders, one funds row,
+  four quotes and a sector map.
+- The FastAPI side runs `create_app(database=<scratch>)`, so no scheduler is started either.
+- The Node files are `.cjs` because the repository root `package.json` sets `"type": "module"`.
+
+### 1. Authentication cookies (real routes, same request sequence)
+
+| Step | Express | FastAPI | Verdict |
+|---|---|---|---|
+| signup | 201, `token=<jwt>; Max-Age=604800; Path=/; Expires=<+7d>; HttpOnly; SameSite=Strict` | 201, same except **no `Expires`** and `SameSite=strict` | equivalent |
+| login | 200, same cookie | 200, same cookie | equivalent |
+| `GET /me` | 200 `{"user":{_id,username,email,createdAt,updatedAt,__v}}` | identical once id/timestamps are normalised | equivalent |
+| logout | 200, `token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Strict` | 200, `token=""; Max-Age=0; Expires=<now>; Path=/; HttpOnly; SameSite=strict` | equivalent (both delete) |
+| `GET /me` after logout | 401 `Not authenticated` | 401 `Not authenticated` | equivalent |
+| `GET /me` with no cookie | 401 | 401 | equivalent |
+| login, wrong password | 401 `Invalid credentials` | 401 `Invalid credentials` | equivalent |
+
+JWT payloads are identical in shape: HS256, `{id, iat, exp}`, `exp - iat = 604800`, 171 characters.
+
+Measured differences, none observable by a client:
+
+- **`Expires` on the signup/login cookie.** Express converts `maxAge` into both `Max-Age` and `Expires`;
+  Starlette sends only `Max-Age`. `Max-Age` wins in every current browser.
+- **Logout mechanism.** Express clears with `Expires` in the past (Express 5's `clearCookie` deletes
+  `maxAge`); Starlette sends `Max-Age=0` *and* `Expires=<now>`. Both are deletion per RFC 6265 §5.3,
+  which gives `Max-Age` precedence. *(Express 4 would have kept the cookie alive — that is not what the
+  installed Express 5.2.1 does.)*
+- **Empty-value quoting.** `http.cookies` emits `token=""`; Express emits `token=`. A browser parses
+  both as the empty string, which `require_user` treats as "not authenticated".
+- **Attribute order and `SameSite=strict` casing.** Parsed case- and order-insensitively per RFC 6265.
+
+### 2. Whole-float JSON rendering (real `GET /api/holdings`, same stored document)
+
+| Stored BSON value | Express body | FastAPI body |
+|---|---|---|
+| double `2500.0` | `2500` | `2500.0` |
+| double `0.0` | `0` | `0.0` |
+| double `-0.0` | `0` | `-0.0` |
+| double `0.30000000000000004` | `0.30000000000000004` | `0.30000000000000004` |
+| double `1e21` | `1e+21` | `1e+21` |
+| int32 `0`, `100` | `0`, `100` | `0`, `100` |
+| ObjectId, `Date`, `__v` | hex string, ISO-8601 ms, `0` | identical |
+
+`JSON.parse` maps `2500` and `2500.0` to the same IEEE-754 double, so no client can distinguish them;
+the React app reads these fields as numbers and formats them itself. **Cosmetic, left unchanged** —
+`to_json_value` stays as it is.
+
+One case is behavioural rather than cosmetic, and was measured rather than assumed: a **non-finite**
+value. `JSON.stringify(NaN)` is `null`, while Starlette's `JSONResponse` uses `allow_nan=False` and
+raises `ValueError` (→ 500 through the central handler). No write path can store one: provider quotes
+are finite-checked in `fetch_quote`; `qty` and `price` pass through `js_number` and are then rejected by
+`is_falsy_number` (NaN is falsy in JS); `triggerPrice`/`slTrigger`/`tpPrice` pass through
+`js_number_or_zero`, which turns NaN into `0` exactly as `Number(x) || 0` does. Recorded as a residual
+edge case, not fixed.
+
+### 3. Background jobs (equivalent input → compared collection by collection, BSON types included)
+
+The scenario exercises every branch that was ported. Both sides produced **the same document multiset**
+in `holdings`, `positions`, `watchlists`, `orders`, `funds`, `users` and `transactions`:
+
+| Behaviour | Observed identically on both sides |
+|---|---|
+| price refresh | `RELIANCE` → `ltp 2510.25`, `dayChangePct 1.5`; `INFY` → `1500.75 / 0.75`; position `INFY` → `1500.75`; watchlist `INFY` → `1500.75 / 0.75` |
+| missing quote | `TATAMOTORS` untouched; no provider value invented |
+| sector backfill | `RELIANCE` `""` → `"Energy"`; a symbol with no profile stays `""`; a known sector is not overwritten |
+| LIMIT BUY into an existing holding | `qty 10 → 12`, `avgPrice 2420.4166666666665` (server-side `$divide` pipeline) |
+| LIMIT SELL all of a holding | row deleted, funds `+7451.25`, ledger `INFY sell` `-51.25` |
+| SL-M exit fill | filled at the live price `810.5`, not the trigger `795`; no blocked-cash adjustment for an exit |
+| MIS settlement | SHORT position deleted, funds `+3158`, ledger `SBIN MIS exit` `-42` stored as **int32** |
+| OCO | sibling exit `CANCELLED`; the uncrossed SELL stays `OPEN` |
+| bracket spawn | new `WIPRO` holding (`qty 3`, `avgPrice/ltp 400`, `dayChangePct 0`, `sector ""`) plus an `SL-M` and a `LIMIT` exit leg, both `OPEN` |
+| uncrossed order | stays `OPEN`, nothing written |
+| final funds | `110609.75` (identical double) |
+| snapshot | one row per user; `value 33123.5`, `invested 32045.5`, `misValue 7503.75`, `misInvested 7500`; a user with no rows gets `0/0/0/0`; `date` is the same IST day at UTC midnight |
+
+The **only** divergence anywhere in the job surface is the BSON numeric type of the two snapshot MIS
+fields:
+
+| Field | Express | FastAPI | Why |
+|---|---|---|---|
+| `misInvested` | `int32` | `double` | `misComponents` starts at `0` in JS and `0.0` in `api/portfolio_math.py` |
+| `misValue` | `int32` when integral (`0`, `7500`), `double` otherwise | always `double` | same |
+
+The values are numerically identical, no query or index reads those fields, and the history route
+returns them as numbers. **Recorded, not changed**: applying `js_number` in `mis_components` would close
+it, but it would also change the live `/api/portfolio/history` output for no client-visible reason.
+Noted as a candidate if strict BSON-type parity is ever required.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `compare.py` verdict | **equivalent - no functional difference observed** |
+| Auth steps compared | 7 (signup, me, login, logout, me-after-logout, anonymous me, bad login) |
+| Documents compared per collection | `users` 2, `holdings` 3, `positions` 1, `orders` 8, `funds` 1, `transactions` 2, `snapshots` 2 |
+| Provider calls | **none** (both seams stubbed) |
+| Schedulers started | **none** on either side |
+| Express entry point loaded | **no** (`server/index.js` never required) |
+| Scratch databases | dropped; `tradium_fastapi_dev` and `zerodha` untouched |
+| Original repository | read-only; no file, branch, remote or history change |
+
+### Files
+
+- `tools/express-parity/` — **new**, 11 files: three Node harnesses (`.cjs`), the three FastAPI
+  equivalents, the shared `scenario.json`, `harness_env.py`, `compare.py`, a README and a `.gitignore`
+  for the captures.
+
+### Not done in this phase
+
+- No Express *server* was started, so CORS, the static frontend mount and the central error handler were
+  not exercised.
+- Orders, watchlist, positions, funds, portfolio history and the market routes were **not** compared at
+  the HTTP level; only their post-job documents were (for the write paths) and their stored-shape
+  rendering is already covered by the route tests. Those rows stay `PENDING` in `TEST_PLAN.md`.
+- Job *scheduling* was compared by reading both sources, not by waiting for a cron tick.
+- No behaviour was changed and no dependency was added.
 
 ---
 
@@ -872,7 +1019,10 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | Lint / build in the new repo | **not applicable** — no frontend dependencies installed |
 | Repository root / branch / remotes before writing | verified: `Tradium-FastAPI`, `migration/fastapi-backend`, **no remote** |
 | Scratch database after the integration run | absent from `list_database_names()`; `zerodha` untouched |
-| Express reference harness | **not run** — `server/index.js` starts cron jobs on connect |
+| Express reference harness (Phase 2e) | **run** — module-level only (`server/index.js` never loaded): 7 auth steps, the real `GET /api/holdings` body, and `syncPrices` + `settleMisExit` + `recordDailySnapshot` side effects compared on identical input; **no functional difference** (§3K) |
+| Job side effects vs Express (Phase 2e) | **verified** — 7 collections identical including BSON numeric types; the only divergence is `int32` vs `double` on the two snapshot MIS fields (values equal) |
+| Auth cookies vs Express (Phase 2e) | **verified** — `Max-Age`, `Path`, `HttpOnly`, `SameSite`, `Secure`, deletion on logout and the JWT claims all equivalent; header differences are informational only |
+| Numeric rendering vs Express (Phase 2e) | **verified** — whole floats render `2500` vs `2500.0`; identical after `JSON.parse`; dates, ObjectIds and integers identical |
 
 ---
 
@@ -959,6 +1109,9 @@ From `ARCHITECTURE_DECISIONS.md`:
   decoder module plus its tests.
 - No CORS middleware, and no change to the frontend's API origin.
 - No write to the `zerodha` database and no production data copied into `tradium_fastapi_dev`.
+- **No Express *server* was started.** The Phase 2e harness imports individual Express modules on an
+  ephemeral port against scratch databases; `server/index.js`, its cron registrations and its static
+  frontend mount were never executed.
 - No Nova / Gemini / PydanticAI work.
 - No frontend change and no frontend-to-FastAPI connection.
 - No change to `server/`, `src/`, or any other original application file.
@@ -972,15 +1125,16 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 2d complete (price sync, MIS exit settlement, daily snapshot). Awaiting review.** Nothing
-further will be implemented without approval.
+**Phase 2e complete (focused Express parity check). Awaiting review.** Nothing further will be
+implemented without approval.
 
 Open items:
 
-1. All operations are tested in isolation; a live Express-vs-FastAPI comparison is still **PENDING**
-   (no safe reference harness exists; `server/index.js` starts cron jobs on connect). The candle and
-   quote comparisons in §3G/§3I are the parity checks that *have* been done against the real Express
-   dependency rather than against documentation.
+1. **The harness blocker is gone for module-level comparisons.** `tools/express-parity/` now compares
+   auth cookies, `GET /api/holdings` JSON and the three jobs against the real Express modules without
+   booting the app or touching real data (§3K). The remaining `PENDING` rows are the *HTTP-level*
+   comparisons for orders, watchlist, positions, funds, portfolio history and the market routes; the
+   same harness can host them.
 2. **Quotes are not age-checked.** Missing, non-numeric, zero and negative prices are rejected; a
    quote that is minutes old is accepted, because a cutoff would have rejected a legitimately current
    `^BSESN` quote (§3I). Whether to add one — and at what threshold — is a decision, not a bug fix.
@@ -988,14 +1142,13 @@ Open items:
    order filling and the daily snapshot is `TRADING_JOBS_ENABLED=true`, each on exactly one process.
    Until then prices only move through the write routes and the cache only fills by calling
    `market_sync` manually.
-4. The numeric-rendering nuance in §3E is an open parity item for the comparison harness. It now also
-   applies to candle, quote and settlement amounts.
-5. Cookie/JWT parity is verified from the FastAPI side, including that a FastAPI-issued cookie opens the
-   protected routes. Cross-app cookie validation still needs the same `JWT_SECRET` as Express, and the
-   header-level `Set-Cookie` comparison belongs to the reference-harness work (§1F.2F.1).
+4. **Numeric rendering is closed** (§3E, §3K): whole floats differ only in their JSON spelling and no
+   client can observe it. The residual `int32` vs `double` type difference on the two snapshot MIS
+   fields is recorded, not fixed.
+5. **Cookie parity is closed** (§3K): identical `Max-Age`, `Path`, `HttpOnly`, `SameSite`, `Secure`,
+   deletion on logout and JWT claims; only `Expires` presence, attribute order and the empty-value
+   quoting differ. Cross-app cookie validation still needs the same `JWT_SECRET` as Express.
 6. Recommended next, in order:
-   1. An **isolated Express reference harness** (Express on a scratch port/DB with jobs disabled) to
-      close the PENDING parity rows, including `Set-Cookie`, numeric rendering, and the new job side
-      effects against equivalent input.
-   2. **CORS middleware plus the frontend switch-over.**
+   1. **CORS middleware plus the frontend switch-over.**
+   2. The remaining HTTP-level parity rows, if wanted, using the committed harness.
    3. Nova/Gemini/PydanticAI last, as its own phase.
