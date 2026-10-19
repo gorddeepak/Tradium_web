@@ -1,7 +1,7 @@
 # Migration Status
 
-**Last updated:** 2026-10-19 (Phase 2c)
-**Current phase:** **Phase 2c — REST market data and live quotes**
+**Last updated:** 2026-10-19 (Phase 2d)
+**Current phase:** **Phase 2d — remaining scheduled jobs**
 **Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
 and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
@@ -13,9 +13,10 @@ and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 2c — REST market data and live quotes; every route and job in the Express app except `priceSync`/`portfolioSnapshot` is now ported |
+| Phase | 2d — every route and every background job in the Express app is now ported |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, and the 4 auth routes (24 registered operations) |
 | Market cache | `marketquotes` populated for **53/53** symbols in `tradium_fastapi_dev`; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
+| Trading jobs | per-minute `priceSync` (fills orders, settles MIS exits) and the daily 18:00 IST snapshot; **off unless `TRADING_JOBS_ENABLED` is set** |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | unchanged |
 | Development MongoDB | **local** `mongodb://127.0.0.1:27017/tradium_fastapi_dev` via gitignored `api/.env` |
@@ -28,7 +29,7 @@ and the original repository are untouched.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **197 passed, 7 skipped** (default); **204 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **242 passed, 8 skipped** (default); **250 passed** with `TEST_MONGO_URL` — see §5 |
 
 ---
 
@@ -673,6 +674,128 @@ recorded as a known gap in `MARKET_DATA_PLAN.md` §5, not as parity that was ach
 
 ---
 
+## 3J. Phase 2d — remaining scheduled jobs
+
+**Goal:** port the three behaviours Express runs on timers — `priceSync` (including `settleMisExit`)
+and `portfolioSnapshot` — with the existing market-hours gate and single-owner rule.
+
+### What was ported
+
+| Express | FastAPI | Schedule |
+|---|---|---|
+| `syncPrices()` → `runSync()` | `sync_prices()` → `run_sync()` | every minute, plus once on startup |
+| `settleMisExit(order)` | `settle_mis_exit(db, order)` | called by `run_sync` for filled MIS exits |
+| `recordDailySnapshot()` | `record_daily_snapshot(db)` | 18:00 IST daily, **no** run on startup |
+
+`run_sync` reads **all** holdings, positions, watchlists and OPEN orders, dedupes them by
+`symbol-exchange`, quotes each distinct symbol once (sequentially, as Express does), updates the three
+price-bearing collections, backfills a missing holding sector, then fills the crossed OPEN orders.
+
+### Behaviour preserved, including the odd parts
+
+- **No fill outside market hours.** `sync_prices` returns before quoting, so an OPEN limit order waits
+  for the next session. Express has no separate gate around the fill loop.
+- **The claim is the race guard.** An order fills only if
+  `find_one_and_update({_id, status: "OPEN"})` still matches. A cancel that lands after the quote fetch
+  wins.
+- **SL-M fills at the live price**, not the trigger, and the blocked cash is corrected by
+  `(order.price - fill_price) * qty` — only for a non-exit BUY or any MIS order. Exits never take that
+  adjustment.
+- **MIS exits settle, everything else applies a fill.** `settle_mis_exit` releases
+  `entry * qty + pnl` (with `pnl` signed by LONG/SHORT), writes a `SETTLEMENT` ledger row
+  (`` `SYMBOL MIS exit` ``), then deletes the position. A missing position **cancels** the order; a
+  failed `$gte` guard **rejects** it. Both paths cancel the sibling legs.
+- **OCO.** Every filled exit calls `cancel_sibling_exits`; a cancelled CNC BUY sibling is refunded.
+- **One bad order does not stop the rest** — the loop logs and continues.
+- **Snapshot every user**, including someone who sold everything: `users` → holdings → open MIS legs.
+  Rerunning on the same IST day updates the same row instead of inserting a duplicate.
+- **Snapshot date** is the IST calendar day stored at **UTC midnight**, exactly as
+  `new Date(Date.now() + 5.5h)` then a UTC midnight produces.
+
+Two behaviours are bugs in the original and were preserved deliberately (recorded in §4):
+
+1. `settleMisExit` deletes the position unconditionally at the end, so its earlier
+   `if (updated.qty <= 0) delete` is redundant: a partial exit releases cash for the open quantity and
+   still removes the whole position.
+2. The snapshot job has no catch-up: a process restarted after 18:00 waits until tomorrow.
+
+### Schedule and ownership
+
+`MARKET_SYNC_ENABLED` keeps gating only the shared market cache. The jobs that **move money** have a
+separate switch, `TRADING_JOBS_ENABLED`, so enabling order fills can never happen as a side effect of
+populating the Markets page:
+
+| Switch | Starts | Default |
+|---|---|---|
+| `MARKET_SYNC_ENABLED` | `MarketSyncScheduler` (5 min + cold start) | off |
+| `TRADING_JOBS_ENABLED` | `PriceSyncScheduler` (1 min + startup) and `PortfolioSnapshotScheduler` (18:00 IST) | off |
+
+Both are read per startup, and `create_app(database=…)` never starts either, so the test suite cannot
+reach the network or change financial state. Exactly one process may set each switch; during the
+migration that process must not be running alongside Express's cron against the same database.
+
+**Caveat, unchanged from §3I:** both guards are per process. More than one uvicorn worker with a switch
+on starts one scheduler per worker.
+
+### Writes, observed rather than assumed
+
+The exact commands were captured with `mongoose.set("debug")` against a throwaway `*_test` database:
+
+| Operation | Command |
+|---|---|
+| `holding.save()` / `position.save()` / `watchlist.save()` | `updateOne({_id}, {"$set": {…changed fields, updatedAt}})` — **`__v` untouched** |
+| order claim | `findOneAndUpdate({_id, status:"OPEN"}, {"$set": {status, filled, price, updatedAt}})` |
+| snapshot upsert | `$set` the four numbers plus `updatedAt`; `$setOnInsert` `createdAt` and `__v: 0` |
+
+`run_sync` reproduces those shapes with `update_one` / `find_one_and_update` plus
+`documents.utcnow()`. One known numeric nuance carries over from §3E: `settle_mis_exit` passes its
+ledger amount through `js_number`, matching the existing `apply_fill` and square-off paths, so a whole
+rupee P&L is stored as an integer rather than a BSON double. JSON output is unaffected.
+
+### Files
+
+- `api/jobs/price_sync.py` — **new.** `sync_prices`, `run_sync`, single-flight lock.
+- `api/jobs/portfolio_snapshot.py` — **new.** `snapshot_date`, `record_daily_snapshot`.
+- `api/portfolio_math.py` — **new.** Shared `mis_components`; the history route and the job now use it.
+- `api/order_engine.py` — `settle_mis_exit` added next to `apply_fill`/`cancel_sibling_exits`.
+- `api/scheduler.py` — `TRADING_JOBS_ENABLED`, `PriceSyncScheduler`, `PortfolioSnapshotScheduler`,
+  `seconds_until_snapshot`.
+- `api/main.py` — starts/stops both trading jobs under the switch.
+- `api/routes/portfolio.py` — imports the shared `mis_components` (no behaviour change).
+- `api/.env.example` — documents `TRADING_JOBS_ENABLED`.
+- `api/tests/test_price_sync.py` — **new**, 27 tests.
+- `api/tests/test_portfolio_snapshot.py` — **new**, 13 tests.
+- `api/tests/test_mongo_integration.py` — one new real-Mongo job test.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Full suite (default) | **242 passed, 8 skipped** |
+| Full suite with `TEST_MONGO_URL` | **250 passed** |
+| Real-Mongo job run | holdings/position prices refreshed, sector filled, MIS exit settled, snapshot upserted; scratch DB dropped |
+| Mongoose `save()` / claim / snapshot shapes | **observed** with `mongoose.set("debug")`; reproduced |
+| Market gate | closed → no provider call, no write |
+| Single-flight | lock held → tick returns without work; lock always released |
+| Order matching | LIMIT at its limit, SL-M at the live price, no cross → still OPEN |
+| MIS settlement | LONG and SHORT signs, funds release, ledger row, sibling cancel, missing position → CANCELLED |
+| Partial exit | releases only the open quantity; position removed (Express behaviour preserved) |
+| Snapshot date | 23:59 IST → same day; 00:00 IST → next day; month boundary |
+| Snapshot idempotence | second run keeps `_id`/`createdAt`, updates `value`/`updatedAt`, one row |
+| Scheduler default | both switches off; injected test DB never starts either job |
+| Live startup wiring | **verified** — with `TRADING_JOBS_ENABLED=true`, `create_app()` starts the price and snapshot schedulers, `MARKET_SYNC_ENABLED` stays off, and the closed-market tick changed no document count in `tradium_fastapi_dev` |
+| Yahoo calls during tests | **none** — provider patched at `api.jobs.price_sync` |
+| `tradium_fastapi_dev` | untouched in this phase (still only the 53 Phase 2c `marketquotes` rows) |
+
+### Not done in this phase
+
+- No Express-vs-FastAPI HTTP or timing parity run — still **PENDING**, same harness blocker.
+- No holiday calendar, no auto square-off of open MIS positions at the close (Express has neither).
+- No change to the frontend, no deployment, and no switch enabled anywhere.
+- No scheduler dependency added; the three loops remain plain threads.
+
+---
+
 ## 4. Known issues recorded (not fixed)
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. None has been
@@ -686,6 +809,8 @@ changed.
 6. `npm start` uses `node`, not nodemon, contrary to project documentation.
 7. `DELETE /api/watchlist/:id` returns 204 even when nothing matched.
 8. Market-hours logic has no exchange holiday calendar.
+9. `settleMisExit` deletes an MIS position unconditionally after a partial fill, so an exit larger than
+   the remaining quantity still removes the whole position.
 
 Decision: reproduce current behaviour during the port; fix separately with approval (AD-9).
 
@@ -710,6 +835,11 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | Application tests (Phase 2a) | **run:** 114 passed, 6 skipped; 120 passed with `TEST_MONGO_URL` |
 | Application tests (Phase 2b) | **run:** 131 passed, 6 skipped; 137 passed with `TEST_MONGO_URL` |
 | Application tests (Phase 2c) | **run:** 197 passed, 7 skipped; 204 passed with `TEST_MONGO_URL` |
+| Application tests (Phase 2d) | **run:** 242 passed, 8 skipped; 250 passed with `TEST_MONGO_URL` |
+| Mongoose `save()` / order-claim / snapshot-upsert shapes (Phase 2d) | **observed** — `mongoose.set("debug")` against a scratch `*_test` DB; `save()` sets changed fields plus `updatedAt` and leaves `__v`; the snapshot upsert uses `$setOnInsert` for `createdAt`/`__v: 0` |
+| Job settlement and snapshot against a real MongoDB (Phase 2d) | **verified** — price refresh, sector backfill, MIS exit settlement (funds/ledger/position delete) and the daily snapshot upsert all run on real BSON types; scratch DB dropped afterwards |
+| Trading-job scheduler default (Phase 2d) | **verified** — off unless `TRADING_JOBS_ENABLED` is truthy; never started for an injected test database; price sync still honours the market-hours gate |
+| Live startup wiring (Phase 2d) | **verified** — `create_app()` with `TRADING_JOBS_ENABLED=true` starts the price and snapshot schedulers while `MARKET_SYNC_ENABLED` remains off; the closed-market startup tick left every dev-DB collection count unchanged |
 | Registered routes (Phase 2c) | **verified** — 24 operations: the 13 reads, the 7 writes and the 4 auth routes; the new ones are `GET /api/instruments/lookup/{symbol}` and `GET /api/instruments/{symbol}` |
 | Yahoo quote handshake | **verified** — `fc.yahoo.com` → `getcrumb` → `/v7/finance/quote`; the `finance.yahoo.com/quote/AAPL` bootstrap used by `yahoo-finance2` returns no cookie to `requests` |
 | Batch quote from Python | **verified** — 53/53 tickers in one request, `missing: []` |
@@ -735,7 +865,7 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | Auth round-trip against a real MongoDB | **verified** — signup → cookie → login → `/me` with the `users` collection; scratch DB dropped afterwards |
 | bcrypt cross-implementation | **verified** — an npm `bcrypt` hash verifies in Python and a Python hash verifies in the npm package (Node v22, out-of-tree) |
 | Rate limiter | **verified** — the 21st guarded attempt is a 429 with the documented body; logout and `/me` are never limited |
-| Write residue in `tradium_fastapi_dev` | **marketquotes cache only** — 53 rows written by the Phase 2c sync against the local dev DB; no orders, funds, holdings or positions were created by tests (they run on mongomock or a `*_test` scratch DB) |
+| Write residue in `tradium_fastapi_dev` | **marketquotes cache only** — 53 rows written by the Phase 2c sync against the local dev DB; the Phase 2d jobs ran only on mongomock and `*_test` scratch DBs, so no orders, funds, holdings, positions or snapshots were created in the dev DB |
 | Local `mongod` reachability | **verified** — admin `ping` ok on `127.0.0.1:27017` |
 | Effective dev database name | **verified** — `tradium_fastapi_dev`, from a normal `create_app()` startup |
 | `zerodha` database | untouched — same 9 collections, no writes |
@@ -803,6 +933,9 @@ From `ARCHITECTURE_DECISIONS.md`:
 6. The approved fallback if streaming fails.
 7. Current Render build/start configuration (not in the repository).
 8. Whether the FastAPI service replaces the existing Render service or is added alongside it.
+9. Whether the two job switches — `MARKET_SYNC_ENABLED` for the cache and `TRADING_JOBS_ENABLED` for
+   order filling and snapshots — should ever both be set in one production process, and which service
+   owns them once Express is retired.
 
 ---
 
@@ -816,17 +949,16 @@ From `ARCHITECTURE_DECISIONS.md`:
   /api/watchlist`, `POST /api/funds/transactions`, `POST`/`DELETE /api/orders`, `POST /api/orders/exits`,
   `POST /api/positions/:id/square-off`) and the 4 auth routes (`POST /api/auth/signup`,
   `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`).
-- No `priceSync` job, so positions, holdings and watchlist prices are not refreshed by the FastAPI app.
-  `settleMisExit` is part of that job and is likewise not ported.
-- No `portfolioSnapshot` job.
-- The market-cache scheduler is **off by default** and was never enabled against any deployment.
-- No exchange holiday calendar, and no staleness cutoff on quotes (deliberate — see §3I).
+- The per-minute `priceSync`, `settleMisExit` and the daily `portfolioSnapshot` **are ported**, but both
+  schedulers are **off by default**; neither was enabled against any deployment, so the FastAPI app does
+  not refresh prices or fill orders on its own yet.
+- No exchange holiday calendar, no staleness cutoff on quotes (deliberate — see §3I), and no auto
+  square-off of open MIS positions at the close (Express has none).
 - No WebSocket, streaming, or push channel **in the application**: no socket is opened at runtime and
   no streamed data reaches the database. Phase 2b evaluated the stream offline and added only a
   decoder module plus its tests.
 - No CORS middleware, and no change to the frontend's API origin.
 - No write to the `zerodha` database and no production data copied into `tradium_fastapi_dev`.
-- No scheduled or background job of any kind.
 - No Nova / Gemini / PydanticAI work.
 - No frontend change and no frontend-to-FastAPI connection.
 - No change to `server/`, `src/`, or any other original application file.
@@ -840,7 +972,7 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 2c complete (REST quotes, market sync, instrument detail routes). Awaiting review.** Nothing
+**Phase 2d complete (price sync, MIS exit settlement, daily snapshot). Awaiting review.** Nothing
 further will be implemented without approval.
 
 Open items:
@@ -852,17 +984,18 @@ Open items:
 2. **Quotes are not age-checked.** Missing, non-numeric, zero and negative prices are rejected; a
    quote that is minutes old is accepted, because a cutoff would have rejected a legitimately current
    `^BSESN` quote (§3I). Whether to add one — and at what threshold — is a decision, not a bug fix.
-3. **The scheduler is off by default.** Turning it on requires `MARKET_SYNC_ENABLED=true` on exactly
-   one process. Until then the cache is populated only by calling `market_sync` manually.
+3. **Nothing is scheduled by default.** Enabling the cache is `MARKET_SYNC_ENABLED=true`; enabling
+   order filling and the daily snapshot is `TRADING_JOBS_ENABLED=true`, each on exactly one process.
+   Until then prices only move through the write routes and the cache only fills by calling
+   `market_sync` manually.
 4. The numeric-rendering nuance in §3E is an open parity item for the comparison harness. It now also
-   applies to candle and quote prices.
+   applies to candle, quote and settlement amounts.
 5. Cookie/JWT parity is verified from the FastAPI side, including that a FastAPI-issued cookie opens the
    protected routes. Cross-app cookie validation still needs the same `JWT_SECRET` as Express, and the
    header-level `Set-Cookie` comparison belongs to the reference-harness work (§1F.2F.1).
 6. Recommended next, in order:
-   1. **`priceSync` + `settleMisExit` + `portfolioSnapshot`**, with the same market-hours gate and the
-      same single-owner rule. This is the last scheduled behaviour still missing.
-   2. An **isolated Express reference harness** (Express on a scratch port/DB with jobs disabled) to
-      close the PENDING parity rows, including `Set-Cookie` and numeric rendering.
-   3. **CORS middleware plus the frontend switch-over.**
-   4. Nova/Gemini/PydanticAI last, as its own phase.
+   1. An **isolated Express reference harness** (Express on a scratch port/DB with jobs disabled) to
+      close the PENDING parity rows, including `Set-Cookie`, numeric rendering, and the new job side
+      effects against equivalent input.
+   2. **CORS middleware plus the frontend switch-over.**
+   3. Nova/Gemini/PydanticAI last, as its own phase.

@@ -16,7 +16,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import db
 from .rate_limit import AuthRateLimitMiddleware
 from .routes import auth, funds, health, holdings, instruments, market, orders, portfolio, positions, watchlist
-from .scheduler import MarketSyncScheduler, market_sync_enabled
+from .scheduler import (
+    MarketSyncScheduler,
+    PortfolioSnapshotScheduler,
+    PriceSyncScheduler,
+    market_sync_enabled,
+    trading_jobs_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,17 +37,29 @@ def create_app(database=None) -> FastAPI:
         else:
             app.state.db = db.connect()
 
-        # Off unless MARKET_SYNC_ENABLED is set: only one process may own the
-        # cache refresh. See api/scheduler.py.
+        # Off unless the matching switch is set: only one process may own each
+        # job. See api/scheduler.py.
         app.state.market_sync = None
-        if database is None and market_sync_enabled():
-            app.state.market_sync = MarketSyncScheduler(app.state.db)
-            app.state.market_sync.start()
+        app.state.price_sync = None
+        app.state.portfolio_snapshot = None
+        if database is None:
+            if market_sync_enabled():
+                app.state.market_sync = MarketSyncScheduler(app.state.db)
+                app.state.market_sync.start()
+            if trading_jobs_enabled():
+                # Price sync fills orders and moves funds, so it shares one
+                # owner switch with the daily snapshot.
+                app.state.price_sync = PriceSyncScheduler(app.state.db)
+                app.state.price_sync.start()
+                app.state.portfolio_snapshot = PortfolioSnapshotScheduler(app.state.db)
+                app.state.portfolio_snapshot.start()
 
         yield
 
-        if app.state.market_sync is not None:
-            app.state.market_sync.stop()
+        for name in ("market_sync", "price_sync", "portfolio_snapshot"):
+            job = getattr(app.state, name)
+            if job is not None:
+                job.stop()
         if database is None:
             db.close()
 

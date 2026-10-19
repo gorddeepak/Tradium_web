@@ -1,7 +1,7 @@
 """Port of server/utils/executeOrder.js.
 
-Applies fills and builds/cancels exit orders. The orders routes use these
-functions now; the price-sync job will reuse them when that phase is ported.
+Applies fills, settles MIS exits, and builds/cancels exit orders. The orders
+routes use these functions, and ``price_sync`` reuses them for scheduled fills.
 The atomic merge on positions/holdings keeps the server-side ``$set``
 pipeline the Express code relies on so concurrent updates can't be lost.
 """
@@ -213,6 +213,69 @@ def spawn_bracket_exits(db, entry):
         tp_price=entry["tpPrice"],
         group_id=entry["groupId"],
     )
+
+
+def settle_mis_exit(db, order):
+    """An MIS exit just filled — release the position's cash plus P&L.
+
+    Port of ``settleMisExit()``. The ``$gte`` guard releases the blocked cash
+    exactly once even if both bracket legs fire together; the position is then
+    removed unconditionally at the end, which is what the Express code does (its
+    earlier ``qty <= 0`` delete is therefore redundant, but the order of writes
+    is preserved).
+    """
+    position = db["positions"].find_one(
+        {
+            "user": order["user"],
+            "symbol": order["symbol"],
+            "exchange": order["exchange"],
+            "product": "MIS",
+            "side": "LONG" if order["side"] == "SELL" else "SHORT",
+        }
+    )
+    if position is None:
+        # The position is gone, so the sibling leg can never fill legitimately.
+        db["orders"].update_one(
+            {"_id": order["_id"]},
+            {"$set": {"status": "CANCELLED", "updatedAt": utcnow()}},
+        )
+        cancel_sibling_exits(db, order)
+        return
+
+    qty = min(order["qty"], position["qty"])
+    direction = 1 if position["side"] == "LONG" else -1
+    pnl = (order["price"] - position["entry"]) * qty * direction
+    release = position["entry"] * qty + pnl
+
+    updated = db["positions"].find_one_and_update(
+        {"_id": position["_id"], "qty": {"$gte": qty}},
+        {"$inc": {"qty": -qty}, "$set": {"updatedAt": utcnow()}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated is None:
+        db["orders"].update_one(
+            {"_id": order["_id"]},
+            {"$set": {"status": "REJECTED", "updatedAt": utcnow()}},
+        )
+        cancel_sibling_exits(db, order)
+        return
+    if updated["qty"] <= 0:
+        db["positions"].delete_one({"_id": updated["_id"]})
+
+    inc_funds(db, order["user"], release)
+
+    # An intraday trade's whole result is realized the moment it closes.
+    db["transactions"].insert_one(
+        new_document(
+            user=order["user"],
+            kind="SETTLEMENT",
+            method=f"{order['symbol']} MIS exit",
+            amount=js_number(pnl),
+            symbol=order["symbol"],
+            status="COMPLETED",
+        )
+    )
+    db["positions"].delete_one({"_id": position["_id"]})
 
 
 def cancel_sibling_exits(db, order):

@@ -435,7 +435,54 @@ Measured on 2026-10-19, 15:00–15:45 IST (just before and after the NSE close).
 | 1I.34 | Cache-backed routes after a real sync | real rows, indices in seed order | **PASSED** | live run: search returns `RELIANCE`, overview returns 3 indices + 50 stocks |
 | 1I.35 | Staleness cutoff | **not implemented** | **DELIBERATE** | `regularMarketTime` ages 1 s / 106 s / 903 s at 15:31 IST; a 5-minute cutoff would reject a current `^BSESN` quote |
 | 1I.36 | Express HTTP-level parity for these routes | identical status/body | **NOT RUN** | same harness blocker (§2); field-level parity was checked against `yahoo-finance2` directly |
-| 1I.37 | `priceSync`, `settleMisExit`, `portfolioSnapshot` | ported | **NOT DONE** | next phase |
+| 1I.37 | `priceSync`, `settleMisExit`, `portfolioSnapshot` | ported | **DONE (Phase 2d)** | see §1J |
+
+---
+
+## 1J. Phase 2d results — remaining scheduled jobs
+
+Suite totals: **242 passed, 8 skipped** without `TEST_MONGO_URL`; **250 passed** with it. The eight
+skips are the real-Mongo tests that only run when `TEST_MONGO_URL` is set.
+
+The provider and the clock are patched in every fast test, so no test contacts Yahoo and none depends on
+a live trading session. “Not crossed” cases are created with a quote on the wrong side of the order.
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1J.1 | Market-hours gate | closed → no provider call, no write | **PASSED** | `test_closed_market_does_no_work` |
+| 1J.2 | Single-flight | a tick while the lock is held returns immediately | **PASSED** | `test_a_tick_is_skipped_while_the_previous_run_holds_the_lock` |
+| 1J.3 | Lock released on both paths | next tick can run | **PASSED** | `test_the_lock_is_released_after_a_successful_run` |
+| 1J.4 | Price refresh | holdings, positions and watchlist updated with the right fields | **PASSED** | `test_open_tick_refreshes_holdings_positions_and_watchlist`; `__v` stays 0, `updatedAt` advances |
+| 1J.5 | Symbol dedupe | one quote per `symbol-exchange`, first-seen order | **PASSED** | `test_each_distinct_symbol_is_quoted_once` |
+| 1J.6 | Missing quote | stored price kept | **PASSED** | `test_a_symbol_without_a_quote_keeps_its_stored_price` |
+| 1J.7 | Sector backfill | only holdings with an empty sector | **PASSED** | `test_sector_is_filled_only_for_holdings_without_one` |
+| 1J.8 | Unresolved sector | stays `""`, retried later | **PASSED** | `test_an_empty_sector_is_left_for_a_later_run` |
+| 1J.9 | Sector provider failure | logged, run not aborted | **PASSED** | `test_a_sector_provider_failure_does_not_abort_the_run` |
+| 1J.10 | LIMIT fill | fills at the limit price, not the quote | **PASSED** | `test_limit_buy_fills_at_its_limit_price_not_the_quote` |
+| 1J.11 | Not crossed | stays OPEN, nothing written | **PASSED** | `test_an_order_that_has_not_crossed_stays_open` |
+| 1J.12 | LIMIT sell | credits `qty * price` and records the settlement | **PASSED** | `test_limit_sell_credits_funds_and_records_the_settlement` |
+| 1J.13 | SL-M non-exit | fills at the live price, blocked cash corrected | **PASSED** | `test_slm_fills_at_the_live_price_and_adjusts_the_blocked_cash` |
+| 1J.14 | SL-M exit | no blocked-cash adjustment | **PASSED** | `test_slm_exit_does_not_touch_the_blocked_cash_adjustment` |
+| 1J.15 | MIS exit fill | position settled, funds released, ledger row, sibling CANCELLED | **PASSED** | `test_mis_exit_fill_settles_the_position_and_cancels_its_sibling` |
+| 1J.16 | One bad order | others still fill | **PASSED** | `test_one_bad_order_does_not_stop_the_others` |
+| 1J.17 | `settleMisExit` LONG | releases `entry*qty + pnl` | **PASSED** | `test_settle_long_releases_entry_plus_profit` |
+| 1J.18 | `settleMisExit` SHORT | P&L sign inverted | **PASSED** | `test_settle_short_pnl_sign_is_inverted` |
+| 1J.19 | Missing position | order CANCELLED, siblings cancelled, no funds touched | **PASSED** | `test_settle_without_a_position_cancels_the_order_and_siblings` |
+| 1J.20 | Partial exit | releases only the open quantity; position removed | **PASSED** | `test_settle_releases_only_the_open_quantity` (Express behaviour preserved) |
+| 1J.21 | Snapshot date | IST day stored at UTC midnight, incl. month boundary | **PASSED** | `test_snapshot_date_uses_the_ist_day_at_utc_midnight`, `test_snapshot_date_handles_the_month_boundary` |
+| 1J.22 | Snapshot coverage | one row per user, even with no rows left | **PASSED** | `test_every_user_gets_one_row_even_with_no_holdings` |
+| 1J.23 | MIS legs in the snapshot | value and invested include open positions, SHORT signed | **PASSED** | `test_every_user_gets_one_row_even_with_no_holdings`, `test_short_legs_reduce_the_mis_value` |
+| 1J.24 | Snapshot idempotence | same-day rerun updates in place, one row | **PASSED** | `test_a_second_run_on_the_same_day_overwrites_in_place` |
+| 1J.25 | Snapshot failure | logged, does not raise | **PASSED** | `test_a_failure_does_not_raise_and_stops_the_rest` |
+| 1J.26 | Snapshot schedule | seconds to 18:00 IST before/after/exactly at the hour | **PASSED** | `test_seconds_until_snapshot_*` (3 tests) |
+| 1J.27 | Snapshot scheduler | ticks when due, survives a failing tick, joins on stop | **PASSED** | `test_snapshot_scheduler_ticks_when_due_and_stops`, `test_snapshot_scheduler_survives_a_failing_tick` |
+| 1J.28 | Trading switch | truthy/falsy values, default off | **PASSED** | `test_trading_switch_*` (3 tests / 9 cases) |
+| 1J.29 | Price scheduler | immediate tick on start, never double-starts, survives a failure | **PASSED** | `test_price_scheduler_*` (3 tests) |
+| 1J.30 | Injected test database | never starts the trading jobs | **PASSED** | `test_injected_test_database_never_starts_trading_jobs` |
+| 1J.31 | Real MongoDB side effects | price refresh, sector, MIS settlement and snapshot upsert on real BSON | **PASSED** | `test_scheduled_jobs_against_real_mongo` (only with `TEST_MONGO_URL`) |
+| 1J.32 | Live startup wiring | enabling the switch starts both trading schedulers, writes nothing while closed | **PASSED** | `create_app()` with `TRADING_JOBS_ENABLED=true`: price + snapshot schedulers started, `MARKET_SYNC_ENABLED` off, dev-DB counts unchanged |
+| 1J.33 | Express timing/HTTP parity | same schedule and bodies as Express | **NOT RUN** | same harness blocker (§2); the write shapes were captured from Mongoose directly |
+| 1J.34 | Holiday calendar / MIS auto square-off | not implemented | **NOT APPLICABLE** | Express has neither |
 
 ---
 
@@ -608,16 +655,19 @@ Two users, A and B, each with data.
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 8.1 | Price sync inside market hours | updates `ltp` for held symbols | PLANNED |
-| 8.2 | Price sync outside hours | no provider calls | PLANNED |
-| 8.3 | Price sync single-flight | overlapping triggers do not double-run | PLANNED |
-| 8.4 | One symbol fails | others still update; failure logged | PLANNED |
-| 8.5 | Market sync batch | 53 tickers upserted, no duplicates | PLANNED |
-| 8.6 | Sector backfill | at most 10 per run, no overwrite of known values | PLANNED |
-| 8.7 | Snapshot job | one row per user per day; rerun is idempotent | PLANNED |
-| 8.8 | Job ownership | only one process schedules jobs | PLANNED |
+| 8.1 | Price sync inside market hours | updates `ltp` for held symbols | **PASSED** — §1J.1–1J.4 |
+| 8.2 | Price sync outside hours | no provider calls | **PASSED** — §1J.1 |
+| 8.3 | Price sync single-flight | overlapping triggers do not double-run | **PASSED** — §1J.2 |
+| 8.4 | One symbol fails | others still update; failure logged | **PASSED** — §1J.6 (quote) and §1J.9 (sector); one bad *order* too, §1J.16 |
+| 8.5 | Market sync batch | 53 tickers upserted, no duplicates | **PASSED** — §1I.4–1I.11 |
+| 8.6 | Sector backfill | at most 10 per run, no overwrite of known values | **PASSED** — §1I.14–1I.15; the price sync's own backfill in §1J.7 |
+| 8.7 | Snapshot job | one row per user per day; rerun is idempotent | **PASSED** — §1J.21–1J.25 |
+| 8.8 | Job ownership | only one process schedules jobs | **PASSED** — §1J.28–1J.30; two independent switches, both off by default |
 | 8.9 | Streaming as a cache source | not adopted — `marketCap`/`sector` are REST-only (§1H) | **NOT APPLICABLE** — decision recorded in `MARKET_DATA_PLAN.md` §3.2 |
-| 8.9 | Startup first run | immediate sync like the current app | PLANNED |
+| 8.10 | Startup first run | immediate sync like the current app | **PASSED** — market cache §1I.17; price sync §1J.29; snapshot deliberately waits for 18:00 IST (§1J.26–1J.27) |
+| 8.11 | `settleMisExit` | release cash + P&L, delete position, cancel siblings | **PASSED** — §1J.15, 1J.17–1J.20 |
+| 8.12 | Snapshot schedule | daily 18:00 IST | **PASSED** — §1J.26–1J.27 |
+| 8.13 | Express job-timing parity | identical schedule/side effects | **NOT RUN** — needs the reference harness (§2) |
 
 ---
 

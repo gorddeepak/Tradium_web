@@ -22,6 +22,8 @@ from pymongo import MongoClient
 
 from api.main import create_app
 from api.jobs.market_sync import backfill_sectors, sync_quotes
+from api.jobs.portfolio_snapshot import record_daily_snapshot, snapshot_date
+from api.jobs.price_sync import run_sync
 
 TEST_MONGO_URL = os.getenv("TEST_MONGO_URL")
 
@@ -380,6 +382,73 @@ def test_market_sync_against_real_mongo(scratch_database, monkeypatch):
 
     # One row per symbol, not one per run.
     assert scratch_database["marketquotes"].count_documents({}) == 2
+
+
+def test_scheduled_jobs_against_real_mongo(scratch_database, monkeypatch):
+    # Confirms the per-minute fill path and the daily upsert outside mongomock:
+    # a real $inc, a real delete, and a real findOneAndUpdate upsert.
+    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+    monkeypatch.setattr("api.jobs.price_sync.is_market_open", lambda: True)
+    monkeypatch.setattr(
+        "api.jobs.price_sync.fetch_quote",
+        lambda symbol: {"ltp": 1600.0, "dayChangePct": 0.5},
+    )
+    monkeypatch.setattr("api.jobs.price_sync.fetch_sector", lambda symbol: "IT")
+
+    user_id = ObjectId()
+    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+
+    scratch_database["users"].insert_one({"_id": user_id})
+    scratch_database["holdings"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
+         "exchange": "NSE", "qty": 10, "avgPrice": 1500.0, "ltp": 1500.0,
+         "dayChangePct": 0.0, "sector": "", "createdAt": created,
+         "updatedAt": created, "__v": 0}
+    )
+    scratch_database["positions"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
+         "exchange": "NSE", "side": "LONG", "product": "MIS", "qty": 5,
+         "entry": 1500.0, "ltp": 1500.0, "createdAt": created,
+         "updatedAt": created, "__v": 0}
+    )
+    scratch_database["funds"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "available": 1000.0,
+         "createdAt": created, "updatedAt": created, "__v": 0}
+    )
+    scratch_database["orders"].insert_one(
+        {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
+         "exchange": "NSE", "side": "SELL", "type": "LIMIT", "product": "MIS",
+         "qty": 5, "filled": 0, "price": 1600.0, "triggerPrice": 0.0,
+         "slTrigger": 0.0, "tpPrice": 0.0, "groupId": "group-1", "isExit": True,
+         "status": "OPEN", "createdAt": created, "updatedAt": created, "__v": 0}
+    )
+
+    run_sync(scratch_database)
+
+    holding = scratch_database["holdings"].find_one({"user": user_id})
+    assert holding["ltp"] == 1600.0
+    assert holding["dayChangePct"] == 0.5
+    assert holding["sector"] == "IT"  # backfilled by the same run
+
+    # The MIS exit settled: position gone, cash and ledger written.
+    assert scratch_database["positions"].count_documents({"user": user_id}) == 0
+    assert scratch_database["funds"].find_one({"user": user_id})["available"] == 9000.0
+    settlement = scratch_database["transactions"].find_one({"user": user_id})
+    assert settlement["method"] == "INFY MIS exit"
+    assert settlement["amount"] == 500.0
+
+    record_daily_snapshot(scratch_database)
+
+    snapshot = scratch_database["portfoliosnapshots"].find_one({"user": user_id})
+    assert snapshot["value"] == 16000.0
+    assert snapshot["invested"] == 15000.0
+    assert snapshot["misValue"] == 0.0
+    assert snapshot["misInvested"] == 0.0
+    assert snapshot["__v"] == 0
+    assert snapshot["date"].replace(tzinfo=timezone.utc) == snapshot_date()
+    # Idempotent per IST day: a second run updates the same row.
+    record_daily_snapshot(scratch_database)
+    assert scratch_database["portfoliosnapshots"].count_documents({"user": user_id}) == 1
 
 
 def test_auth_routes_against_real_mongo(scratch_database, monkeypatch):

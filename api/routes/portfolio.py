@@ -18,6 +18,7 @@ from pymongo.database import Database
 
 from ..auth import require_user
 from ..db import get_database
+from ..portfolio_math import mis_components
 
 router = APIRouter()
 
@@ -32,22 +33,6 @@ def _local_date(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(IST).strftime("%Y-%m-%d")
-
-
-def _mis_components(positions):
-    """Port of misComponents in server/utils/portfolioMath.js."""
-    mis_value = 0.0
-    mis_invested = 0.0
-    for position in positions:
-        if position.get("product") != "MIS":
-            continue
-        direction = -1 if position.get("side") == "SHORT" else 1
-        # An ltp of 0 falls back to the entry price.
-        price = position.get("ltp") or position["entry"]
-        pnl = (price - position["entry"]) * position["qty"] * direction
-        mis_invested += position["qty"] * position["entry"]
-        mis_value += position["qty"] * position["entry"] + pnl
-    return mis_value, mis_invested
 
 
 @router.get("/api/portfolio/history")
@@ -82,7 +67,7 @@ def portfolio_history(
     current_invested = sum(holding["qty"] * holding["avgPrice"] for holding in holdings)
 
     positions = list(db["positions"].find({"user": user, "product": "MIS"}))
-    mis_value, mis_invested = _mis_components(positions)
+    mis_value, mis_invested = mis_components(positions)
 
     today_label = datetime.now(timezone.utc).astimezone(IST).strftime("%Y-%m-%d")
     if not series or series[-1]["label"] != today_label:
