@@ -43,7 +43,7 @@ export default function Signup() {
     setError("");
     setLoading(true);
     try {
-      await signup(form.name, form.email, form.password);
+      await signup({ username: form.name.trim(), email: form.email, password: form.password });
       navigate(ROUTES.dashboard, { replace: true });
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || "Couldn't create your account.");

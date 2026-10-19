@@ -1,9 +1,9 @@
 # Migration Status
 
-**Last updated:** 2026-10-19 (Phase 2e)
-**Current phase:** **Phase 2e — focused Express parity check**
-**Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
-and the original repository are untouched.
+**Last updated:** 2026-10-19 (Phase 3a)
+**Current phase:** **Phase 3a — CORS and frontend cutover**
+**Application code modified:** **Yes.** CORS settings under `api/`, the frontend API origin and signup
+call under `src/`; `server/` and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -13,12 +13,13 @@ and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 2e — every route and background job ported; focused Express parity check complete |
+| Phase | 3a — CORS enabled and the frontend switched to FastAPI |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, and the 4 auth routes (24 registered operations) |
 | Market cache | `marketquotes` populated for **53/53** symbols in `tradium_fastapi_dev`; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
 | Trading jobs | per-minute `priceSync` (fills orders, settles MIS exits) and the daily 18:00 IST snapshot; **off unless `TRADING_JOBS_ENABLED` is set** |
 | Express backend | unchanged, retained in-tree as reference |
-| Frontend | unchanged |
+| Frontend | **switched** to FastAPI on `localhost:8000`; `VITE_API_URL` still overrides |
+| CORS | Vite dev origins (5173-5177) with credentials; `CORS_ORIGINS` overrides for deployed origins |
 | Development MongoDB | **local** `mongodb://127.0.0.1:27017/tradium_fastapi_dev` via gitignored `api/.env` |
 | Test MongoDB | in-memory `mongomock` plus the guarded `*_test` scratch DB; `MONGO_URL` is never used |
 | Production MongoDB | never contacted; no data copied |
@@ -29,8 +30,9 @@ and the original repository are untouched.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **242 passed, 8 skipped** (default); **250 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **246 passed, 8 skipped** (default); **250 passed** with `TEST_MONGO_URL` — see §5 |
 | Express parity check | **run** — cookies, numeric rendering and job side effects compared against the original modules; **no functional difference** (§3K) |
+| Browser cutover check | **run** — signup, login, reload, logout and all six dashboard pages against a live FastAPI server (§3L) |
 
 ---
 
@@ -943,6 +945,70 @@ Noted as a candidate if strict BSON-type parity is ever required.
 
 ---
 
+## 3L. Phase 3a — CORS and frontend cutover
+
+**Goal:** let the React app in this repository talk to FastAPI with cookie authentication, fix the
+known signup mismatch, and verify the auth lifecycle and main pages in a browser.
+
+### Changes
+
+| File | Change |
+|---|---|
+| `api/config.py` | `VITE_DEV_ORIGINS` (5173-5177) and `get_cors_origins()`; `CORS_ORIGINS` is a comma-separated override, defaulting to the Vite origins |
+| `api/main.py` | `CORSMiddleware` with the resolved origins, `allow_credentials=True`, all methods and headers |
+| `api/.env.example` | documents `CORS_ORIGINS` and its production use |
+| `src/services/api.js` | development `BASE_URL` is now `http://localhost:8000/api`; `VITE_API_URL` still wins, production stays same-origin `/api` |
+| `src/features/auth/pages/Signup.jsx` | calls `signup({ username: form.name.trim(), email, password })` instead of three positional arguments |
+| `api/tests/test_cors.py` | **new**, four tests: each Vite port, credentialed preflight, rejected origin, environment override |
+
+The signup route was **not** changed: it already accepts `username`, `email`, `password`, matching the
+Express contract. Only the frontend caller was wrong, in two ways at once (argument shape and the
+`name`/`username` field name).
+
+### Verification against a live server
+
+Run with `uvicorn api.main:app` on `127.0.0.1:8000`, `MONGO_URL` pointing at the scratch database
+`tradium_fastapi_phase3a_test`, and Vite on `localhost:5173`. The browser used `http://localhost:5173`
+so the request origin exercised the default CORS list.
+
+| Check | Observed |
+|---|---|
+| Preflight `OPTIONS /api/auth/login` from `http://localhost:5173` | 200, `Access-Control-Allow-Origin: http://localhost:5173`, `Access-Control-Allow-Credentials: true` |
+| Signup through the UI | `POST /api/auth/signup` 201, cookie set, redirect to `/dashboard` |
+| Signup payload | the created user's `username` is the full name typed into the form |
+| Session restoration | page reload issued `GET /api/auth/me` 200 and stayed on the dashboard |
+| Login through the UI | `POST /api/auth/login` 200, redirect to `/dashboard` |
+| Logout through the user menu | `POST /api/auth/logout` 200, redirect to `/login`; `/api/auth/me` then 401 |
+| Protected route after logout | `/dashboard` redirected to `/login` |
+| Holdings, positions, orders, watchlist, funds, markets | each page rendered its expected empty state; every data request returned 200 |
+| Wrong password / duplicate signup | 401 `Invalid credentials` / 400 `User already exists` |
+| Stale-session calls before signup | two `GET /api/auth/me` 401 responses, the expected logged-out state |
+| Nova calls | `POST /api/assistant/*` 404; `PageInsight` shows "Insight unavailable right now." and the rest of the page still works |
+
+No CORS error appeared in the browser console. The only failed requests were the deferred Nova
+endpoints.
+
+### Files and checks
+
+- `npm run lint`: **pass**.
+- `npm run build`: **pass** (Vite 8.1.5, 3521 modules; only the existing chunk-size advisory).
+- `.venv/Scripts/python.exe -m pytest -q`: **246 passed, 8 skipped**.
+- Scratch database `tradium_fastapi_phase3a_test`: **dropped** after the run.
+- `tradium_fastapi_dev` was not written to in this phase; `zerodha` still has its 9 collections.
+
+### Not done in this phase
+
+- No production deployment, static serving change, or Render change. FastAPI still does **not** mount
+  `dist/`; a production cutover needs either that mount (planned for Phase 4) or a separately deployed
+  frontend whose origin is listed in `CORS_ORIGINS`.
+- No Nova/Gemini work. The assistant routes remain 404 until that phase.
+- No change to `server/`, the original `Zerodha` repository, or its deployment.
+- The HTTP-level parity rows for orders, watchlist, positions, funds, portfolio history and market
+  routes remain `PENDING` in `TEST_PLAN.md`; this phase exercised the browser paths, not a byte-level
+  comparison.
+
+---
+
 ## 4. Known issues recorded (not fixed)
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. None has been
@@ -1016,13 +1082,19 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | Local `mongod` reachability | **verified** — admin `ping` ok on `127.0.0.1:27017` |
 | Effective dev database name | **verified** — `tradium_fastapi_dev`, from a normal `create_app()` startup |
 | `zerodha` database | untouched — same 9 collections, no writes |
-| Lint / build in the new repo | **not applicable** — no frontend dependencies installed |
+| Lint / build in the new repo (Phase 3a) | **pass** — `npm run lint` clean; `npm run build` produced the Vite 8.1.5 bundle |
 | Repository root / branch / remotes before writing | verified: `Tradium-FastAPI`, `migration/fastapi-backend`, **no remote** |
 | Scratch database after the integration run | absent from `list_database_names()`; `zerodha` untouched |
 | Express reference harness (Phase 2e) | **run** — module-level only (`server/index.js` never loaded): 7 auth steps, the real `GET /api/holdings` body, and `syncPrices` + `settleMisExit` + `recordDailySnapshot` side effects compared on identical input; **no functional difference** (§3K) |
 | Job side effects vs Express (Phase 2e) | **verified** — 7 collections identical including BSON numeric types; the only divergence is `int32` vs `double` on the two snapshot MIS fields (values equal) |
 | Auth cookies vs Express (Phase 2e) | **verified** — `Max-Age`, `Path`, `HttpOnly`, `SameSite`, `Secure`, deletion on logout and the JWT claims all equivalent; header differences are informational only |
 | Numeric rendering vs Express (Phase 2e) | **verified** — whole floats render `2500` vs `2500.0`; identical after `JSON.parse`; dates, ObjectIds and integers identical |
+| Application tests (Phase 3a) | **run:** 246 passed, 8 skipped; the four new CORS tests cover all five Vite ports, credentials, rejection and the env override |
+| Live CORS preflight (Phase 3a) | **verified** — 200 with the exact `http://localhost:5173` origin and `Access-Control-Allow-Credentials: true` |
+| Browser signup/login/reload/logout (Phase 3a) | **verified** — UI signup 201 → dashboard, reload restored the session via `/me` 200, UI login 200, logout 200 → `/login`, then `/dashboard` redirected to `/login` |
+| Main pages against FastAPI (Phase 3a) | **verified** — holdings, positions, orders, watchlist, funds and markets rendered their empty states with all data requests 200; no CORS console errors |
+| Deferred Nova endpoints (Phase 3a) | **observed** — `/api/assistant/briefing` and `/insight` 404; the insight card degrades to "Insight unavailable right now." |
+| Scratch database after Phase 3a | **dropped** — `tradium_fastapi_phase3a_test` absent; `tradium_fastapi_dev` untouched; `zerodha` still 9 collections |
 
 ---
 
@@ -1107,14 +1179,16 @@ From `ARCHITECTURE_DECISIONS.md`:
 - No WebSocket, streaming, or push channel **in the application**: no socket is opened at runtime and
   no streamed data reaches the database. Phase 2b evaluated the stream offline and added only a
   decoder module plus its tests.
-- No CORS middleware, and no change to the frontend's API origin.
+- CORS is limited to the default Vite origins plus whatever `CORS_ORIGINS` names; there is no wildcard
+  and no origin reflection.
 - No write to the `zerodha` database and no production data copied into `tradium_fastapi_dev`.
 - **No Express *server* was started.** The Phase 2e harness imports individual Express modules on an
   ephemeral port against scratch databases; `server/index.js`, its cron registrations and its static
   frontend mount were never executed.
 - No Nova / Gemini / PydanticAI work.
-- No frontend change and no frontend-to-FastAPI connection.
-- No change to `server/`, `src/`, or any other original application file.
+- No production frontend deployment, no FastAPI static `dist/` mount, and no deployed CORS origin.
+- No change to `server/` or the original repository; `src/` changed only for the API origin and the
+  signup call (§3L).
 - No database migration, schema change, or write to the application database.
 - No Render service created, modified, or deployed.
 - No change to the original repository's history, branch, remotes, or working tree.
@@ -1125,8 +1199,8 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 2e complete (focused Express parity check). Awaiting review.** Nothing further will be
-implemented without approval.
+**Phase 3a complete (CORS and frontend cutover). Awaiting review.** The React app now runs against
+FastAPI in local development. Nothing further will be implemented without approval.
 
 Open items:
 
@@ -1148,7 +1222,12 @@ Open items:
 5. **Cookie parity is closed** (§3K): identical `Max-Age`, `Path`, `HttpOnly`, `SameSite`, `Secure`,
    deletion on logout and JWT claims; only `Expires` presence, attribute order and the empty-value
    quoting differ. Cross-app cookie validation still needs the same `JWT_SECRET` as Express.
-6. Recommended next, in order:
-   1. **CORS middleware plus the frontend switch-over.**
-   2. The remaining HTTP-level parity rows, if wanted, using the committed harness.
+6. **The local cutover is complete** (§3L): CORS works with credentials, signup/login/reload/logout and
+   all six dashboard pages were exercised in a browser against a live FastAPI process, and the signup
+   caller now sends `{ username, email, password }`.
+7. Remaining before a production cutover: FastAPI does not serve `dist/` yet. Either add the static
+   mount (planned for Phase 4) or deploy the frontend separately and list its origin in `CORS_ORIGINS`.
+8. Recommended next, in order:
+   1. The remaining HTTP-level parity rows, if wanted, using the committed harness.
+   2. FastAPI static `dist/` serving, as the first production-cutover item.
    3. Nova/Gemini/PydanticAI last, as its own phase.

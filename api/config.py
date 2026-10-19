@@ -16,6 +16,28 @@ from dotenv import load_dotenv
 # real environment variables (e.g. a deployment's) ahead of this file.
 load_dotenv(Path(__file__).with_name(".env"))
 
+# The Vite dev server's origins, matching server/index.js. In production the
+# frontend is served by the API itself, so CORS_ORIGINS only needs to list
+# additional origins when the two are deployed separately.
+VITE_DEV_ORIGINS = (
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://localhost:5176",
+    "http://localhost:5177",
+)
+
+
+def get_cors_origins() -> list[str]:
+    """Read CORS_ORIGINS, falling back to the Vite development origins.
+
+    The value is a comma-separated list, e.g.
+    CORS_ORIGINS=https://app.example.com,https://admin.example.com
+    """
+    configured = os.getenv("CORS_ORIGINS", "")
+    origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+    return origins or list(VITE_DEV_ORIGINS)
+
 
 @dataclass(frozen=True)
 class Settings:

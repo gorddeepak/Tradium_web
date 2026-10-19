@@ -5,6 +5,12 @@ trading on NSE-listed equities, with live prices, an intraday/delivery order
 ticket, and a Gemini-powered portfolio assistant ("Nova"). No real money, no
 real orders: a full-stack playground for MERN + AI tool-calling.
 
+> **Migration branch:** the frontend now targets the FastAPI backend in `api/`.
+> For local development, copy `api/.env.example` to `api/.env`, run
+> `.venv/Scripts/python.exe -m uvicorn api.main:app --reload --port 8000`, then
+> `npm run dev` here. The Express quick start below is retained as the original
+> reference. See [docs/migration/MIGRATION_STATUS.md](docs/migration/MIGRATION_STATUS.md).
+
 ## Stack
 
 - **Frontend** — React 19, Vite, Tailwind CSS v4, a hand-rolled SVG chart

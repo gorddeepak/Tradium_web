@@ -10,10 +10,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
+from .config import get_cors_origins
 from .rate_limit import AuthRateLimitMiddleware
 from .routes import auth, funds, health, holdings, instruments, market, orders, portfolio, positions, watchlist
 from .scheduler import (
@@ -68,6 +70,17 @@ def create_app(database=None) -> FastAPI:
     # Per-process counters, like express-rate-limit's default in-memory store.
     # Built with the app, so tests get a fresh limiter for each app instance.
     app.add_middleware(AuthRateLimitMiddleware)
+
+    # Read at app-build time so a deployment's CORS_ORIGINS applies at startup.
+    # Credentials are required because authentication is a cookie, and an
+    # explicit origin list is required when credentials are enabled.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=get_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.exception_handler(StarletteHTTPException)
     async def error_envelope(request: Request, exc: StarletteHTTPException):

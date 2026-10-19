@@ -17,6 +17,7 @@ because files exist, the app starts, or endpoints return 200 once.
 | 0 | Isolated repo + planning docs | Any application code |
 | 1 | Core API: auth, data access, ordinary routes | Market data, Nova, deployment |
 | 2 | Market data: historical, quotes, jobs | Nova, deployment |
+| 3a | CORS and frontend cutover | Nova, production deployment |
 | 3 | Nova AI | Deployment |
 | 4 | Integration, regression, deployment | Relational DB |
 | 5 | Optional relational DB | — |
@@ -174,6 +175,30 @@ overview refresh, and order matching.
 
 Stop the FastAPI scheduler; the Express implementation (if still deployed) resumes ownership. Do not
 run both schedulers at once, even briefly.
+
+---
+
+## Phase 3a — CORS and frontend cutover (interim)
+
+### Goal
+
+Point this repository's React app at FastAPI while keeping the original MERN repository untouched.
+
+### In scope
+
+- Credentialed CORS for the Vite origins (5173-5177) plus a `CORS_ORIGINS` override.
+- Development `BASE_URL` on FastAPI's port; `VITE_API_URL` and same-origin production behaviour kept.
+- The signup caller fixed to send one object with `username`, `email`, `password`.
+
+### Acceptance criteria
+
+1. A credentialed preflight from `http://localhost:5173` succeeds.
+2. Signup, login, session restoration and logout work through the UI against FastAPI.
+3. The dashboard pages load without CORS errors; deferred Nova cards degrade visibly, not fatally.
+
+Result: **all three met**; see [MIGRATION_STATUS.md](./MIGRATION_STATUS.md) §3L. Production static
+serving remains in Phase 4, or the frontend can be deployed separately with its origin in
+`CORS_ORIGINS`.
 
 ---
 

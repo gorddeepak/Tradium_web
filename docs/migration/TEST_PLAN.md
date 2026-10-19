@@ -521,8 +521,9 @@ sides receive the same input.
 | 1K.23 | Isolation | no server, no cron, no Yahoo, no real DB | **PASSED** — `server/index.js` never required; scratch DBs dropped; `tradium_fastapi_dev` and `zerodha` untouched; original repo read-only |
 
 Not covered by this phase: HTTP-level bodies for orders, watchlist, positions, funds, portfolio history
-and the market routes (rows 1D.16, 1I.36, 2B.1, 2C.1 stay `PENDING`), the cron schedule itself, CORS,
-and the central error handler.
+and the market routes (rows 1D.16, 1I.36, 2B.1, 2C.1 stay `PENDING`), the cron schedule itself, and the
+central error handler. CORS and the browser cutover were exercised separately in Phase 3a; see
+[MIGRATION_STATUS.md](./MIGRATION_STATUS.md) §3L.
 
 ---
 

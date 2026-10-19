@@ -1,9 +1,9 @@
-// Single source of truth for the API origin. Local dev talks to the separate
-// backend on port 3002; a production build is served by the backend itself,
+// Single source of truth for the API origin. Local dev talks to the FastAPI
+// backend on port 8000; a production build is served by the backend itself,
 // so it just uses its own origin with the /api prefix.
 export const BASE_URL =
   import.meta.env.VITE_API_URL ||
-  (import.meta.env.DEV ? "http://localhost:3002/api" : "/api");
+  (import.meta.env.DEV ? "http://localhost:8000/api" : "/api");
 
 async function request(path, options = {}) {
   const res = await fetch(`${BASE_URL}${path}`, {
