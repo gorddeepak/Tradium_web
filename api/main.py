@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import db
 from .rate_limit import AuthRateLimitMiddleware
 from .routes import auth, funds, health, holdings, instruments, market, orders, portfolio, positions, watchlist
+from .scheduler import MarketSyncScheduler, market_sync_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,18 @@ def create_app(database=None) -> FastAPI:
             app.state.db = database
         else:
             app.state.db = db.connect()
+
+        # Off unless MARKET_SYNC_ENABLED is set: only one process may own the
+        # cache refresh. See api/scheduler.py.
+        app.state.market_sync = None
+        if database is None and market_sync_enabled():
+            app.state.market_sync = MarketSyncScheduler(app.state.db)
+            app.state.market_sync.start()
+
         yield
+
+        if app.state.market_sync is not None:
+            app.state.market_sync.stop()
         if database is None:
             db.close()
 

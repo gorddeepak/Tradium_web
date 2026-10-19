@@ -1,7 +1,7 @@
 # Migration Status
 
-**Last updated:** 2026-10-19 (Phase 2b)
-**Current phase:** **Phase 2b — WebSocket streaming proof of concept: evaluated, not adopted**
+**Last updated:** 2026-10-19 (Phase 2c)
+**Current phase:** **Phase 2c — REST market data and live quotes**
 **Application code modified:** **Yes.** New files under `api/` only; the snapshot, `server/`, `src/`,
 and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
@@ -13,8 +13,9 @@ and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 2b — WebSocket streaming proof of concept (evaluated, not adopted); candles remain the last ported route |
-| FastAPI application | **started** — the 11 read routes, the 7 write routes, and the 4 auth routes (22 registered operations) |
+| Phase | 2c — REST market data and live quotes; every route and job in the Express app except `priceSync`/`portfolioSnapshot` is now ported |
+| FastAPI application | **started** — the 13 read routes, the 7 write routes, and the 4 auth routes (24 registered operations) |
+| Market cache | `marketquotes` populated for **53/53** symbols in `tradium_fastapi_dev`; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | unchanged |
 | Development MongoDB | **local** `mongodb://127.0.0.1:27017/tradium_fastapi_dev` via gitignored `api/.env` |
@@ -27,7 +28,7 @@ and the original repository are untouched.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **131 passed, 6 skipped** (default); **137 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **197 passed, 7 skipped** (default); **204 passed** with `TEST_MONGO_URL` — see §5 |
 
 ---
 
@@ -436,8 +437,9 @@ Same endpoint and same parameters as Express, so the bars match by construction;
 - No `marketquotes` sync job, so `GET /api/instruments/search` and `GET /api/market/overview` still
   return nothing against the live dev database.
 - `GET /api/instruments/lookup/:symbol` and `GET /api/instruments/:symbol` remain **DEFERRED**.
+  *(Superseded by §3I.)*
 - `fetch_quote` still returns `None`: MARKET orders still answer the documented 503 and square-off
-  still falls back to the stored `ltp`.
+  still falls back to the stored `ltp`. *(Superseded by §3I.)*
 - No CORS middleware, no frontend change, no response caching for candles.
 
 ---
@@ -524,6 +526,153 @@ clean and the full suite passes without them.
 
 ---
 
+## 3I. Phase 2c — REST market data and live quotes
+
+**Goal:** port `marketSync` (all nine quote fields), implement a real `fetch_quote`, and migrate the two
+deferred instrument routes.
+
+### Provider decision: cookie + crumb handshake
+
+`/v7/finance/quote` is **not** open the way the chart endpoint is. A bare request answers:
+
+```json
+{"finance":{"result":null,"error":{"code":"Unauthorized","description":"Invalid Crumb", ...}}}
+```
+
+`yahoo-finance2` hides a two-step handshake. Reproduced and measured:
+
+| Step | Request | Result |
+|---|---|---|
+| 1 | `GET https://fc.yahoo.com` | `404` by design, sets the `A3` cookie |
+| 2 | `GET https://query1.finance.yahoo.com/v1/test/getcrumb` | plain-text crumb |
+| 3 | `GET https://query2.finance.yahoo.com/v7/finance/quote?symbols=…&crumb=…` | `200` rows |
+
+The first attempt used `https://finance.yahoo.com/quote/AAPL` as the bootstrap, which is what
+`yahoo-finance2` does. **It returns a 301 with no `Set-Cookie` when called through `requests`,** so the
+crumb step then fails. `fc.yahoo.com` is the step that actually works from Python. Recorded in
+`MARKET_DATA_PLAN.md` §3.3 so the next reader does not repeat the dead end.
+
+The session and crumb are cached process-wide behind a `threading.Lock`. A `401` triggers **one**
+forced refresh (cookie *and* crumb — retrying with only a new crumb still answers 401) before the call
+fails for real.
+
+### Routes ported
+
+| Route | Behaviour |
+|---|---|
+| `GET /api/instruments/lookup/{symbol}` | one quote; `symbol` uppercased, `name` from `longName \|\| shortName \|\| <path param>` |
+| `GET /api/instruments/{symbol}` | the same plus open/high/low/prevClose/volume/52-week range |
+
+Both answer **404 `"Instrument not found"`** for an unknown symbol, a zero price, **and a provider
+failure** — Express wraps the whole handler in `try { … } catch { 404 }`, and that is preserved rather
+than "improved" into a 503. Keys with no value are **omitted**, because `JSON.stringify` drops
+`undefined`; they are not sent as `null`.
+
+### `fetch_quote` is now real
+
+`fetch_quote` returns `{"ltp", "dayChangePct"}` from a live quote, or `None`. `None` means "no usable
+price", which is the branch both callers already had: a MARKET order answers the documented 503 and a
+square-off falls back to the stored `ltp`.
+
+Provider errors are **swallowed inside `fetch_quote`**, matching `fetchQuote`'s own `try/catch`. This was
+a real bug in the previous phase's seam: it raised `MarketDataError`, which would have surfaced as a 500
+instead of the 503 an order placement owes the client.
+
+### Files
+
+- `api/data/nifty50.py` — **new.** Port of `server/data/nifty50.js`: 50 stocks + 3 indices.
+- `api/jobs/market_sync.py` — **new.** `sync_quotes`, `backfill_sectors`, `market_sync`.
+- `api/market_hours.py` — **new.** Port of `server/utils/marketHours.js`.
+- `api/scheduler.py` — **new.** The five-minute tick **and the ownership switch**.
+- `api/market_data.py` — quote/crumb/sector provider plus `fetch_quote_row`; candle code untouched.
+- `api/routes/instruments.py` — the two routes added.
+- `api/main.py` — starts the scheduler only when enabled and only for a real (non-injected) database.
+- `api/tests/test_market_sync.py` — **new**, 56 tests.
+- `api/tests/test_instrument_quotes.py` — **new**, 13 tests.
+- `api/tests/test_mongo_integration.py` — one new real-Mongo test for the bulk upsert.
+- `api/.env.example` — documents `MARKET_SYNC_ENABLED`.
+- `api/tests/test_orders.py`, `api/tests/test_positions.py` — three tests patched to keep the
+  "no live quote" branch explicit now that `fetch_quote` really calls out.
+
+### Update behaviour, observed rather than assumed
+
+The exact command Mongoose sends for `bulkWrite` + `upsert` was captured with `mongoose.set("debug")`
+against a throwaway `*_test` database:
+
+```json
+{"$setOnInsert": {"createdAt": …, "sector": "", "__v": 0},
+ "$set": {…eight quote fields…, "updatedAt": …}}
+```
+
+Two consequences, both reproduced:
+
+- **`sector` lives in `$setOnInsert` only.** A price cycle therefore cannot blank a sector the backfill
+  has already resolved.
+- **`backfillSectors` uses `doc.save()`,** which refreshes `updatedAt` and leaves `__v` at `0` (a no-op
+  save writes nothing at all).
+
+`sync_quotes` sends the same shape as one `bulk_write`. `backfill_sectors` writes one
+`update_one({_id}, {"$set": {"sector", "updatedAt"}})` per resolved symbol, capped at
+`SECTORS_PER_RUN = 10`, matching `if (!sector) continue`.
+
+### Single owner for the sync
+
+Express starts the cron unconditionally on connect. Two services doing that against one collection would
+double the Yahoo traffic and race on the same documents, so ownership is explicit:
+
+- `MARKET_SYNC_ENABLED` gates the scheduler and **defaults to off**.
+- `create_app(database=…)` never starts it, so the test suite cannot reach the network.
+- `market_sync` uses a non-blocking `threading.Lock` (the `isSyncing` equivalent); a tick that arrives
+  while one is running returns immediately.
+- The job keeps the **last good cache** on a provider failure: stale prices beat an empty Markets page.
+- The gate syncs while the market is open **or when the cache is empty**, so a cold start still populates
+  the page.
+
+**Caveat, documented rather than hidden:** the lock is per process. Running more than one uvicorn worker
+with the switch on would start one scheduler per worker. Exactly one process may set the flag; see
+`api/scheduler.py` and `MARKET_DATA_PLAN.md` §3.4.
+
+### Staleness — a deliberate non-change
+
+`regularMarketTime` was measured at 15:31 IST, one minute after the close:
+
+| Symbol | Age of last price |
+|---|---|
+| `^NSEI` | 1 s |
+| `RELIANCE` | 106 s |
+| `^BSESN` | **903 s** |
+
+A five-minute cutoff would have rejected a legitimately-current quote. Express has no staleness check,
+and adding one would silently convert valid MARKET fills into 503s — a financial-behaviour change made
+unilaterally. **Missing, non-numeric, zero and negative prices are rejected; age is not.** This is
+recorded as a known gap in `MARKET_DATA_PLAN.md` §5, not as parity that was achieved.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Batch quote from Python | **53/53** tickers, `missing: []` |
+| Field-for-field vs `yahoo-finance2` | **identical** for `RELIANCE`, `^NSEI`, `^NSEBANK`, `^BSESN`, `M&M` on price/change/pct/prevClose/volume/marketCap/longName |
+| `M&M.NS` (ampersand) | resolves and quotes correctly |
+| Indices | `marketCap` absent → written as `0`; `volume` `0` |
+| `fetch_sector` | `RELIANCE` → `Energy` via `assetProfile`; `^NSEI` → `""` (404) |
+| Sync against `tradium_fastapi_dev` | **53 rows** written — 50 stocks + 3 indices, all nine fields present |
+| Sector backfill against the dev DB | 10 resolved per run, as capped |
+| `GET /api/instruments/search?q=REL` | `200`, row with renamed `price`/`changePct` |
+| `GET /api/market/overview` | `200`, indices in seed order, 50 stocks, real `asOf` |
+| `GET /api/instruments/lookup/RELIANCE` | `200`, `symbol: "RELIANCE"`, live price |
+| `GET /api/instruments/RELIANCE` | `200`, all detail keys |
+| Unknown symbol / no cookie | `404 "Instrument not found"` / `401` |
+
+### Not done in this phase
+
+- No `priceSync` (including `settleMisExit`), no `portfolioSnapshot`, no holiday calendar.
+- No WebSocket, no streaming, no change to the frontend.
+- No Express-vs-FastAPI HTTP-level parity run — still **PENDING**, same harness blocker.
+- The scheduler is not enabled by default, and nothing was enabled against any deployment.
+
+---
+
 ## 4. Known issues recorded (not fixed)
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. None has been
@@ -560,6 +709,19 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | Registered routes (Phase 1f) | **verified** — 21 operations: the 10 reads, the 7 writes, and the 4 auth routes (`POST` signup/login/logout, `GET /me`) |
 | Application tests (Phase 2a) | **run:** 114 passed, 6 skipped; 120 passed with `TEST_MONGO_URL` |
 | Application tests (Phase 2b) | **run:** 131 passed, 6 skipped; 137 passed with `TEST_MONGO_URL` |
+| Application tests (Phase 2c) | **run:** 197 passed, 7 skipped; 204 passed with `TEST_MONGO_URL` |
+| Registered routes (Phase 2c) | **verified** — 24 operations: the 13 reads, the 7 writes and the 4 auth routes; the new ones are `GET /api/instruments/lookup/{symbol}` and `GET /api/instruments/{symbol}` |
+| Yahoo quote handshake | **verified** — `fc.yahoo.com` → `getcrumb` → `/v7/finance/quote`; the `finance.yahoo.com/quote/AAPL` bootstrap used by `yahoo-finance2` returns no cookie to `requests` |
+| Batch quote from Python | **verified** — 53/53 tickers in one request, `missing: []` |
+| Quote field parity vs `yahoo-finance2` | **verified** — identical for `RELIANCE`, `^NSEI`, `^NSEBANK`, `^BSESN`, `M&M` across price, change, pct, prevClose, volume, marketCap and longName |
+| Mongoose bulkWrite document shape | **observed** — `mongoose.set("debug")` against a scratch `*_test` DB; `$setOnInsert` carries `createdAt`/`sector:""`/`__v:0`, `$set` carries the eight quote fields plus `updatedAt` |
+| Mongoose `save()` on sector backfill | **observed** — refreshes `updatedAt`, leaves `__v` at 0; a no-op save writes nothing |
+| `marketSync` against `tradium_fastapi_dev` | **verified** — 53 rows (50 stocks + 3 indices), all nine fields present, `^NSEI` marketCap 0, indices' volume 0 |
+| Sector cap per run | **verified** — 10 resolved on the first run, 10 more on the second |
+| Cache-backed routes after the sync | **verified** — `/api/instruments/search` and `/api/market/overview` return real rows instead of `[]` |
+| Live quote routes through the real app | **verified** — lookup and detail return 200 with live prices; unknown symbol → 404 `"Instrument not found"`; no cookie → 401 |
+| Staleness evidence | **measured** — `regularMarketTime` ages 1 s / 106 s / 903 s at 15:31 IST; a 5-minute cutoff would reject a current quote |
+| Scheduler default | **verified** — off unless `MARKET_SYNC_ENABLED` is truthy; never started for an injected test database |
 | Yahoo streamer reachable for `.NS` symbols | **verified** — live session, 2026-10-19 13:57–14:11 IST; equities and `^` indices both streamed |
 | Stream vs REST price agreement | **verified** — Δ0.4 / Δ0.0 / Δ0.3 for `RELIANCE` / `INFY` / `^NSEI` |
 | Streamer reconnect after an abrupt abort | **verified** — handshake 1.77 s, first frame 2.40 s |
@@ -573,7 +735,7 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | Auth round-trip against a real MongoDB | **verified** — signup → cookie → login → `/me` with the `users` collection; scratch DB dropped afterwards |
 | bcrypt cross-implementation | **verified** — an npm `bcrypt` hash verifies in Python and a Python hash verifies in the npm package (Node v22, out-of-tree) |
 | Rate limiter | **verified** — the 21st guarded attempt is a 429 with the documented body; logout and `/me` are never limited |
-| Write residue in `tradium_fastapi_dev` | none — tests never touch the dev DB; it has no collections |
+| Write residue in `tradium_fastapi_dev` | **marketquotes cache only** — 53 rows written by the Phase 2c sync against the local dev DB; no orders, funds, holdings or positions were created by tests (they run on mongomock or a `*_test` scratch DB) |
 | Local `mongod` reachability | **verified** — admin `ping` ok on `127.0.0.1:27017` |
 | Effective dev database name | **verified** — `tradium_fastapi_dev`, from a normal `create_app()` startup |
 | `zerodha` database | untouched — same 9 collections, no writes |
@@ -646,20 +808,22 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 8. Explicitly not approved / not done
 
-- No route beyond the twenty-two ported operations: the 11 reads (`GET /api/health`, `GET /api/holdings`,
+- No route beyond the twenty-four ported operations: the 13 reads (`GET /api/health`, `GET /api/holdings`,
   `GET /api/orders`, `GET /api/watchlist`, `GET /api/positions`, `GET /api/funds`,
   `GET /api/funds/transactions`, `GET /api/portfolio/history`, `GET /api/instruments/search`,
+  `GET /api/instruments/lookup/{symbol}`, `GET /api/instruments/{symbol}`,
   `GET /api/instruments/{symbol}/candles`, `GET /api/market/overview`), the 7 writes (`POST`/`DELETE
   /api/watchlist`, `POST /api/funds/transactions`, `POST`/`DELETE /api/orders`, `POST /api/orders/exits`,
   `POST /api/positions/:id/square-off`) and the 4 auth routes (`POST /api/auth/signup`,
   `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`).
-- No live-quote instrument route (`/lookup/:symbol`, `/:symbol`), which is deferred to the quote phase.
+- No `priceSync` job, so positions, holdings and watchlist prices are not refreshed by the FastAPI app.
+  `settleMisExit` is part of that job and is likewise not ported.
+- No `portfolioSnapshot` job.
+- The market-cache scheduler is **off by default** and was never enabled against any deployment.
+- No exchange holiday calendar, and no staleness cutoff on quotes (deliberate — see §3I).
 - No WebSocket, streaming, or push channel **in the application**: no socket is opened at runtime and
   no streamed data reaches the database. Phase 2b evaluated the stream offline and added only a
   decoder module plus its tests.
-- No `marketquotes` sync job, so the two cache-backed routes still read an empty cache.
-- No change to `market_data.fetch_quote`: it still returns `None`, so no price is fabricated and the
-  MARKET-order/square-off behaviour is unchanged.
 - No CORS middleware, and no change to the frontend's API origin.
 - No write to the `zerodha` database and no production data copied into `tradium_fastapi_dev`.
 - No scheduled or background job of any kind.
@@ -676,28 +840,29 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 2b complete (streaming evaluated, not adopted). Awaiting review.** Nothing further will be
-implemented without approval.
+**Phase 2c complete (REST quotes, market sync, instrument detail routes). Awaiting review.** Nothing
+further will be implemented without approval.
 
 Open items:
 
-1. The candles route is closed, and streaming has a decision. All other operations are tested in
-   isolation; a live Express-vs-FastAPI comparison is still **PENDING** (no safe reference harness
-   exists; `server/index.js` starts cron jobs on connect). The candle comparison in §3G is the one
-   parity check that *has* been done against the real Express dependency rather than against
-   documentation.
-2. The write routes that need the market-data provider (a filling `MARKET` order) are wired to the
-   `market_data.fetch_quote` seam and answer the documented 503 until that phase exists.
-3. The numeric-rendering nuance in §3E is an open parity item for the comparison harness. It now also
-   applies to candle prices.
-4. `GET /api/instruments/lookup/:symbol` and `GET /api/instruments/:symbol` remain **DEFERRED** to the
-   quote phase, which also needs the `marketquotes` sync job before the two cache-backed routes can
-   return anything.
+1. All operations are tested in isolation; a live Express-vs-FastAPI comparison is still **PENDING**
+   (no safe reference harness exists; `server/index.js` starts cron jobs on connect). The candle and
+   quote comparisons in §3G/§3I are the parity checks that *have* been done against the real Express
+   dependency rather than against documentation.
+2. **Quotes are not age-checked.** Missing, non-numeric, zero and negative prices are rejected; a
+   quote that is minutes old is accepted, because a cutoff would have rejected a legitimately current
+   `^BSESN` quote (§3I). Whether to add one — and at what threshold — is a decision, not a bug fix.
+3. **The scheduler is off by default.** Turning it on requires `MARKET_SYNC_ENABLED=true` on exactly
+   one process. Until then the cache is populated only by calling `market_sync` manually.
+4. The numeric-rendering nuance in §3E is an open parity item for the comparison harness. It now also
+   applies to candle and quote prices.
 5. Cookie/JWT parity is verified from the FastAPI side, including that a FastAPI-issued cookie opens the
    protected routes. Cross-app cookie validation still needs the same `JWT_SECRET` as Express, and the
    header-level `Set-Cookie` comparison belongs to the reference-harness work (§1F.2F.1).
-6. Recommended next: the **quote phase** — port `marketquotes` sync (REST batch, keeping
-   `marketCap`/`sector`), `fetch_quote`, and the two deferred instrument routes. Streaming is
-   deliberately left out; `api/yahoo_stream.py` is available if a sub-minute requirement ever appears.
-   Then an isolated Express reference harness, then CORS plus the frontend switch-over. Nova/Gemini
-   work remains a separate later phase.
+6. Recommended next, in order:
+   1. **`priceSync` + `settleMisExit` + `portfolioSnapshot`**, with the same market-hours gate and the
+      same single-owner rule. This is the last scheduled behaviour still missing.
+   2. An **isolated Express reference harness** (Express on a scratch port/DB with jobs disabled) to
+      close the PENDING parity rows, including `Set-Cookie` and numeric rendering.
+   3. **CORS middleware plus the frontend switch-over.**
+   4. Nova/Gemini/PydanticAI last, as its own phase.

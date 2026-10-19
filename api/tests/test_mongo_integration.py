@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from pymongo import MongoClient
 
 from api.main import create_app
+from api.jobs.market_sync import backfill_sectors, sync_quotes
 
 TEST_MONGO_URL = os.getenv("TEST_MONGO_URL")
 
@@ -258,6 +259,8 @@ def test_write_routes_against_real_mongo(scratch_database, monkeypatch):
         "api.routes.orders.fetch_quote",
         lambda symbol: {"ltp": 1600.0, "dayChangePct": 0.0},
     )
+    # Square-off takes the stored-ltp branch, so this test stays offline.
+    monkeypatch.setattr("api.routes.positions.fetch_quote", lambda symbol: None)
 
     user_id = ObjectId()
     created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
@@ -308,6 +311,75 @@ def test_write_routes_against_real_mongo(scratch_database, monkeypatch):
     assert scratch_database["funds"].find_one({"user": user_id})["available"] == 105000
     assert cancelled.status_code == 200
     assert scratch_database["orders"].find_one({"_id": ObjectId(limit.json()["_id"])})["status"] == "CANCELLED"
+
+
+def test_market_sync_against_real_mongo(scratch_database, monkeypatch):
+    # mongomock cannot run a bulk update with this pymongo version, so the
+    # actual cache write is exercised here. The provider is still patched: no
+    # test contacts Yahoo.
+    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+
+    quote_rows = {
+        "RELIANCE.NS": {
+            "symbol": "RELIANCE.NS",
+            "regularMarketPrice": 1202.8,
+            "regularMarketChange": -8.4,
+            "regularMarketChangePercent": -0.69,
+            "regularMarketPreviousClose": 1211.2,
+            "regularMarketVolume": 15138916,
+            "marketCap": 16276858601472,
+        },
+        "^NSEI": {
+            "symbol": "^NSEI",
+            "regularMarketPrice": 22888.95,
+            "regularMarketChange": -257.2,
+            "regularMarketChangePercent": -1.11,
+            "regularMarketPreviousClose": 23146.15,
+            "regularMarketVolume": 0,
+            "marketCap": None,  # indices have no market cap
+        },
+    }
+    monkeypatch.setattr("api.jobs.market_sync.fetch_quotes", lambda tickers: quote_rows)
+    monkeypatch.setattr("api.jobs.market_sync.fetch_sector", lambda symbol: "Energy")
+
+    sync_quotes(scratch_database)
+
+    reliance = scratch_database["marketquotes"].find_one({"symbol": "RELIANCE"})
+    nifty = scratch_database["marketquotes"].find_one({"symbol": "^NSEI"})
+
+    # Nine quote fields plus the Mongoose insert fields.
+    assert reliance["ltp"] == 1202.8
+    assert reliance["dayChange"] == -8.4
+    assert reliance["dayChangePct"] == -0.69
+    assert reliance["prevClose"] == 1211.2
+    assert reliance["volume"] == 15138916
+    assert reliance["marketCap"] == 16276858601472
+    assert reliance["name"] == "Reliance Industries"
+    assert reliance["kind"] == "stock"
+    assert reliance["sector"] == ""  # the backfill owns it
+    assert reliance["__v"] == 0
+    assert reliance["createdAt"] == reliance["updatedAt"]
+
+    # `?? 0` turns an absent market cap into 0 for an index.
+    assert nifty["kind"] == "index"
+    assert nifty["marketCap"] == 0
+    assert nifty["name"] == "NIFTY 50"
+
+    # A second run updates the price without touching createdAt or the sector.
+    backfill_sectors(scratch_database)
+    assert scratch_database["marketquotes"].find_one({"symbol": "RELIANCE"})["sector"] == "Energy"
+
+    quote_rows["RELIANCE.NS"]["regularMarketPrice"] = 1210.0
+    sync_quotes(scratch_database)
+
+    refreshed = scratch_database["marketquotes"].find_one({"symbol": "RELIANCE"})
+    assert refreshed["ltp"] == 1210.0
+    assert refreshed["sector"] == "Energy"  # preserved by $setOnInsert
+    assert refreshed["createdAt"] == reliance["createdAt"]
+    assert refreshed["updatedAt"] > reliance["updatedAt"]
+
+    # One row per symbol, not one per run.
+    assert scratch_database["marketquotes"].count_documents({}) == 2
 
 
 def test_auth_routes_against_real_mongo(scratch_database, monkeypatch):

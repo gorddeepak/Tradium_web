@@ -266,30 +266,75 @@ no socket is opened at runtime.
 
 ### 3.3 Provider adapter
 
+**Implemented for REST quotes in Phase 2c.** The shape that shipped:
+
 ```
-MarketDataProvider (interface)
-  ├─ get_quote(symbol) -> dict           # maps to the current quote fields
-  ├─ get_candles(symbol, range) -> list  # time/open/high/low/close
-  ├─ get_quotes(symbols) -> dict         # batch
-  └─ (optional) subscribe(symbols) -> stream
+api/market_data.py
+  ├─ fetch_quote_row(symbol)  -> raw Yahoo quote row | None   # detail routes; raises on provider failure
+  ├─ fetch_quote(symbol)      -> {"ltp", "dayChangePct"} | None # orders/square-off; swallows failures
+  ├─ fetch_quotes(tickers)    -> {ticker: raw row}             # cache sync batch
+  ├─ fetch_sector(symbol)     -> str ("" when absent)          # cache backfill
+  └─ fetch_candles(...)       -> bars                          # Phase 2a, unchanged
 ```
 
 Requirements:
 
-- Routes, order execution and jobs depend on the interface, never on `yfinance` directly.
-- The adapter owns symbol normalisation (`tickerFor`) and field mapping, so swapping providers does
+- Routes, order execution and jobs depend on these functions, never on `yfinance` directly.
+- The adapter owns symbol normalisation (`ticker_for`) and field mapping, so swapping providers does
   not touch business logic.
 - Provider errors map to the current status codes: instrument routes return 404; MARKET order
-  placement returns 503.
+  placement returns 503. That distinction is deliberate and lives in two places on purpose —
+  `fetch_quote` swallows errors (Express's `fetchQuote` catches its own), while `fetch_quote_row`
+  raises so the routes can apply Express's bare `catch { 404 }`.
+
+#### The quote endpoint needs credentials the chart endpoint does not
+
+Measured in Phase 2c. A bare `GET /v7/finance/quote` answers `401` with
+`{"code":"Unauthorized","description":"Invalid Crumb"}`. The working handshake:
+
+| Step | Request | Result |
+|---|---|---|
+| 1 | `GET https://fc.yahoo.com` | `404` by design; sets the `A3` cookie |
+| 2 | `GET https://query1.finance.yahoo.com/v1/test/getcrumb` | plain-text crumb |
+| 3 | `GET https://query2.finance.yahoo.com/v7/finance/quote?symbols=…&crumb=…` | `200` |
+
+`yahoo-finance2` bootstraps from `https://finance.yahoo.com/quote/AAPL` instead. **That does not work
+from `requests`**: the request returns a 301 with no `Set-Cookie`, so step 2 fails. Use
+`fc.yahoo.com`. The session and crumb are cached process-wide; a `401` triggers one forced
+cookie+crumb refresh (a new crumb alone still answers 401).
+
+`quoteSummary` for the sector uses the same crumb against
+`https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?formatted=false&modules=assetProfile`.
+
+#### Known gaps in the adapter
+
+- **No staleness cutoff.** Express has none, and measurements show why a naive one is unsafe: at
+  15:31 IST (one minute after the close) `regularMarketTime` ages were `^NSEI` 1 s, `RELIANCE` 106 s,
+  `^BSESN` **903 s**. A 5-minute threshold would have rejected a legitimately current quote and turned
+  valid MARKET fills into 503s. Missing, non-numeric, zero and negative prices *are* rejected. Adding
+  an age check is an open decision, not an oversight.
+- **No holiday calendar** — inherited from Express (§3.4).
+- **Indices carry no `marketCap`.** Yahoo omits the key, so `?? 0` writes `0`, and the `marketCap > 0`
+  heatmap filter excludes them. That is the existing behaviour, reproduced.
+- **`^NSEI` has no `quoteSummary` profile** (404), so its sector stays `""` — which is correct, since
+  the backfill only asks for `kind: "stock"`.
 
 ### 3.4 Jobs
 
 - Keep price sync, market sync and the daily snapshot as scheduled jobs. The provider choice does not
   remove the need for the snapshot or for reconciliation.
-- **One process owns the schedules.** No overlap with the Express deployment.
+- **One process owns the schedules.** No overlap with the Express deployment. Enforced in code, not
+  just documented: `MARKET_SYNC_ENABLED` gates the tick and **defaults to off**; `create_app(database=…)`
+  (tests) never starts it. The in-process `threading.Lock` stops overlapping ticks within one process;
+  it is **not** a cross-process lease, so the flag must be set on exactly one worker.
 - Preserve the market-hours gate (Mon–Fri 09:15–15:30 IST) and note that there is **no holiday
-  calendar** today. Decide explicitly whether to add one; do not add it silently.
+  calendar** today. Decide explicitly whether to add one; do not add it silently. *(Port:
+  `api/market_hours.py`; whole-minute comparison, inclusive at both ends, IST as a fixed +05:30 offset
+  since India has no DST and `tzdata` is not installed.)*
 - Preserve single-flight behaviour (the `isSyncing` flag) or replace it with an equivalent lock.
+  *(Port: non-blocking `threading.Lock`. A tick arriving mid-run returns immediately.)*
+- The cache sync keeps the last good rows on a provider failure — stale prices beat an empty Markets
+  page — and still runs the sector backfill when the quote refresh is skipped.
 
 ### 3.5 Backend → frontend delivery
 
@@ -307,8 +352,9 @@ that the React app does not already consume.
 | Option | Requirement | Status |
 |---|---|---|
 | Poll Yahoo's chart endpoint directly | an HTTP client only | **in use for candles (Phase 2a)** |
+| Poll Yahoo's quote endpoint directly (cookie + crumb) | an HTTP client only | **in use for live quotes and the cache (Phase 2c)**, see §3.3 |
 | Poll Yahoo through `yfinance` | pandas + numpy | **rejected for candles** — a different series for 5 of the 8 ranges, see §3.1 |
-| Keep REST polling for quotes | an HTTP client only | **recommended (Phase 2b)** — `marketCap`/`sector` need it anyway, see §3.2 |
+| Keep REST polling for quotes | an HTTP client only | **adopted (Phase 2c)** — `marketCap`/`sector` need the batch anyway, see §3.2 |
 | Yahoo streaming via `AsyncWebSocket` | must pass the feasibility test | **works, not adopted** — the stream is real but cannot replace the batch; see §3.2 |
 | Upstox | account, API access, approval, terms | **evaluate only after documenting requirements**; do not assume access |
 | Another broker/data API | account and terms | not evaluated |
@@ -327,6 +373,7 @@ Do not state that a provider is approved for this use until its terms have been 
 | d | How do timestamps, field names and symbol formats normalise? | **Answered (Phase 2a):** `time` = the bar's UTC epoch + 19800; fields are `time`/`open`/`high`/`low`/`close`; `^` symbols pass through and everything else gets `.NS`. Verified against `yahoo-finance2` itself; see §3.1 |
 | e | Is provider data permitted for the intended display and deployment? | Read the provider terms; record the conclusion — **still open**; Phase 2b did not settle it |
 | f | If streaming fails, which fallback is approved, and what account/infrastructure does it need? | **Answered (Phase 2b):** no new infrastructure. Keep REST polling; the stream stays an option, see §3.2 |
+| g | How old may a quote be before it must not become a fill price? | **Open.** No cutoff is enforced today, because Express has none and because a 5-minute rule would have rejected a current `^BSESN` quote (ages 1 s / 106 s / 903 s at 15:31 IST). Needs a decision, not a silent change — see §3.3 |
 
 ---
 
@@ -338,11 +385,14 @@ Do not state that a provider is approved for this use until its terms have been 
 | Empty-bar filtering | Bars without open are absent — **closed in Phase 2a**, see §3.1 |
 | Streamed quote for an `.NS` symbol | Real frames, sane price, decodable timestamp — **verified in Phase 2b**, see §3.2 |
 | Stream vs REST agreement | Prices within a tick — **verified in Phase 2b**, see §3.2 |
-| Instrument detail | Same field names; missing values omitted rather than nulled |
-| Lookup for an unknown symbol | 404 `{ message: "Instrument not found" }` |
-| MARKET order with a live quote | Fills at the quote; holdings/positions/funds updated |
-| MARKET order while provider is down | 503 with the documented message |
-| Square-off while provider is down | Falls back to stored `ltp`, still succeeds |
+| Instrument detail | Same field names; missing values omitted rather than nulled — **closed in Phase 2c**, see §3.3 and `MIGRATION_STATUS.md` §3I |
+| Lookup for an unknown symbol | 404 `{ message: "Instrument not found" }` — **closed in Phase 2c** (also for a zero price and a provider failure, as Express does) |
+| Batch quote for the whole universe | 53/53 tickers in one request; field-for-field identical to `yahoo-finance2` — **closed in Phase 2c** |
+| Market cap and sector survive a price cycle | `sector` written only by the backfill; `marketCap` never blanked — **closed in Phase 2c** |
+| MARKET order with a live quote | Fills at the quote; holdings/positions/funds updated — unit-tested with a stubbed quote; Express HTTP parity still PENDING |
+| MARKET order while provider is down | 503 with the documented message — covered by `fetch_quote` returning `None` |
+| Square-off while provider is down | Falls back to stored `ltp`, still succeeds — covered |
+| Quote staleness | **Undecided.** No cutoff today, with measurements in §3.3 explaining why a naive one is unsafe |
 | Price sync outside market hours | No provider calls |
 | Price sync with one symbol failing | Other symbols still update; failure is logged |
 | LIMIT order crossing | Fills once, at the limit price |

@@ -65,9 +65,11 @@ def test_empty_positions_returns_empty_list(client, make_token, user_id):
 
 
 def test_square_off_long_releases_cash_and_records_settlement(
-    client, database, make_token, user_id, positions_factory, orders_factory
+    client, database, make_token, user_id, positions_factory, orders_factory, monkeypatch
 ):
     cookie = {"token": make_token(user_id)}
+    # No live quote, so the stored ltp is the exit price.
+    monkeypatch.setattr("api.routes.positions.fetch_quote", lambda symbol: None)
     position_id = ObjectId()
     exit_id = ObjectId()
     database["positions"].insert_one(
@@ -121,9 +123,10 @@ def test_square_off_long_releases_cash_and_records_settlement(
 
 
 def test_square_off_short_pnl_sign(
-    client, database, make_token, user_id, positions_factory
+    client, database, make_token, user_id, positions_factory, monkeypatch
 ):
     cookie = {"token": make_token(user_id)}
+    monkeypatch.setattr("api.routes.positions.fetch_quote", lambda symbol: None)
     position_id = ObjectId()
     database["positions"].insert_one(
         positions_factory(

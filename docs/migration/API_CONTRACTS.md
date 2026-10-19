@@ -499,6 +499,9 @@ Route order matters: `/search` and `/lookup/:symbol` are declared **before** `/:
   `symbol` is uppercased; `name` falls back `longName → shortName → symbol`; `exchange` is always
   `"NSE"`.
 - **404:** `"Instrument not found"` when Yahoo throws or returns no `regularMarketPrice`.
+- **Implementation (Phase 2c):** `api/routes/instruments.py`. The 404 also covers a **zero** price
+  (`!quote?.regularMarketPrice` is falsy for `0`) and a **provider failure** — Express wraps the whole
+  handler in a bare `try/catch`, and that is preserved. Keys with no value are omitted, not `null`.
 
 ### 9.3 `GET /api/instruments/:symbol`
 
@@ -516,6 +519,25 @@ Same as lookup plus the extended quote:
 Field mapping: `regularMarketOpen`, `regularMarketDayHigh`, `regularMarketDayLow`,
 `regularMarketPreviousClose`, `regularMarketVolume`, `fiftyTwoWeekHigh`, `fiftyTwoWeekLow`.
 Missing values serialise as `undefined` → omitted from JSON.
+
+A genuine `0` is a value, not a missing one — an index's `volume: 0` is returned. Only absent/`null`
+fields are dropped.
+
+### 9.5 Provider request contract (quotes)
+
+Both routes go through `api/market_data.py`. `/v7/finance/quote` is not open like the chart endpoint:
+it requires a cookie plus a matching crumb.
+
+| Step | Request | Result |
+|---|---|---|
+| 1 | `GET https://fc.yahoo.com` | `404` by design; sets the `A3` cookie |
+| 2 | `GET https://query1.finance.yahoo.com/v1/test/getcrumb` | plain-text crumb |
+| 3 | `GET https://query2.finance.yahoo.com/v7/finance/quote?symbols=…&crumb=…` | `200` |
+
+The session/crumb is cached per process; a `401` triggers one forced cookie+crumb refresh. An unknown
+symbol is **not** an error — Yahoo answers `200` with an empty `result` array, which becomes the 404
+above. See `MARKET_DATA_PLAN.md` §3.3 for the measurements and the dead end
+(`finance.yahoo.com/quote/AAPL`, no `Set-Cookie` to `requests`).
 
 ### 9.4 `GET /api/instruments/:symbol/candles?range=1M`
 

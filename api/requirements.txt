@@ -7,4 +7,5 @@ python-dotenv==1.2.4
 # Phase 1f: password hashing, matching the Express User model's bcrypt cost.
 bcrypt==5.0.0
 # Phase 2a: HTTP client for the Yahoo chart endpoint behind the candles route.
+# Phase 2c reuses it for the quote and quoteSummary endpoints (cookie + crumb).
 requests==2.34.2

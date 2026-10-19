@@ -179,7 +179,7 @@ database (`tradium_fastapi_phase1_test`, name must end in `_test`, dropped after
 | 1D.14 | Overview `asOf` + row keys | freshest `updatedAt`; Mongoose key set preserved | **PASSED** | `test_market.py::test_as_of_is_the_freshest_row_and_rows_keep_mongoose_keys` |
 | 1D.15 | Real MongoDB read | `portfoliosnapshots`, `marketquotes`, `transactions` resolve | **PASSED** | `test_mongo_integration.py::test_portfolio_market_search_and_transactions_read_real_mongo_documents` |
 | 1D.16 | Live side-by-side vs Express on identical data | byte-identical body | **PENDING** | no safe reference harness |
-| 1D.17 | Live-Yahoo instrument routes (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`) | mapped Yahoo data | **DEFERRED** | market-data phase; no provider integration approved |
+| 1D.17 | Live-Yahoo instrument routes (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`) | mapped Yahoo data | **DEFERRED** | market-data phase; no provider integration approved. Candles resolved in §1G; quotes in §1I |
 
 Suite totals: **48 passed, 4 skipped** without `TEST_MONGO_URL`; **52 passed** with it.
 
@@ -391,6 +391,54 @@ Findings that constrain any future adoption:
 
 ---
 
+## 1I. Phase 2c results — REST market data and live quotes
+
+Suite totals: **197 passed, 7 skipped** without `TEST_MONGO_URL`; **204 passed** with it.
+
+Measured on 2026-10-19, 15:00–15:45 IST (just before and after the NSE close).
+
+| # | Test | Expected | Status | Evidence |
+|---|---|---|---|---|
+| 1I.1 | Quote handshake | cookie + crumb obtainable from Python | **PASSED** | `fc.yahoo.com` (404, sets `A3`) → `getcrumb` → `/v7/finance/quote` |
+| 1I.2 | Bootstrap URL actually used by `yahoo-finance2` | works from `requests` too | **FAILED — dead end** | `finance.yahoo.com/quote/AAPL` answers 301 with no `Set-Cookie`; crumb step then fails. `fc.yahoo.com` is the working step |
+| 1I.3 | Invalid crumb | recoverable | **PASSED** | 401 body `"Invalid Crumb"`; one forced cookie+crumb refresh, then a real failure |
+| 1I.4 | Batch quote | all 53 tickers in one request | **PASSED** | `returned 53/53`, `missing: []` |
+| 1I.5 | Unknown symbol in a batch | silently omitted, not an error | **PASSED** | `200` with an empty `result` array; mixed batches drop only the unknown ticker |
+| 1I.6 | Field values match `yahoo-finance2` | identical price/change/pct/prevClose/volume/marketCap/longName | **PASSED** | `RELIANCE`, `^NSEI`, `^NSEBANK`, `^BSESN`, `M&M` — all fields identical |
+| 1I.7 | Ampersand symbol | `M&M` resolves | **PASSED** | `M&M.NS` price `2907.0`, marketCap present |
+| 1I.8 | Indices have no market cap | written as `0`, not null | **PASSED** | `^NSEI` row `marketCap: 0`, `volume: 0`; `test_operations_turn_null_fields_into_zero` |
+| 1I.9 | Nine fields written | name, kind, ltp, dayChange, dayChangePct, prevClose, volume, marketCap (+ sector untouched) | **PASSED** | `test_operations_cover_all_nine_quote_fields`; real-Mongo test |
+| 1I.10 | `sector` survives a price cycle | `$setOnInsert` only | **PASSED** | `test_operations_leave_sector_to_the_backfill`; real-Mongo re-sync keeps `Energy` |
+| 1I.11 | Mongoose insert fields | `createdAt`, `updatedAt`, `__v: 0` | **PASSED** | debug-captured command, then real-Mongo test |
+| 1I.12 | Provider failure keeps the cache | no write, no crash | **PASSED** | `test_sync_quotes_keeps_the_previous_cache_on_failure` |
+| 1I.13 | Missing symbols are reported | logged, sync still succeeds | **PASSED** | `test_sync_quotes_reports_the_symbols_yahoo_did_not_return` |
+| 1I.14 | Sector backfill cap | 10 per run, stocks only | **PASSED** | `test_backfill_is_capped_per_run`; live dev-DB run resolved 10 then 10 |
+| 1I.15 | Sector with no profile | stays `""`, retried later | **PASSED** | `test_backfill_fills_only_the_stock_sectors_it_resolves` |
+| 1I.16 | Market-hours gate | Mon–Fri 09:15–15:30 IST inclusive, whole minutes | **PASSED** | `test_market_open_window` (8 cases), `test_market_open_reads_the_clock_as_ist` |
+| 1I.17 | Cold cache while closed | still syncs | **PASSED** | `test_market_sync_syncs_a_cold_cache_even_when_closed` |
+| 1I.18 | Warm cache while closed | no quote request | **PASSED** | `test_market_sync_skips_the_quote_refresh_when_closed_with_a_warm_cache` |
+| 1I.19 | Single-flight | a second tick returns immediately | **PASSED** | `test_market_sync_skips_a_tick_while_one_is_running` |
+| 1I.20 | Unexpected error | logged, lock released | **PASSED** | `test_market_sync_survives_an_unexpected_error` |
+| 1I.21 | Scheduler default | off unless `MARKET_SYNC_ENABLED` | **PASSED** | `test_scheduler_switch_defaults_to_off` |
+| 1I.22 | Injected test database | never starts the scheduler | **PASSED** | `test_injected_test_database_never_starts_the_scheduler` |
+| 1I.23 | `fetch_quote` shape | `{"ltp", "dayChangePct"}` | **PASSED** | `test_fetch_quote_reduces_to_the_documented_shape` |
+| 1I.24 | `fetch_quote` rejects unusable prices | `None` for null/0/negative/string/bool | **PASSED** | `test_fetch_quote_rejects_an_unusable_price` (5 cases) |
+| 1I.25 | `fetch_quote` swallows provider errors | `None`, so the order route keeps its 503 | **PASSED** | `test_fetch_quote_swallows_a_provider_error` |
+| 1I.26 | Lookup contract | uppercased symbol, longName→shortName→path symbol, NSE | **PASSED** | `test_instrument_quotes.py` (3 tests) |
+| 1I.27 | Detail contract | same plus open/high/low/prevClose/volume/52-week | **PASSED** | `test_detail_returns_the_extended_quote` |
+| 1I.28 | Missing fields omitted, not nulled | key absent | **PASSED** | `test_lookup_omits_fields_yahoo_does_not_supply`, `test_detail_omits_missing_fields_rather_than_nulling_them` |
+| 1I.29 | A real zero is kept | index `volume: 0` is present | **PASSED** | `test_detail_keeps_a_zero_volume` |
+| 1I.30 | Unknown symbol | 404 `"Instrument not found"` | **PASSED** | both routes, plus `regularMarketPrice: 0` |
+| 1I.31 | Provider failure on the detail routes | 404, matching Express's bare `catch` | **PASSED** | `test_detail_is_404_when_the_provider_fails` |
+| 1I.32 | Auth required | 401 without a cookie | **PASSED** | `test_both_routes_require_authentication` |
+| 1I.33 | `/search` not shadowed by `/{symbol}` | cache route still wins | **PASSED** | `test_search_is_not_shadowed_by_the_symbol_route` |
+| 1I.34 | Cache-backed routes after a real sync | real rows, indices in seed order | **PASSED** | live run: search returns `RELIANCE`, overview returns 3 indices + 50 stocks |
+| 1I.35 | Staleness cutoff | **not implemented** | **DELIBERATE** | `regularMarketTime` ages 1 s / 106 s / 903 s at 15:31 IST; a 5-minute cutoff would reject a current `^BSESN` quote |
+| 1I.36 | Express HTTP-level parity for these routes | identical status/body | **NOT RUN** | same harness blocker (§2); field-level parity was checked against `yahoo-finance2` directly |
+| 1I.37 | `priceSync`, `settleMisExit`, `portfolioSnapshot` | ported | **NOT DONE** | next phase |
+
+---
+
 ## 2. API contract parity
 
 Method: issue the same request to Express and FastAPI with equivalent cookies and data, then compare
@@ -545,9 +593,9 @@ Two users, A and B, each with data.
 | 7.1 | Search matches symbol or name | case-insensitive, max 10, correct renamed keys | **PASSED** — `test_instruments.py` |
 | 7.2 | Search with regex characters | treated literally | **PASSED** — `test_instruments.py::test_limits_to_ten_and_treats_regex_characters_literally` |
 | 7.3 | Search with empty `q` | `[]` | **PASSED** — `test_instruments.py::test_empty_query_returns_empty_list` |
-| 7.4 | Lookup valid | mapped fields, uppercase symbol | **DEFERRED** — needs a market-data provider |
-| 7.5 | Lookup invalid | 404 `"Instrument not found"` | **DEFERRED** — needs a market-data provider |
-| 7.6 | Detail fields | same keys and mapping as Express | **DEFERRED** — needs a market-data provider |
+| 7.4 | Lookup valid | mapped fields, uppercase symbol | **PASSED** — `test_instrument_quotes.py`; live check in §1I.26 |
+| 7.5 | Lookup invalid | 404 `"Instrument not found"` | **PASSED** — §1I.30; also 404 on a zero price and on a provider failure |
+| 7.6 | Detail fields | same keys and mapping as Express | **PASSED** — §1I.27; missing keys are omitted, not `null` |
 | 7.7 | Candles, all ranges | key set and IST shift identical | **PASSED** — §1G.1, §1G.2, §1G.6 (16/16 identical to `yahoo-finance2` for 2 symbols × 8 ranges) |
 | 7.8 | Candles provider failure | 404 `"Could not fetch candle data"` | **PASSED** — §1G.9 |
 | 7.9 | Overview with cold cache | `asOf: null`, empty arrays | **PASSED** — `test_market.py::test_cold_cache_returns_nulls_and_empty_lists` |

@@ -147,10 +147,12 @@ def test_limit_buy_places_open_order_and_blocks_cash(
 
 
 def test_market_order_without_a_provider_returns_503(
-    client, database, make_token, user_id, funds_factory
+    client, database, make_token, user_id, funds_factory, monkeypatch
 ):
     cookie = {"token": make_token(user_id)}
     database["funds"].insert_one(funds_factory(user_id, available=100000))
+    # No quote available: the documented "provider returned no price" branch.
+    monkeypatch.setattr("api.routes.orders.fetch_quote", lambda symbol: None)
 
     response = client.post(
         "/api/orders",
