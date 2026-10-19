@@ -9,3 +9,5 @@ bcrypt==5.0.0
 # Phase 2a: HTTP client for the Yahoo chart endpoint behind the candles route.
 # Phase 2c reuses it for the quote and quoteSummary endpoints (cookie + crumb).
 requests==2.34.2
+# Phase 3b: Nova's agent, tool schemas, Gemini provider and Vercel AI adapter.
+pydantic-ai-slim[google]==2.57.0

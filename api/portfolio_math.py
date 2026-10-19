@@ -6,6 +6,41 @@ drift between the live chart and the stored snapshot.
 """
 
 
+def day_change_rupees(holding):
+    """Turn a day % change into rupees, the way the Express helper does."""
+    denominator = 100 + (holding.get("dayChangePct") or 0)
+    if not denominator:
+        return 0  # a -100% change would divide by zero
+
+    return (
+        (holding.get("qty") or 0)
+        * (holding.get("ltp") or 0)
+        * ((holding.get("dayChangePct") or 0) / denominator)
+    )
+
+
+def calculate_portfolio_summary(holdings):
+    """Port of ``calculatePortfolioSummary`` in portfolioMath.js."""
+    invested = sum(
+        (holding.get("qty") or 0) * (holding.get("avgPrice") or 0) for holding in holdings
+    )
+    value = sum((holding.get("qty") or 0) * (holding.get("ltp") or 0) for holding in holdings)
+    day_pnl = sum(day_change_rupees(holding) for holding in holdings)
+
+    # What these same holdings were worth at yesterday's close.
+    previous_value = value - day_pnl
+    pnl = value - invested
+
+    return {
+        "invested": invested,
+        "value": value,
+        "pnl": pnl,
+        "pnlPct": (pnl / invested * 100) if invested else 0,
+        "dayPnl": day_pnl,
+        "dayPnlPct": (day_pnl / previous_value * 100) if previous_value else 0,
+    }
+
+
 def mis_components(positions):
     """Value of open MIS legs; an ``ltp`` of 0 falls back to the entry price."""
     mis_value = 0.0

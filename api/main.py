@@ -17,7 +17,19 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import db
 from .config import get_cors_origins
 from .rate_limit import AuthRateLimitMiddleware
-from .routes import auth, funds, health, holdings, instruments, market, orders, portfolio, positions, watchlist
+from .routes import (
+    assistant,
+    auth,
+    funds,
+    health,
+    holdings,
+    instruments,
+    market,
+    orders,
+    portfolio,
+    positions,
+    watchlist,
+)
 from .scheduler import (
     MarketSyncScheduler,
     PortfolioSnapshotScheduler,
@@ -117,6 +129,7 @@ def create_app(database=None) -> FastAPI:
     app.include_router(instruments.router)
     app.include_router(market.router)
     app.include_router(auth.router)
+    app.include_router(assistant.router)
     return app
 
 

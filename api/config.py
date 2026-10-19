@@ -59,3 +59,22 @@ def get_settings() -> Settings:
         port=int(os.getenv("PORT", "8000")),
         node_env=os.getenv("NODE_ENV", ""),
     )
+
+
+# The same model as server/config/ai.js. GEMINI_MODEL is an escape hatch for
+# deployments, not a second source of truth.
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+
+
+@dataclass(frozen=True)
+class AISettings:
+    api_key: str
+    model: str
+
+
+def get_ai_settings() -> AISettings:
+    """Read Nova's configuration at call time so tests can patch it."""
+    return AISettings(
+        api_key=os.getenv("GOOGLE_GENERATIVE_AI_API_KEY", "").strip(),
+        model=os.getenv("GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL,
+    )

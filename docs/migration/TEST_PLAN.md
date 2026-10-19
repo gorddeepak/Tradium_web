@@ -44,8 +44,8 @@ comparing Express responses to FastAPI responses directly, using the same seeded
 | Seeded demo data: ≥2 users, holdings, positions, orders in each status, funds, transactions, snapshots | most tests | **PLANNED** |
 | Express reference harness, pointed at a scratch DB | parity tests | **AVAILABLE** — `tools/express-parity/`; loads individual Express modules only, never `server/index.js`, so no cron job starts. Used in §1K |
 | FastAPI app running against the same scratch DB | Phase 1+ | **PLANNED** |
-| Gemini key with quota | AI tests | **BLOCKED** until Phase 3 |
-| Recorded resolved npm versions | AI protocol tests | **BLOCKED** until dependencies are installed |
+| Gemini key with quota | AI tests | **AVAILABLE** (Phase 3b) — injected into the process at runtime only; never written to a tracked file |
+| Recorded resolved npm versions | AI protocol tests | **AVAILABLE** — `ai@7.0.58`, `@ai-sdk/react@4.0.61`, `@ai-sdk/google@4.0.39` (Phase 3b) |
 
 **Fixture policy:** create fixtures only in an isolated database with safe demo configuration. If that
 is not available, mark dependent tests `BLOCKED` and record the prerequisite. Never extract production
@@ -538,7 +538,7 @@ status code, body **keys**, value types, and error message text.
 | 2.2 | ObjectId fields | 24-char hex strings, no `ObjectId(...)` wrapper | PLANNED |
 | 2.3 | Timestamps | ISO-8601 UTC strings | PLANNED |
 | 2.4 | Enum values | casing preserved (`OPEN`, `LONG`, `CNC`, …) | PLANNED |
-| 2.5 | Error envelope | `{ message }` for normal routes, `{ error }` for the three assistant routes | PLANNED |
+| 2.5 | Error envelope | `{ message }` for normal routes, `{ error }` for the three assistant routes | **PARTIAL (Phase 3b)** — chat keeps Express's `{ error }` for 400/502/500/503; insight/briefing use the normal `{ message }` envelope for non-object bodies and for the new 503 missing-key case. Covered by `api/tests/test_assistant.py` |
 | 2.6 | Validation messages | exact strings from API_CONTRACTS §5.2 and §5.3, in the same order | PLANNED |
 | 2.7 | Status codes | 400/401/404/409/503 in the documented cases | PLANNED |
 | 2.8 | Money in messages | Indian grouping (`₹1,23,456`) | PLANNED |
@@ -581,7 +581,7 @@ Two users, A and B, each with data.
 | 4.2 | A requests B's position square-off | 404, no mutation | **PASSED** — `test_positions.py::test_square_off_errors` |
 | 4.3 | A cancels B's order | 404, order unchanged | **PASSED** — `test_orders.py::test_cancel_order_refunds_and_reports_state` |
 | 4.4 | A deletes B's watchlist item | no effect (204 regardless), B's row remains | **PASSED** — `test_watchlist.py::test_delete_watchlist_is_always_204` |
-| 4.5 | A calls a Nova tool | only A's data in the answer | PLANNED |
+| 4.5 | A calls a Nova tool | only A's data in the answer | **PASSED (Phase 3b)** — per-user isolation test in `api/tests/test_assistant.py` |
 | 4.6 | Concurrent requests from A and B | no cross-contamination of the user identity | PLANNED |
 
 ---
@@ -718,13 +718,13 @@ See [AI_INTEGRATION_PLAN.md](./AI_INTEGRATION_PLAN.md) §10 for the full matrix.
 
 | # | Test | Expected | Status |
 |---|---|---|---|
-| 9.1 | Text-only stream | renders in the unmodified panel | BLOCKED (Phase 3) |
-| 9.2 | Single tool call | tool card + grounded answer | BLOCKED |
-| 9.3 | Five-step cap | stops at five | BLOCKED |
-| 9.4 | Cross-user probe | no data leak | BLOCKED |
-| 9.5 | Insight stream | `useCompletion` renders text | BLOCKED |
-| 9.6 | Briefing stream | renders on dashboard | BLOCKED |
-| 9.7 | Provider failure | documented client state | BLOCKED |
+| 9.1 | Text-only stream | renders in the unmodified panel | **PASSED (Phase 3b, test)** — `FunctionModel` text stream; live one-tool panel exercised in §9.2 |
+| 9.2 | Single tool call | tool card + grounded answer | **PASSED (Phase 3b, live)** — `getHoldings` card plus grounded answer in the browser |
+| 9.3 | Five-step cap | stops at five | **PARTIAL (Phase 3b)** — `UsageLimits(request_limit=5)` configured; no adversarial probe |
+| 9.4 | Cross-user probe | no data leak | **PASSED (Phase 3b, test)** — per-user tool isolation test |
+| 9.5 | Insight stream | `useCompletion` renders text | **PASSED (Phase 3b, live)** — Holdings insight ≤25 words with ₹ formatting |
+| 9.6 | Briefing stream | renders on dashboard | **PASSED (Phase 3b, live)** — dashboard briefing with real P&L |
+| 9.7 | Provider failure | documented client state | **PARTIAL (Phase 3b)** — missing key → 503; insight failure → fallback text; 429/5xx mapped to 502 but not live-triggered |
 
 ---
 

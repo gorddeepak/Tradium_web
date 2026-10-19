@@ -1,9 +1,9 @@
 # Migration Status
 
-**Last updated:** 2026-10-19 (Phase 3a)
-**Current phase:** **Phase 3a — CORS and frontend cutover**
-**Application code modified:** **Yes.** CORS settings under `api/`, the frontend API origin and signup
-call under `src/`; `server/` and the original repository are untouched.
+**Last updated:** 2026-10-19 (Phase 3b)
+**Current phase:** **Phase 3b — Nova assistant and insight endpoints**
+**Application code modified:** **Yes.** CORS settings and the Nova assistant under `api/`, the frontend
+API origin and signup call under `src/`; `server/` and the original repository are untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -13,8 +13,8 @@ call under `src/`; `server/` and the original repository are untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 3a — CORS enabled and the frontend switched to FastAPI |
-| FastAPI application | **started** — the 13 read routes, the 7 write routes, and the 4 auth routes (24 registered operations) |
+| Phase | 3b — Nova chat, page insights and dashboard briefing |
+| FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations) |
 | Market cache | `marketquotes` populated for **53/53** symbols in `tradium_fastapi_dev`; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
 | Trading jobs | per-minute `priceSync` (fills orders, settles MIS exits) and the daily 18:00 IST snapshot; **off unless `TRADING_JOBS_ENABLED` is set** |
 | Express backend | unchanged, retained in-tree as reference |
@@ -30,9 +30,10 @@ call under `src/`; `server/` and the original repository are untouched.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **246 passed, 8 skipped** (default); **250 passed** with `TEST_MONGO_URL` — see §5 |
+| Tests executed | **259 passed, 8 skipped** (default); **267 passed** with `TEST_MONGO_URL` — see §5 |
 | Express parity check | **run** — cookies, numeric rendering and job side effects compared against the original modules; **no functional difference** (§3K) |
 | Browser cutover check | **run** — signup, login, reload, logout and all six dashboard pages against a live FastAPI server (§3L) |
+| Nova browser check | **run** — dashboard briefing, a page insight, and chat with one- and two-tool turns against live Gemini (§3M) |
 
 ---
 
@@ -1009,14 +1010,96 @@ endpoints.
 
 ---
 
-## 4. Known issues recorded (not fixed)
+## 3M. Phase 3b — Nova assistant, insights and briefing
 
-These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. None has been
-changed.
+**Goal:** port the Express assistant to FastAPI with the existing routes, prompts, tools and streaming
+protocols, then verify it from the unmodified React UI.
 
-1. Nova `getOrders` returns `quantity` where the schema field is `qty`.
-2. Nova `getOrders` filters lowercase statuses while stored values are uppercase.
-3. Nova `getFunds` reads a non-existent `used` field.
+### Implementation
+
+| File | Change |
+|---|---|
+| `api/assistant.py` | **new** — verbatim chat/insight/briefing prompts, `NovaDeps`, `get_ai_model()`, six tool snapshot functions, module-level `chat_agent`/`plain_agent`, `stream_text` |
+| `api/routes/assistant.py` | **new** — `POST /api/assistant/chat` (Vercel UI Message Stream), `POST /api/assistant/insight` and `POST /api/assistant/briefing` (plain text) |
+| `api/portfolio_math.py` | added `calculate_portfolio_summary()` and `day_change_rupees()` shared with the tool layer |
+| `api/config.py` | `AISettings` / `get_ai_settings()` reading `GOOGLE_GENERATIVE_AI_API_KEY` and optional `GEMINI_MODEL` |
+| `api/main.py` | registers `assistant.router` |
+| `api/requirements.txt` | `pydantic-ai-slim[google]==2.57.0` |
+| `api/.env.example` | documents the Gemini key and model override |
+| `api/tests/test_assistant.py` | **new** — 13 tests: auth, payload validation, missing configuration, text/tool SSE, insight/briefing text, tool data parity, SHORT P&L, cross-user isolation, date serialization |
+
+### Decisions
+
+- **Protocol:** PydanticAI `VercelAIAdapter` with `sdk_version=7`, matching the installed frontend
+  (`ai@7.0.58`, `@ai-sdk/react@4.0.61`). The adapter emits the message-part SSE frames the panel
+  already understands; no custom format was invented.
+- **Payload validation:** the chat body is checked manually so a non-array `messages` returns the
+  Express-compatible `400 {"error":"Invalid messages payload"}` instead of FastAPI's 422 shape.
+- **Step cap:** Express `stepCountIs(5)` became `UsageLimits(request_limit=5)`.
+- **Insight/briefing:** plain-text `StreamingResponse` using the original `pageContext` descriptions,
+  `FORMAT_RULES`, the 25-word insight limit and the dashboard-only briefing prompt.
+- **Configuration:** key from `GOOGLE_GENERATIVE_AI_API_KEY`; model defaults to
+  `gemini-3.5-flash-lite`, overridable with `GEMINI_MODEL`. Missing key → `503` from the route, not an
+  import-time crash. No key or model string is hardcoded in the controller.
+- **Failure handling:** insight/briefing use one generator entered and iterated in the same task
+  (PydanticAI requirement) and yield `Insight unavailable right now.` if the provider fails after
+  headers are sent. Chat maps `ModelAPIError` to `502` and other exceptions to `500`.
+- **Tool defects (intentional, tested divergence from Express):**
+  - `getOrders` reads `qty` rather than the non-existent `quantity`.
+  - `getOrders` status matching is case-insensitive against uppercase stored values.
+  - `getFunds` derives `usedMargin = blockedInOrders + misMargin` instead of reading `funds.used`.
+  - `getPositions` flips the P&L sign for SHORT positions.
+
+### Verification against a live server
+
+Run with `uvicorn api.main:app` on `127.0.0.1:8000`, `MONGO_URL` pointing at the scratch database
+`tradium_fastapi_phase3b_test`, Vite on `localhost:5173`, and a real Gemini key injected into the
+process environment only (never written to a tracked file). The scratch DB held two holdings
+(RELIANCE, INFY), long and short MIS positions, OPEN/EXECUTED/CANCELLED orders, a watchlist row and
+₹50,000 available funds.
+
+| Check | Observed |
+|---|---|
+| Dashboard briefing | `POST /api/assistant/briefing` 200 `text/plain`; card showed a 2–3 sentence briefing with real P&L, e.g. day P&L ₹204 / 0.64% |
+| Holdings page insight | `POST /api/assistant/insight` 200; "RELIANCE drove today's gains of ₹204, offsetting INFY's 1.50% drop to bring total portfolio value to ₹31,900." |
+| Chat, single tool | `POST /api/assistant/chat` 200 SSE; `getHoldings` card, answer named RELIANCE 10 @ ₹2,500 and INFY 5 @ ₹1,380, total ₹31,900 |
+| Chat, two tools | `getFunds` + `getOrders` cards; answer reported ₹50,000 available, ₹4,900 blocked and the single pending RELIANCE limit buy of 3 @ ₹2,450 |
+| Tool card rendering | unmodified `AssistantPanel.jsx` rendered `getHoldings`, `getFunds` and `getOrders` as completed tool cards |
+| Unauthenticated chat | 401 (test) |
+| Non-array `messages` / missing key | 400 `{"error":"Invalid messages payload"}` / 503 (test) |
+
+The two-tool turn also confirms the three Express tool defects are fixed: the orders tool returned a
+quantity and matched the uppercase `OPEN` status, and the funds tool reported a derived blocked margin
+rather than failing on the missing `used` field.
+
+### Files and checks
+
+- `.venv/Scripts/python.exe -m pytest -q`: **259 passed, 8 skipped**.
+- Scratch database `tradium_fastapi_phase3b_test`: **dropped** after the run.
+- `tradium_fastapi_dev` and `zerodha` were not written to in this phase.
+
+### Not done in this phase
+
+- No static serving of `dist/`, no production deployment and no Render change. FastAPI still does not
+  mount the frontend build.
+- No retry policy for provider 429/5xx; errors surface as described above.
+- The five-step cap is configured but was not probed adversarially; the HTTP-level parity rows in
+  `TEST_PLAN.md` remain pending except where this phase added direct tests.
+
+---
+
+## 4. Known issues recorded
+
+These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and
+the SHORT P&L sign were fixed in the FastAPI Nova port during Phase 3b (see §3M), because the tools
+were being written from scratch and reproducing known-broken output would bake the defects into the
+new backend. The Express reference in `server/` still has the original behaviour. Everything else is
+unchanged.
+
+1. ~~Nova `getOrders` returns `quantity` where the schema field is `qty`.~~ **Fixed in FastAPI.**
+2. ~~Nova `getOrders` filters lowercase statuses while stored values are uppercase.~~ **Fixed in FastAPI.**
+3. ~~Nova `getFunds` reads a non-existent `used` field.~~ **Fixed in FastAPI** (derived
+   `usedMargin = blockedInOrders + misMargin`).
 4. `POST /api/orders` debits funds before the CNC holdings check and does not refund on rejection.
 5. Price sync runs every minute; project documentation says every 5 minutes.
 6. `npm start` uses `node`, not nodemon, contrary to project documentation.
@@ -1024,8 +1107,9 @@ changed.
 8. Market-hours logic has no exchange holiday calendar.
 9. `settleMisExit` deletes an MIS position unconditionally after a partial fill, so an exit larger than
    the remaining quantity still removes the whole position.
+10. ~~Nova `getPositions` reported SHORT P&L with the long-side sign.~~ **Fixed in FastAPI.**
 
-Decision: reproduce current behaviour during the port; fix separately with approval (AD-9).
+Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
 
 ---
 
@@ -1095,6 +1179,14 @@ Decision: reproduce current behaviour during the port; fix separately with appro
 | Main pages against FastAPI (Phase 3a) | **verified** — holdings, positions, orders, watchlist, funds and markets rendered their empty states with all data requests 200; no CORS console errors |
 | Deferred Nova endpoints (Phase 3a) | **observed** — `/api/assistant/briefing` and `/insight` 404; the insight card degrades to "Insight unavailable right now." |
 | Scratch database after Phase 3a | **dropped** — `tradium_fastapi_phase3a_test` absent; `tradium_fastapi_dev` untouched; `zerodha` still 9 collections |
+| Application tests (Phase 3b) | **run:** 259 passed, 8 skipped; the 13 new assistant tests cover auth, payload validation, missing configuration, text and tool SSE, insight/briefing text, tool parity, SHORT P&L, cross-user isolation and date serialization |
+| PydanticAI stream protocol (Phase 3b) | **verified** — `VercelAIAdapter(sdk_version=7)` emits `start`, `start-step`, `tool-input-start`, `tool-input-available`, `tool-output-available`, text deltas and `finish` frames |
+| Live Gemini from the FastAPI app (Phase 3b) | **verified** — chat returned grounded `getHoldings` output; insight and briefing returned `text/plain` with correct ₹ formatting |
+| Browser Nova chat (Phase 3b) | **verified** — one-tool and two-tool turns rendered as tool cards plus a grounded answer in the unmodified panel |
+| Browser briefing and insight (Phase 3b) | **verified** — dashboard briefing and Holdings insight showed real portfolio numbers |
+| Tool-defect fixes (Phase 3b) | **verified** — `qty`, case-insensitive uppercase status and derived blocked margin all showed in the live two-tool answer |
+| Missing-key behaviour (Phase 3b) | **verified** — all three routes return 503 when `GOOGLE_GENERATIVE_AI_API_KEY` is unset |
+| Scratch database after Phase 3b | **dropped** — `tradium_fastapi_phase3b_test` absent; `tradium_fastapi_dev` and `zerodha` untouched |
 
 ---
 
@@ -1163,14 +1255,15 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 8. Explicitly not approved / not done
 
-- No route beyond the twenty-four ported operations: the 13 reads (`GET /api/health`, `GET /api/holdings`,
+- No route beyond the twenty-seven ported operations: the 13 reads (`GET /api/health`, `GET /api/holdings`,
   `GET /api/orders`, `GET /api/watchlist`, `GET /api/positions`, `GET /api/funds`,
   `GET /api/funds/transactions`, `GET /api/portfolio/history`, `GET /api/instruments/search`,
   `GET /api/instruments/lookup/{symbol}`, `GET /api/instruments/{symbol}`,
   `GET /api/instruments/{symbol}/candles`, `GET /api/market/overview`), the 7 writes (`POST`/`DELETE
   /api/watchlist`, `POST /api/funds/transactions`, `POST`/`DELETE /api/orders`, `POST /api/orders/exits`,
-  `POST /api/positions/:id/square-off`) and the 4 auth routes (`POST /api/auth/signup`,
-  `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`).
+  `POST /api/positions/:id/square-off`), the 4 auth routes (`POST /api/auth/signup`,
+  `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`) and the 3 assistant routes
+  (`POST /api/assistant/chat`, `POST /api/assistant/insight`, `POST /api/assistant/briefing`).
 - The per-minute `priceSync`, `settleMisExit` and the daily `portfolioSnapshot` **are ported**, but both
   schedulers are **off by default**; neither was enabled against any deployment, so the FastAPI app does
   not refresh prices or fill orders on its own yet.
@@ -1185,7 +1278,8 @@ From `ARCHITECTURE_DECISIONS.md`:
 - **No Express *server* was started.** The Phase 2e harness imports individual Express modules on an
   ephemeral port against scratch databases; `server/index.js`, its cron registrations and its static
   frontend mount were never executed.
-- No Nova / Gemini / PydanticAI work.
+- No AI model *generation* beyond the three Nova routes; no agentic features, background AI jobs,
+  embeddings, or vector store. Insight and briefing fire only on page visit/data change.
 - No production frontend deployment, no FastAPI static `dist/` mount, and no deployed CORS origin.
 - No change to `server/` or the original repository; `src/` changed only for the API origin and the
   signup call (§3L).
@@ -1199,10 +1293,16 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 3a complete (CORS and frontend cutover). Awaiting review.** The React app now runs against
-FastAPI in local development. Nothing further will be implemented without approval.
+**Phase 3b complete (Nova assistant, insights and briefing). Awaiting review.** The React app now runs
+end-to-end against FastAPI in local development, including the assistant. Nothing further will be
+implemented without approval.
 
 Open items:
+
+0. **Nova is ported and verified** (§3M): chat, insight and briefing routes stream with the same
+   protocols as Express, the six tools return request-scoped data, and four Express tool defects were
+   fixed deliberately with tests. The step cap is configured but not adversarially probed, and there
+   is no provider retry policy.
 
 1. **The harness blocker is gone for module-level comparisons.** `tools/express-parity/` now compares
    auth cookies, `GET /api/holdings` JSON and the three jobs against the real Express modules without
@@ -1230,4 +1330,6 @@ Open items:
 8. Recommended next, in order:
    1. The remaining HTTP-level parity rows, if wanted, using the committed harness.
    2. FastAPI static `dist/` serving, as the first production-cutover item.
-   3. Nova/Gemini/PydanticAI last, as its own phase.
+   3. A step-cap probe and a live provider-error probe to close the two `PARTIAL` rows in
+      `AI_INTEGRATION_PLAN.md` §11, if wanted.
+   4. Any remaining Express-defect decisions (orders debit/refund, `settleMisExit` partial fill).
