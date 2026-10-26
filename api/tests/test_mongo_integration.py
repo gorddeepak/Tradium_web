@@ -109,9 +109,10 @@ def test_holdings_reads_real_mongo_documents(scratch_database, monkeypatch):
     assert holding["__v"] == 0
 
 
-def test_orders_and_watchlist_read_real_mongo_documents(scratch_database, monkeypatch):
-    # Confirms the collection names the routes rely on (`orders`, `watchlists`)
-    # exist in a real MongoDB; mongomock would accept any name.
+def test_orders_read_real_mongo_documents(scratch_database, monkeypatch):
+    # Confirms the collection name the route relies on (`orders`) exists in a
+    # real MongoDB; mongomock would accept any name. Watchlists moved to
+    # PostgreSQL in Phase 3B3 and are covered by the PostgreSQL suite.
     monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
 
     user_id = ObjectId()
@@ -126,29 +127,16 @@ def test_orders_and_watchlist_read_real_mongo_documents(scratch_database, monkey
              "createdAt": created, "updatedAt": created, "__v": 0},
         ]
     )
-    scratch_database["watchlists"].insert_many(
-        [
-            {"_id": ObjectId(), "user": user_id, "symbol": "INFY",
-             "createdAt": created, "updatedAt": created, "__v": 0},
-            {"_id": ObjectId(), "user": other_user, "symbol": "TCS",
-             "createdAt": created, "updatedAt": created, "__v": 0},
-        ]
-    )
 
     token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
     app = create_app(database=scratch_database)
 
     with TestClient(app) as client:
         orders = client.get("/api/orders", cookies={"token": token})
-        watchlist = client.get("/api/watchlist", cookies={"token": token})
 
     assert orders.status_code == 200
     assert [order["symbol"] for order in orders.json()] == ["INFY"]
     assert orders.json()[0]["createdAt"] == "2026-09-01T04:15:30.123Z"
-
-    assert watchlist.status_code == 200
-    assert [item["symbol"] for item in watchlist.json()] == ["INFY"]
-    assert watchlist.json()[0]["createdAt"] == "2026-09-01T04:15:30.123Z"
 
 
 def test_positions_and_funds_read_real_mongo_documents(scratch_database, monkeypatch):
@@ -263,9 +251,6 @@ def test_write_routes_against_real_mongo(scratch_database, monkeypatch):
 
         deposit = client.post("/api/funds/transactions",
                               json={"kind": "DEPOSIT", "amount": 5000}, cookies=cookie)
-        added = client.post("/api/watchlist",
-                            json={"symbol": "INFY", "name": "Infosys"}, cookies=cookie)
-        removed = client.delete(f"/api/watchlist/{added.json()['_id']}", cookies=cookie)
 
         market_order = {"symbol": "INFY", "name": "Infosys", "exchange": "NSE", "side": "BUY",
                         "type": "MARKET", "product": "MIS", "qty": 10, "price": 0}
@@ -283,8 +268,6 @@ def test_write_routes_against_real_mongo(scratch_database, monkeypatch):
 
     assert deposit.status_code == 201
     assert deposit.json()["funds"]["available"] == 105000
-    assert added.status_code == 201 and removed.status_code == 204
-    assert scratch_database["watchlists"].count_documents({"user": user_id}) == 0
 
     assert first_fill.status_code == 201 and first_fill.json()["status"] == "EXECUTED"
     assert second_fill.status_code == 201
