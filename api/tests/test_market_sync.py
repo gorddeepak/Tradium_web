@@ -101,7 +101,11 @@ def _serve(monkeypatch, rows):
 def test_fetch_quote_reduces_to_the_documented_shape(monkeypatch):
     _serve(monkeypatch, [_row()])
 
-    assert market_data.fetch_quote("RELIANCE") == {"ltp": 1202.8, "dayChangePct": -0.69}
+    assert market_data.fetch_quote("RELIANCE") == {
+        "ltp": 1202.8,
+        "dayChangePct": -0.69,
+        "sourceTime": None,
+    }
 
 
 def test_fetch_quote_adds_the_ns_suffix_but_leaves_indices_alone(monkeypatch):
@@ -137,7 +141,21 @@ def test_fetch_quote_tolerates_a_missing_change_percent(monkeypatch):
     del row["regularMarketChangePercent"]
     _serve(monkeypatch, [row])
 
-    assert market_data.fetch_quote("RELIANCE") == {"ltp": 1202.8, "dayChangePct": 0}
+    assert market_data.fetch_quote("RELIANCE") == {
+        "ltp": 1202.8,
+        "dayChangePct": 0,
+        "sourceTime": None,
+    }
+
+
+def test_fetch_quote_carries_the_provider_source_time(monkeypatch):
+    moment = datetime(2026, 10, 25, 10, 0, tzinfo=timezone.utc)
+    _serve(monkeypatch, [_row(regularMarketTime=moment.timestamp())])
+
+    quote = market_data.fetch_quote("RELIANCE")
+
+    assert quote["sourceTime"] == moment
+    assert quote["sourceTime"].tzinfo is timezone.utc
 
 
 def test_fetch_quote_swallows_a_provider_error(monkeypatch):
@@ -153,7 +171,11 @@ def test_fetch_quote_swallows_a_provider_error(monkeypatch):
 def test_fetch_quote_picks_its_own_ticker_out_of_a_batch(monkeypatch):
     _serve(monkeypatch, [_row(symbol="INFY.NS", regularMarketPrice=1500.0), _row()])
 
-    assert market_data.fetch_quote("RELIANCE") == {"ltp": 1202.8, "dayChangePct": -0.69}
+    assert market_data.fetch_quote("RELIANCE") == {
+        "ltp": 1202.8,
+        "dayChangePct": -0.69,
+        "sourceTime": None,
+    }
 
 
 # --------------------------------------------------------------------------

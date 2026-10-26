@@ -47,7 +47,9 @@ def test_token_without_user_id_is_rejected(client):
     assert response.json() == {"message": "Invalid or expired token"}
 
 
-def test_valid_cookie_is_accepted(client, make_token, user_id):
-    response = client.get("/api/holdings", cookies={"token": make_token(user_id)})
+def test_valid_cookie_is_accepted(book_client, book_user, make_token):
+    response = book_client.get(
+        "/api/holdings", cookies={"token": make_token(book_user)}
+    )
     assert response.status_code == 200
     assert response.json() == []

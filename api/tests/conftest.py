@@ -1,8 +1,9 @@
 """Shared test fixtures.
 
-The fast suite uses mongomock (in memory), so it never contacts a real
-database. A separate optional suite can run against a scratch MongoDB
-when TEST_MONGO_URL is set; see test_mongo_integration.py.
+Mongo-backed tests use mongomock (in memory), so they never contact a real
+MongoDB. PostgreSQL tests use TEST_DATABASE_URL and are skipped when it is not
+set; a separate optional suite can also run against a scratch MongoDB when
+TEST_MONGO_URL is set (see test_mongo_integration.py).
 """
 
 import os
@@ -30,7 +31,17 @@ if str(ROOT) not in sys.path:
 
 from api.main import create_app  # noqa: E402
 from api.postgres.base import Base  # noqa: E402
-from api.postgres.models import Instrument, LatestQuote  # noqa: E402
+from api.postgres.models import (  # noqa: E402
+    Fund,
+    Holding,
+    Instrument,
+    LatestQuote,
+    Order,
+    Position,
+    Transaction,
+    User,
+)
+from api.postgres.session import get_session  # noqa: E402
 
 TEST_SECRET = "test-secret-not-a-real-key"
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "").strip()
@@ -332,5 +343,209 @@ def market_instrument_factory(postgres_session_factory):
                 )
             session.commit()
         return instrument_id
+
+    return _make
+
+
+# --------------------------------------------------------------------------
+# PostgreSQL trading-book fixtures (Phase 3C2)
+# --------------------------------------------------------------------------
+
+BOOK_CREATED = datetime(2026, 9, 1, 4, 15, 30, 123000, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def book_session_factory(postgres_session_factory, postgres_schema):
+    """The shared PostgreSQL factory with an empty users/book for one test."""
+    with postgres_schema.begin() as connection:
+        connection.execute(text("TRUNCATE TABLE users CASCADE"))
+    return postgres_session_factory
+
+
+@pytest.fixture
+def book_client(book_session_factory):
+    """The API with PostgreSQL sessions and mongomock for the remaining reads."""
+    app = create_app(database=mongomock.MongoClient()["tradium_test"])
+
+    def override_get_session():
+        with book_session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_get_session
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def book_user_factory(book_session_factory):
+    """Insert a 24-hex PostgreSQL user the book rows can reference."""
+
+    def _make(user_id=None):
+        user = User(
+            id=user_id or secrets.token_hex(12),
+            username=f"book-{secrets.token_hex(6)}",
+            email=f"{secrets.token_hex(8)}@example.com",
+            password_hash="not-used-in-book-tests",
+            created_at=BOOK_CREATED,
+            updated_at=BOOK_CREATED,
+            version=0,
+        )
+        with book_session_factory() as session:
+            session.add(user)
+            session.commit()
+        return user.id
+
+    return _make
+
+
+@pytest.fixture
+def book_user(book_user_factory):
+    """A 24-hex PostgreSQL user the book rows can reference."""
+    return book_user_factory()
+
+
+@pytest.fixture
+def book_funds_factory(book_session_factory):
+    def _make(user_id, available=0):
+        fund = Fund(
+            id=secrets.token_hex(12),
+            user_id=user_id,
+            available=Decimal(str(available)),
+            created_at=BOOK_CREATED,
+            updated_at=BOOK_CREATED,
+            version=0,
+        )
+        with book_session_factory() as session:
+            session.add(fund)
+            session.commit()
+        return fund
+
+    return _make
+
+
+@pytest.fixture
+def book_holding_factory(book_session_factory):
+    def _make(
+        user_id,
+        symbol="RELIANCE",
+        name="Reliance Industries",
+        exchange="NSE",
+        qty=10,
+        avg_price="2400.5",
+        created_at=BOOK_CREATED,
+    ):
+        holding = Holding(
+            id=secrets.token_hex(12),
+            user_id=user_id,
+            symbol=symbol,
+            name=name,
+            exchange=exchange,
+            qty=qty,
+            avg_price=Decimal(str(avg_price)),
+            created_at=created_at,
+            updated_at=created_at,
+            version=0,
+        )
+        with book_session_factory() as session:
+            session.add(holding)
+            session.commit()
+        return holding
+
+    return _make
+
+
+@pytest.fixture
+def book_position_factory(book_session_factory):
+    def _make(
+        user_id,
+        symbol="INFY",
+        name="Infosys",
+        exchange="NSE",
+        side="LONG",
+        product="MIS",
+        qty=5,
+        entry="1500.0",
+        created_at=BOOK_CREATED,
+    ):
+        position = Position(
+            id=secrets.token_hex(12),
+            user_id=user_id,
+            symbol=symbol,
+            name=name,
+            exchange=exchange,
+            side=side,
+            product=product,
+            qty=qty,
+            entry=Decimal(str(entry)),
+            created_at=created_at,
+            updated_at=created_at,
+            version=0,
+        )
+        with book_session_factory() as session:
+            session.add(position)
+            session.commit()
+        return position
+
+    return _make
+
+
+@pytest.fixture
+def book_order_factory(book_session_factory):
+    def _make(user_id, **overrides):
+        values = {
+            "id": secrets.token_hex(12),
+            "user_id": user_id,
+            "symbol": "INFY",
+            "name": "Infosys",
+            "exchange": "NSE",
+            "side": "BUY",
+            "type": "LIMIT",
+            "product": "CNC",
+            "qty": 5,
+            "filled": 0,
+            "price": Decimal("1500.0000"),
+            "trigger_price": Decimal("0.0000"),
+            "sl_trigger": Decimal("0.0000"),
+            "tp_price": Decimal("0.0000"),
+            "group_id": "",
+            "is_exit": False,
+            "status": "OPEN",
+            "created_at": BOOK_CREATED,
+            "updated_at": BOOK_CREATED,
+            "version": 0,
+        }
+        for key, value in overrides.items():
+            if key in ("price", "trigger_price", "sl_trigger", "tp_price"):
+                value = Decimal(str(value))
+            values[key] = value
+        order = Order(**values)
+        with book_session_factory() as session:
+            session.add(order)
+            session.commit()
+        return order
+
+    return _make
+
+
+@pytest.fixture
+def book_transaction_factory(book_session_factory):
+    def _make(user_id, kind="DEPOSIT", amount="100", created_at=BOOK_CREATED):
+        transaction = Transaction(
+            id=secrets.token_hex(12),
+            user_id=user_id,
+            kind=kind,
+            method="Bank transfer",
+            amount=Decimal(str(amount)),
+            symbol="",
+            status="COMPLETED",
+            created_at=created_at,
+            updated_at=created_at,
+            version=0,
+        )
+        with book_session_factory() as session:
+            session.add(transaction)
+            session.commit()
+        return transaction
 
     return _make

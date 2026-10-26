@@ -1,43 +1,56 @@
-"""Focused tests for /api/positions: isolation, shape, and the MIS square-off.
+"""PostgreSQL-backed tests for /api/positions and the MIS square-off."""
 
-The read route returns natural order with no sort, so ordering is not
-asserted. Authentication and database-failure behaviour are shared with the
-holdings suite and not repeated here.
-"""
+from decimal import Decimal
 
-from bson import ObjectId
+import jwt
+from sqlalchemy import select
+
+from api.postgres.models import Fund, Order, Position, Transaction
+from api.tests.conftest import TEST_SECRET
+
+
+def _token(user_id):
+    return jwt.encode({"id": user_id}, TEST_SECRET, algorithm="HS256")
+
+
+def _funds(factory, user_id):
+    with factory() as session:
+        return session.scalar(select(Fund).where(Fund.user_id == user_id))
 
 
 def test_returns_only_the_cookie_users_positions(
-    client, database, make_token, user_id, other_user_id, positions_factory
+    book_client, book_user, book_user_factory, book_position_factory
 ):
-    database["positions"].insert_many(
-        [
-            positions_factory(user_id, symbol="INFY"),
-            positions_factory(user_id, symbol="RELIANCE", name="Reliance Industries", side="SHORT"),
-            positions_factory(other_user_id, symbol="TCS", name="Tata Consultancy"),
-        ]
-    )
+    from datetime import datetime, timedelta, timezone
 
-    response = client.get("/api/positions", cookies={"token": make_token(user_id)})
+    early = datetime(2026, 9, 1, 4, 0, 0, tzinfo=timezone.utc)
+    late = early + timedelta(minutes=5)
+    other = book_user_factory()
+    book_position_factory(book_user, symbol="INFY", created_at=early)
+    book_position_factory(
+        book_user, symbol="RELIANCE", side="SHORT", created_at=late
+    )
+    book_position_factory(other, symbol="TCS")
+
+    response = book_client.get("/api/positions", cookies={"token": _token(book_user)})
 
     assert response.status_code == 200
-    symbols = [position["symbol"] for position in response.json()]
-    assert symbols == ["INFY", "RELIANCE"]
-    assert "TCS" not in symbols
+    assert [p["symbol"] for p in response.json()] == ["INFY", "RELIANCE"]
 
 
-def test_response_shape_matches_mongoose_serialization(
-    client, database, make_token, user_id, positions_factory
+def test_response_shape_and_joined_quote(
+    book_client, book_user, book_position_factory, market_instrument_factory
 ):
-    position_id = ObjectId()
-    database["positions"].insert_one(positions_factory(user_id, _id=position_id))
+    position = book_position_factory(book_user, symbol="INFY", entry="1500.0")
+    market_instrument_factory(symbol="INFY", ltp=1520.0)
 
-    body = client.get("/api/positions", cookies={"token": make_token(user_id)}).json()
+    body = book_client.get(
+        "/api/positions", cookies={"token": _token(book_user)}
+    ).json()
 
     assert len(body) == 1
-    position = body[0]
-    assert set(position) == {
+    row = body[0]
+    assert set(row) == {
         "_id",
         "user",
         "symbol",
@@ -52,134 +65,193 @@ def test_response_shape_matches_mongoose_serialization(
         "updatedAt",
         "__v",
     }
-    assert position["_id"] == str(position_id)
-    assert position["user"] == str(user_id)
-    assert type(position["_id"]) is str and len(position["_id"]) == 24
-    assert position["createdAt"] == "2026-09-01T04:15:30.123Z"
+    assert row["_id"] == position.id
+    assert row["user"] == book_user
+    assert row["entry"] == 1500
+    assert row["ltp"] == 1520
+    assert row["createdAt"] == "2026-09-01T04:15:30.123Z"
 
 
-def test_empty_positions_returns_empty_list(client, make_token, user_id):
-    response = client.get("/api/positions", cookies={"token": make_token(user_id)})
+def test_missing_quote_falls_back_to_zero(
+    book_client, book_user, book_position_factory
+):
+    book_position_factory(book_user, symbol="INFY")
+    row = book_client.get(
+        "/api/positions", cookies={"token": _token(book_user)}
+    ).json()[0]
+    assert row["ltp"] == 0
+
+
+def test_empty_positions_returns_empty_list(book_client, book_user):
+    response = book_client.get("/api/positions", cookies={"token": _token(book_user)})
     assert response.status_code == 200
     assert response.json() == []
 
 
-def test_square_off_long_releases_cash_and_records_settlement(
-    client, database, make_token, user_id, positions_factory, orders_factory, monkeypatch
+def test_square_off_long_uses_canonical_quote_and_records_settlement(
+    book_client,
+    book_user,
+    book_session_factory,
+    book_position_factory,
+    book_order_factory,
+    market_instrument_factory,
+    monkeypatch,
 ):
-    cookie = {"token": make_token(user_id)}
-    # No live quote, so the stored ltp is the exit price.
+    # No live quote: the canonical latest_quotes ltp is the fallback.
     monkeypatch.setattr("api.routes.positions.fetch_quote", lambda symbol: None)
-    position_id = ObjectId()
-    exit_id = ObjectId()
-    database["positions"].insert_one(
-        positions_factory(
-            user_id,
-            _id=position_id,
-            symbol="INFY",
-            name="Infosys",
-            side="LONG",
-            product="MIS",
-            qty=10,
-            entry=1500.0,
-            ltp=1550.0,
-        )
+    position = book_position_factory(
+        book_user, symbol="INFY", side="LONG", qty=10, entry="1500.0"
     )
-    database["orders"].insert_one(
-        orders_factory(
-            user_id,
-            _id=exit_id,
-            symbol="INFY",
-            exchange="NSE",
-            product="MIS",
-            isExit=True,
-            status="OPEN",
-            groupId="group-1",
-        )
+    exit_order = book_order_factory(
+        book_user,
+        symbol="INFY",
+        product="MIS",
+        is_exit=True,
+        status="OPEN",
+        group_id="group-1",
     )
+    market_instrument_factory(symbol="INFY", ltp=1550.0)
 
-    response = client.post(f"/api/positions/{position_id}/square-off", cookies=cookie)
+    response = book_client.post(
+        f"/api/positions/{position.id}/square-off", cookies={"token": _token(book_user)}
+    )
 
     assert response.status_code == 200
     assert response.json() == {"message": "Squared off INFY", "pnl": 500}
-    assert database["positions"].count_documents({"_id": position_id}) == 0
 
-    # The upsert creates the funds row: entry*qty + pnl.
-    assert database["funds"].find_one({"user": user_id})["available"] == 15500
-    settlement = database["transactions"].find_one({"user": user_id, "kind": "SETTLEMENT"})
-    assert settlement["amount"] == 500
-    assert settlement["method"] == "INFY MIS square-off"
-    assert settlement["symbol"] == "INFY"
+    with book_session_factory() as session:
+        assert session.get(Position, position.id) is None
+        assert _funds(book_session_factory, book_user).available == Decimal("15500.00")
+        settlement = session.scalar(
+            select(Transaction).where(
+                Transaction.user_id == book_user,
+                Transaction.kind == "SETTLEMENT",
+            )
+        )
+        assert settlement.amount == Decimal("500.00")
+        assert settlement.method == "INFY MIS square-off"
+        assert settlement.symbol == "INFY"
+        closing = session.scalar(
+            select(Order).where(
+                Order.user_id == book_user, Order.is_exit.is_(False)
+            )
+        )
+        assert closing.side == "SELL"
+        assert closing.type == "MARKET"
+        assert closing.status == "EXECUTED"
+        assert closing.filled == 10
+        assert closing.price == Decimal("1550.0000")
+        assert session.get(Order, exit_order.id).status == "CANCELLED"
 
-    closing = database["orders"].find_one({"user": user_id, "isExit": False})
-    assert closing["side"] == "SELL"
-    assert closing["type"] == "MARKET"
-    assert closing["status"] == "EXECUTED"
-    assert closing["filled"] == 10
-    assert closing["price"] == 1550.0
 
-    # The live exit pair is cancelled so it can't fire afterwards.
-    assert database["orders"].find_one({"_id": exit_id})["status"] == "CANCELLED"
+def test_square_off_prefers_the_live_quote(
+    book_client,
+    book_user,
+    book_session_factory,
+    book_position_factory,
+    market_instrument_factory,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "api.routes.positions.fetch_quote",
+        lambda symbol: {"ltp": 1600.0, "dayChangePct": 0, "sourceTime": None},
+    )
+    position = book_position_factory(
+        book_user, symbol="INFY", side="LONG", qty=10, entry="1500.0"
+    )
+    market_instrument_factory(symbol="INFY", ltp=1550.0)
+
+    response = book_client.post(
+        f"/api/positions/{position.id}/square-off", cookies={"token": _token(book_user)}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pnl"] == 1000
+    assert _funds(book_session_factory, book_user).available == Decimal("16000.00")
 
 
 def test_square_off_short_pnl_sign(
-    client, database, make_token, user_id, positions_factory, monkeypatch
+    book_client,
+    book_user,
+    book_session_factory,
+    book_position_factory,
+    market_instrument_factory,
+    monkeypatch,
 ):
-    cookie = {"token": make_token(user_id)}
     monkeypatch.setattr("api.routes.positions.fetch_quote", lambda symbol: None)
-    position_id = ObjectId()
-    database["positions"].insert_one(
-        positions_factory(
-            user_id,
-            _id=position_id,
-            side="SHORT",
-            product="MIS",
-            qty=5,
-            entry=200.0,
-            ltp=190.0,
-        )
+    position = book_position_factory(
+        book_user, symbol="INFY", side="SHORT", qty=5, entry="200.0"
+    )
+    market_instrument_factory(symbol="INFY", ltp=190.0)
+
+    response = book_client.post(
+        f"/api/positions/{position.id}/square-off", cookies={"token": _token(book_user)}
     )
 
-    response = client.post(f"/api/positions/{position_id}/square-off", cookies=cookie)
-
     assert response.status_code == 200
-    # A short profits when the exit is below entry: (190-200)*5*-1.
     assert response.json()["pnl"] == 50
-    assert database["funds"].find_one({"user": user_id})["available"] == 1050
+    assert _funds(book_session_factory, book_user).available == Decimal("1050.00")
+
+
+def test_second_square_off_returns_404(
+    book_client, book_user, book_position_factory, market_instrument_factory, monkeypatch
+):
+    monkeypatch.setattr("api.routes.positions.fetch_quote", lambda symbol: None)
+    position = book_position_factory(book_user, symbol="INFY")
+    market_instrument_factory(symbol="INFY", ltp=1520.0)
+
+    first = book_client.post(
+        f"/api/positions/{position.id}/square-off", cookies={"token": _token(book_user)}
+    )
+    second = book_client.post(
+        f"/api/positions/{position.id}/square-off", cookies={"token": _token(book_user)}
+    )
+
+    assert first.status_code == 200
+    # Intentional change: the race-specific 409 does not exist after the lock;
+    # a missing position is the normal 404.
+    assert second.status_code == 404
+    assert second.json() == {"message": "Position not found"}
 
 
 def test_square_off_errors(
-    client, database, make_token, user_id, other_user_id, positions_factory
+    book_client,
+    book_user,
+    book_user_factory,
+    book_position_factory,
+    market_instrument_factory,
+    monkeypatch,
 ):
-    cookie = {"token": make_token(user_id)}
+    cookie = {"token": _token(book_user)}
+    # Keep this test offline; there is no provider quote for any symbol.
+    monkeypatch.setattr("api.routes.positions.fetch_quote", lambda symbol: None)
 
-    missing = client.post(f"/api/positions/{ObjectId()}/square-off", cookies=cookie)
+    missing = book_client.post(
+        "/api/positions/64b7f1c2a1b2c3d4e5f60718/square-off", cookies=cookie
+    )
     assert missing.status_code == 404
     assert missing.json() == {"message": "Position not found"}
 
-    # Another user's position is not visible to this caller.
-    foreign_id = ObjectId()
-    database["positions"].insert_one(
-        positions_factory(other_user_id, _id=foreign_id, product="MIS", ltp=1500.0)
+    other = book_user_factory()
+    foreign = book_position_factory(other, symbol="INFY", product="MIS")
+    foreign_response = book_client.post(
+        f"/api/positions/{foreign.id}/square-off", cookies=cookie
     )
-    foreign = client.post(f"/api/positions/{foreign_id}/square-off", cookies=cookie)
-    assert foreign.status_code == 404
-    assert database["positions"].count_documents({"_id": foreign_id}) == 1
+    assert foreign_response.status_code == 404
 
-    cnc_id = ObjectId()
-    database["positions"].insert_one(
-        positions_factory(user_id, _id=cnc_id, product="CNC", ltp=1500.0)
-    )
-    not_mis = client.post(f"/api/positions/{cnc_id}/square-off", cookies=cookie)
+    cnc = book_position_factory(book_user, symbol="TCS", product="CNC")
+    not_mis = book_client.post(f"/api/positions/{cnc.id}/square-off", cookies=cookie)
     assert not_mis.status_code == 400
-    assert not_mis.json() == {"message": "Only MIS positions can be squared off here"}
+    assert not_mis.json() == {
+        "message": "Only MIS positions can be squared off here"
+    }
 
-    no_price_id = ObjectId()
-    database["positions"].insert_one(
-        positions_factory(user_id, _id=no_price_id, product="MIS", ltp=0)
+    # No provider quote and no canonical quote row: no usable price.
+    no_price = book_position_factory(book_user, symbol="WIPRO", product="MIS")
+    no_price_response = book_client.post(
+        f"/api/positions/{no_price.id}/square-off", cookies=cookie
     )
-    no_price = client.post(f"/api/positions/{no_price_id}/square-off", cookies=cookie)
-    assert no_price.status_code == 400
-    assert no_price.json() == {
+    assert no_price_response.status_code == 400
+    assert no_price_response.json() == {
         "message": "No live price for this position yet — try again shortly"
     }

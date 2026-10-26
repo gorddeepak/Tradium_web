@@ -1,22 +1,24 @@
-"""Optional integration test against a real, dedicated scratch MongoDB.
+"""Optional integration tests against real PostgreSQL and MongoDB.
 
 Skipped unless TEST_MONGO_URL is set. Example:
 
     TEST_MONGO_URL=mongodb://127.0.0.1:27017/tradium_fastapi_phase1_test \
+    TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:5433/tradium_phase3c2_test \
         python -m pytest api/tests/test_mongo_integration.py
 
-The database name must end with "_test" so this can never touch the live
-`zerodha` database. The test writes only to its own database and drops it
-afterwards.
+The MongoDB database name must end with "_test" so this can never touch the
+live database. It is dropped afterwards.
 
-The scheduled-job test also needs TEST_DATABASE_URL, because the daily
-snapshot enumerates users and writes its rows in PostgreSQL; it is skipped
-without it.
+Phase 3C2 moved the trading book (holdings, positions, orders, funds,
+transactions) to PostgreSQL, so those routes are exercised through real
+PostgreSQL sessions here. MongoDB remains the source for the live portfolio
+point, the daily snapshot's book read, and the remaining Nova tools; those
+tests still need the scratch MongoDB.
 """
 
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import bcrypt
@@ -27,16 +29,26 @@ from fastapi.testclient import TestClient
 from pymongo import MongoClient
 from sqlalchemy import select
 
-from api.main import create_app
 from api.jobs.portfolio_snapshot import record_daily_snapshot, snapshot_date
 from api.jobs.price_sync import run_sync
-from api.postgres.models import PortfolioSnapshot, User
+from api.main import create_app
+from api.postgres.models import (
+    Fund,
+    Holding,
+    Order,
+    PortfolioSnapshot,
+    Position,
+    Transaction,
+    User,
+)
 from api.postgres.session import get_session
+from api.tests.conftest import TEST_SECRET
 
 TEST_MONGO_URL = os.getenv("TEST_MONGO_URL")
+NOW = datetime(2026, 10, 25, 10, 0, 0, tzinfo=timezone.utc)
 
 pytestmark = pytest.mark.skipif(
-    not TEST_MONGO_URL, reason="set TEST_MONGO_URL to run the real-MongoDB test"
+    not TEST_MONGO_URL, reason="set TEST_MONGO_URL to run the real-database tests"
 )
 
 
@@ -58,141 +70,84 @@ def scratch_database():
         client.close()
 
 
-def _insert_postgres_user(session_factory, created, user_id=None):
-    """Insert a user into the canonical PostgreSQL identity table."""
-    user_id = user_id or secrets.token_hex(12)
-    with session_factory() as session:
-        session.add(
-            User(
-                id=user_id,
-                username=f"integration-{user_id}",
-                email=f"{user_id}@example.com",
-                password_hash="unused-in-integration-tests",
-                created_at=created,
-                updated_at=created,
-                version=0,
-            )
-        )
-        session.commit()
-    return ObjectId(user_id)
+def _token(user_id):
+    return jwt.encode({"id": str(user_id)}, TEST_SECRET, algorithm="HS256")
 
 
-def test_holdings_reads_real_mongo_documents(scratch_database, monkeypatch):
-    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+def _cookie(user_id):
+    return {"token": _token(user_id)}
 
-    user_id = ObjectId()
-    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
-    scratch_database["holdings"].insert_many(
-        [
-            {
-                "_id": ObjectId(),
-                "user": user_id,
-                "symbol": "RELIANCE",
-                "name": "Reliance Industries",
-                "exchange": "NSE",
-                "qty": 10,
-                "avgPrice": 2400.5,
-                "ltp": 2500.0,
-                "dayChangePct": 1.25,
-                "sector": "Energy",
-                "createdAt": created,
-                "updatedAt": created,
-                "__v": 0,
-            },
-            {
-                "_id": ObjectId(),
-                "user": ObjectId(),
-                "symbol": "TCS",
-                "name": "Tata Consultancy",
-                "exchange": "NSE",
-                "qty": 5,
-                "avgPrice": 3800.0,
-                "ltp": 3900.0,
-                "dayChangePct": 0.5,
-                "sector": "IT",
-                "createdAt": created,
-                "updatedAt": created,
-                "__v": 0,
-            },
-        ]
+
+# --------------------------------------------------------------------------
+# Book reads against real PostgreSQL
+# --------------------------------------------------------------------------
+
+
+def test_holdings_read_real_postgres_rows(
+    book_client, book_user, book_holding_factory, market_instrument_factory
+):
+    book_holding_factory(book_user, symbol="RELIANCE", name="Reliance Industries")
+    book_holding_factory(
+        book_user,
+        symbol="TCS",
+        name="Tata Consultancy",
+        created_at=datetime(2026, 9, 2, 4, 15, 30, 123000, tzinfo=timezone.utc),
+    )
+    market_instrument_factory(
+        symbol="RELIANCE",
+        name="Reliance Industries",
+        sector="Energy",
+        ltp=2500.0,
+        day_change_pct=1.25,
     )
 
-    token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
-    app = create_app(database=scratch_database)
-
-    with TestClient(app) as client:
-        response = client.get("/api/holdings", cookies={"token": token})
+    response = book_client.get("/api/holdings", cookies=_cookie(book_user))
 
     assert response.status_code == 200
     body = response.json()
-    assert [holding["symbol"] for holding in body] == ["RELIANCE"]
+    assert [holding["symbol"] for holding in body] == ["RELIANCE", "TCS"]
     holding = body[0]
-    assert holding["user"] == str(user_id)
+    assert holding["user"] == book_user
     assert type(holding["_id"]) is str and len(holding["_id"]) == 24
-    # Real MongoDB stores BSON dates to the millisecond.
     assert holding["createdAt"] == "2026-09-01T04:15:30.123Z"
+    assert holding["ltp"] == 2500
+    assert holding["dayChangePct"] == 1.25
+    assert holding["sector"] == "Energy"
     assert holding["__v"] == 0
 
 
-def test_orders_read_real_mongo_documents(scratch_database, monkeypatch):
-    # Confirms the collection name the route relies on (`orders`) exists in a
-    # real MongoDB; mongomock would accept any name. Watchlists moved to
-    # PostgreSQL in Phase 3B3 and are covered by the PostgreSQL suite.
-    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+def test_orders_read_real_postgres_rows(
+    book_client, book_user, book_user_factory, book_order_factory
+):
+    other = book_user_factory()
+    book_order_factory(book_user, symbol="INFY")
+    book_order_factory(other, symbol="TCS")
 
-    user_id = ObjectId()
-    other_user = ObjectId()
-    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+    response = book_client.get("/api/orders", cookies=_cookie(book_user))
 
-    scratch_database["orders"].insert_many(
-        [
-            {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "status": "OPEN",
-             "createdAt": created, "updatedAt": created, "__v": 0},
-            {"_id": ObjectId(), "user": other_user, "symbol": "TCS", "status": "OPEN",
-             "createdAt": created, "updatedAt": created, "__v": 0},
-        ]
+    assert response.status_code == 200
+    body = response.json()
+    assert [order["symbol"] for order in body] == ["INFY"]
+    assert body[0]["createdAt"] == "2026-09-01T04:15:30.123Z"
+
+
+def test_positions_and_funds_read_real_postgres_rows(
+    book_client,
+    book_user,
+    book_position_factory,
+    book_funds_factory,
+    book_transaction_factory,
+):
+    book_position_factory(
+        book_user, symbol="INFY", side="LONG", qty=5, entry=Decimal("1500")
+    )
+    book_funds_factory(book_user, available=50000)
+    book_transaction_factory(
+        book_user, kind="SETTLEMENT", amount=Decimal("-250.5")
     )
 
-    token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
-    app = create_app(database=scratch_database)
-
-    with TestClient(app) as client:
-        orders = client.get("/api/orders", cookies={"token": token})
-
-    assert orders.status_code == 200
-    assert [order["symbol"] for order in orders.json()] == ["INFY"]
-    assert orders.json()[0]["createdAt"] == "2026-09-01T04:15:30.123Z"
-
-
-def test_positions_and_funds_read_real_mongo_documents(scratch_database, monkeypatch):
-    # Confirms the collections the positions/funds routes use exist in a real
-    # MongoDB, and that the derived funds maths reads real BSON documents.
-    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
-
-    user_id = ObjectId()
-    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
-
-    scratch_database["positions"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
-         "exchange": "NSE", "side": "LONG", "product": "MIS", "qty": 5, "entry": 1500.0,
-         "ltp": 1520.0, "createdAt": created, "updatedAt": created, "__v": 0}
-    )
-    scratch_database["funds"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "available": 50000,
-         "createdAt": created, "updatedAt": created, "__v": 0}
-    )
-    scratch_database["transactions"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "kind": "SETTLEMENT",
-         "method": "INFY MIS square-off", "amount": -250.5, "symbol": "INFY",
-         "status": "COMPLETED", "createdAt": created, "updatedAt": created, "__v": 0}
-    )
-
-    token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
-    app = create_app(database=scratch_database)
-
-    with TestClient(app) as client:
-        positions = client.get("/api/positions", cookies={"token": token})
-        funds = client.get("/api/funds", cookies={"token": token})
+    positions = book_client.get("/api/positions", cookies=_cookie(book_user))
+    funds = book_client.get("/api/funds", cookies=_cookie(book_user))
 
     assert positions.status_code == 200
     assert [position["symbol"] for position in positions.json()] == ["INFY"]
@@ -201,27 +156,21 @@ def test_positions_and_funds_read_real_mongo_documents(scratch_database, monkeyp
     assert funds.status_code == 200
     body = funds.json()
     assert body["available"] == 50000
-    assert body["misMargin"] == 7500.0  # 1500 * 5
-    assert body["usedMargin"] == 7500.0  # no open orders
+    assert body["misMargin"] == 7500  # 1500 * 5
+    assert body["usedMargin"] == 7500  # no open orders
     assert body["realizedPnl"] == -250.5
 
 
-def test_portfolio_and_transactions_read_real_databases(
-    scratch_database, postgres_session_factory, monkeypatch
+def test_transactions_and_portfolio_history_read_postgres(
+    book_client, book_user, book_transaction_factory, book_session_factory
 ):
-    # Transactions still come from a real MongoDB. Portfolio history reads the
-    # PostgreSQL snapshot table (Phase 3C1) while the live point still uses the
-    # real MongoDB holdings.
-    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
-
-    user_id = ObjectId()
     created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
-    _insert_postgres_user(postgres_session_factory, created, str(user_id))
-    with postgres_session_factory() as session:
+    book_transaction_factory(book_user, kind="DEPOSIT", amount=Decimal("5000"))
+    with book_session_factory() as session:
         session.add(
             PortfolioSnapshot(
                 id=secrets.token_hex(12),
-                user_id=str(user_id),
+                user_id=book_user,
                 snapshot_date=datetime(2026, 9, 1, tzinfo=timezone.utc).date(),
                 value=Decimal("200"),
                 invested=Decimal("180"),
@@ -234,29 +183,12 @@ def test_portfolio_and_transactions_read_real_databases(
         )
         session.commit()
 
-    scratch_database["holdings"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
-         "exchange": "NSE", "qty": 2, "avgPrice": 100.0, "ltp": 110.0,
-         "dayChangePct": 0.0, "sector": "", "createdAt": created, "updatedAt": created, "__v": 0}
+    transactions = book_client.get(
+        "/api/funds/transactions", cookies=_cookie(book_user)
     )
-    scratch_database["transactions"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "kind": "DEPOSIT", "method": "UPI",
-         "amount": 5000.0, "symbol": "", "status": "COMPLETED",
-         "createdAt": created, "updatedAt": created, "__v": 0}
+    history = book_client.get(
+        "/api/portfolio/history", params={"range": "ALL"}, cookies=_cookie(book_user)
     )
-
-    token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
-    app = create_app(database=scratch_database)
-
-    def override_get_session():
-        with postgres_session_factory() as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_get_session
-
-    with TestClient(app) as client:
-        transactions = client.get("/api/funds/transactions", cookies={"token": token})
-        history = client.get("/api/portfolio/history", params={"range": "ALL"}, cookies={"token": token})
 
     assert transactions.status_code == 200
     assert [row["kind"] for row in transactions.json()] == ["DEPOSIT"]
@@ -267,130 +199,189 @@ def test_portfolio_and_transactions_read_real_databases(
     assert "2026-09-01" in labels
 
 
+# --------------------------------------------------------------------------
+# Book writes against real PostgreSQL
+# --------------------------------------------------------------------------
 
-def test_write_routes_against_real_mongo(scratch_database, monkeypatch):
-    # Confirms the write routes run against a real MongoDB, including the
-    # server-side aggregation pipeline that merges a second MIS fill.
-    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+
+def _fresh_quote(ltp):
+    return {
+        "ltp": ltp,
+        "dayChangePct": 0.0,
+        "sourceTime": datetime.now(timezone.utc),
+    }
+
+
+def test_write_routes_against_real_postgres(
+    book_client, book_user, book_session_factory, book_funds_factory, monkeypatch
+):
+    book_funds_factory(book_user, available=100000)
     monkeypatch.setattr(
-        "api.routes.orders.fetch_quote",
-        lambda symbol: {"ltp": 1600.0, "dayChangePct": 0.0},
+        "api.routes.orders.fetch_quote", lambda symbol: _fresh_quote(1600.0)
     )
-    # Square-off takes the stored-ltp branch, so this test stays offline.
-    monkeypatch.setattr("api.routes.positions.fetch_quote", lambda symbol: None)
+    monkeypatch.setattr(
+        "api.routes.positions.fetch_quote", lambda symbol: _fresh_quote(1600.0)
+    )
+    cookie = _cookie(book_user)
 
-    user_id = ObjectId()
-    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
-    scratch_database["funds"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "available": 100000,
-         "createdAt": created, "updatedAt": created, "__v": 0}
+    deposit = book_client.post(
+        "/api/funds/transactions",
+        json={"kind": "DEPOSIT", "amount": 5000},
+        cookies=cookie,
     )
 
-    token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
-    app = create_app(database=scratch_database)
+    market_order = {
+        "symbol": "INFY",
+        "name": "Infosys",
+        "exchange": "NSE",
+        "side": "BUY",
+        "type": "MARKET",
+        "product": "MIS",
+        "qty": 10,
+        "price": 0,
+    }
+    first_fill = book_client.post("/api/orders", json=market_order, cookies=cookie)
+    second_fill = book_client.post("/api/orders", json=market_order, cookies=cookie)
 
-    with TestClient(app) as client:
-        cookie = {"token": token}
+    with book_session_factory() as session:
+        position = session.scalar(select(Position).where(Position.user_id == book_user))
+    squared = book_client.post(
+        f"/api/positions/{position.id}/square-off", cookies=cookie
+    )
 
-        deposit = client.post("/api/funds/transactions",
-                              json={"kind": "DEPOSIT", "amount": 5000}, cookies=cookie)
-
-        market_order = {"symbol": "INFY", "name": "Infosys", "exchange": "NSE", "side": "BUY",
-                        "type": "MARKET", "product": "MIS", "qty": 10, "price": 0}
-        first_fill = client.post("/api/orders", json=market_order, cookies=cookie)
-        second_fill = client.post("/api/orders", json=market_order, cookies=cookie)
-
-        position = scratch_database["positions"].find_one({"user": user_id})
-        squared = client.post(f"/api/positions/{position['_id']}/square-off", cookies=cookie)
-
-        limit = client.post("/api/orders",
-                            json={"symbol": "TCS", "name": "TCS", "exchange": "NSE", "side": "BUY",
-                                  "type": "LIMIT", "product": "CNC", "qty": 1, "price": 100},
-                            cookies=cookie)
-        cancelled = client.delete(f"/api/orders/{limit.json()['_id']}", cookies=cookie)
+    limit = book_client.post(
+        "/api/orders",
+        json={
+            "symbol": "TCS",
+            "name": "TCS",
+            "exchange": "NSE",
+            "side": "BUY",
+            "type": "LIMIT",
+            "product": "CNC",
+            "qty": 1,
+            "price": 100,
+        },
+        cookies=cookie,
+    )
+    cancelled = book_client.delete(
+        f"/api/orders/{limit.json()['_id']}", cookies=cookie
+    )
 
     assert deposit.status_code == 201
     assert deposit.json()["funds"]["available"] == 105000
 
-    assert first_fill.status_code == 201 and first_fill.json()["status"] == "EXECUTED"
+    assert first_fill.status_code == 201
+    assert first_fill.json()["status"] == "EXECUTED"
     assert second_fill.status_code == 201
     # Both fills merged into a single position, which square-off then removed.
     assert squared.status_code == 200
     assert squared.json() == {"message": "Squared off INFY", "pnl": 0}
-    assert scratch_database["positions"].count_documents({"user": user_id}) == 0
+    with book_session_factory() as session:
+        assert (
+            session.scalar(select(Position).where(Position.user_id == book_user))
+            is None
+        )
 
     # 100000 + 5000 - 16000 - 16000 + (1600*20) - 100 + 100 = 105000
-    assert scratch_database["funds"].find_one({"user": user_id})["available"] == 105000
+    with book_session_factory() as session:
+        assert (
+            session.scalar(select(Fund.available).where(Fund.user_id == book_user))
+            == Decimal("105000.00")
+        )
     assert cancelled.status_code == 200
-    assert scratch_database["orders"].find_one({"_id": ObjectId(limit.json()["_id"])})["status"] == "CANCELLED"
+    with book_session_factory() as session:
+        assert session.get(Order, limit.json()["_id"]).status == "CANCELLED"
 
 
-def test_scheduled_jobs_against_real_mongo(
-    scratch_database, postgres_session_factory, monkeypatch
+def test_scheduled_fill_and_snapshot_against_real_databases(
+    scratch_database,
+    book_session_factory,
+    book_user,
+    book_holding_factory,
+    book_position_factory,
+    book_funds_factory,
+    book_order_factory,
+    monkeypatch,
 ):
-    # Confirms the per-minute fill path and the daily upsert outside mongomock:
-    # a real $inc, a real delete, and a real findOneAndUpdate upsert.
-    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
-    monkeypatch.setattr("api.jobs.price_sync.is_market_open", lambda: True)
+    # The per-minute fill path now runs entirely in PostgreSQL; the daily
+    # snapshot still reads the book from MongoDB.
     monkeypatch.setattr(
         "api.jobs.price_sync.fetch_quotes",
         lambda tickers: {
             ticker: {
                 "regularMarketPrice": 1600.0,
                 "regularMarketChangePercent": 0.5,
+                "regularMarketTime": NOW.timestamp(),
             }
             for ticker in tickers
         },
     )
+    monkeypatch.setattr("api.jobs.price_sync.fetch_sector", lambda symbol: "")
 
-    created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
-    user_id = _insert_postgres_user(postgres_session_factory, created)
-
-    scratch_database["holdings"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
-         "exchange": "NSE", "qty": 10, "avgPrice": 1500.0, "ltp": 1500.0,
-         "dayChangePct": 0.0, "sector": "", "createdAt": created,
-         "updatedAt": created, "__v": 0}
+    created = datetime(2026, 9, 1, 4, 15, 30, tzinfo=timezone.utc)
+    book_holding_factory(
+        book_user, symbol="INFY", qty=10, avg_price=Decimal("1500")
     )
-    scratch_database["positions"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
-         "exchange": "NSE", "side": "LONG", "product": "MIS", "qty": 5,
-         "entry": 1500.0, "ltp": 1500.0, "createdAt": created,
-         "updatedAt": created, "__v": 0}
+    book_position_factory(
+        book_user, symbol="INFY", side="LONG", qty=5, entry=Decimal("1500")
     )
-    scratch_database["funds"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "available": 1000.0,
-         "createdAt": created, "updatedAt": created, "__v": 0}
-    )
-    scratch_database["orders"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
-         "exchange": "NSE", "side": "SELL", "type": "LIMIT", "product": "MIS",
-         "qty": 5, "filled": 0, "price": 1600.0, "triggerPrice": 0.0,
-         "slTrigger": 0.0, "tpPrice": 0.0, "groupId": "group-1", "isExit": True,
-         "status": "OPEN", "createdAt": created, "updatedAt": created, "__v": 0}
+    book_funds_factory(book_user, available=1000)
+    book_order_factory(
+        book_user,
+        symbol="INFY",
+        side="SELL",
+        type="LIMIT",
+        product="MIS",
+        qty=5,
+        price=1600,
+        is_exit=True,
+        group_id="group-1",
     )
 
-    run_sync(scratch_database)
-
-    holding = scratch_database["holdings"].find_one({"user": user_id})
-    assert holding["ltp"] == 1600.0
-    assert holding["dayChangePct"] == 0.5
-    # Sector metadata moved to PostgreSQL instruments in Phase 3B2; this
-    # Mongo-only run has no session factory, so the stored sector is untouched.
-    assert holding["sector"] == ""
+    run_sync(book_session_factory, now=NOW)
 
     # The MIS exit settled: position gone, cash and ledger written.
-    assert scratch_database["positions"].count_documents({"user": user_id}) == 0
-    assert scratch_database["funds"].find_one({"user": user_id})["available"] == 9000.0
-    settlement = scratch_database["transactions"].find_one({"user": user_id})
-    assert settlement["method"] == "INFY MIS exit"
-    assert settlement["amount"] == 500.0
+    with book_session_factory() as session:
+        from api.postgres.models import Position
 
-    record_daily_snapshot(scratch_database, postgres_session_factory)
+        assert (
+            session.scalar(select(Position).where(Position.user_id == book_user))
+            is None
+        )
+        settlement = session.scalar(
+            select(Transaction).where(Transaction.user_id == book_user)
+        )
+    with book_session_factory() as session:
+        assert (
+            session.scalar(select(Fund.available).where(Fund.user_id == book_user))
+            == Decimal("9000.00")
+        )
+    assert settlement.method == "INFY MIS exit"
+    assert settlement.amount == Decimal("500.00")
 
-    with postgres_session_factory() as session:
+    scratch_database["holdings"].insert_one(
+        {
+            "_id": ObjectId(),
+            "user": ObjectId(book_user),
+            "symbol": "INFY",
+            "name": "Infosys",
+            "exchange": "NSE",
+            "qty": 10,
+            "avgPrice": 1500.0,
+            "ltp": 1600.0,
+            "dayChangePct": 0.5,
+            "sector": "",
+            "createdAt": created,
+            "updatedAt": created,
+            "__v": 0,
+        }
+    )
+
+    record_daily_snapshot(scratch_database, book_session_factory)
+
+    with book_session_factory() as session:
         snapshot = session.scalar(
-            select(PortfolioSnapshot).where(PortfolioSnapshot.user_id == str(user_id))
+            select(PortfolioSnapshot).where(PortfolioSnapshot.user_id == book_user)
         )
     assert snapshot.value == Decimal("16000")
     assert snapshot.invested == Decimal("15000")
@@ -399,22 +390,24 @@ def test_scheduled_jobs_against_real_mongo(
     assert snapshot.version == 0
     assert snapshot.snapshot_date == snapshot_date().date()
     # Idempotent per IST day: a second run updates the same row.
-    record_daily_snapshot(scratch_database, postgres_session_factory)
-    with postgres_session_factory() as session:
+    record_daily_snapshot(scratch_database, book_session_factory)
+    with book_session_factory() as session:
         rows = session.scalars(
-            select(PortfolioSnapshot).where(PortfolioSnapshot.user_id == str(user_id))
+            select(PortfolioSnapshot).where(PortfolioSnapshot.user_id == book_user)
         ).all()
     assert len(rows) == 1
 
 
-def test_auth_uses_postgres_while_mongo_routes_stay_real(
-    scratch_database, postgres_session_factory, monkeypatch
-):
-    # Authentication moved to PostgreSQL in Phase 3B1; the remaining routes
-    # still read a real MongoDB. This test only needs a real MongoDB for those
-    # routes and checks that auth writes nothing into the `users` collection.
-    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
+# --------------------------------------------------------------------------
+# Authentication
+# --------------------------------------------------------------------------
 
+
+def test_auth_uses_postgres_while_mongo_stays_real(
+    scratch_database, book_session_factory, monkeypatch
+):
+    # Authentication is canonical in PostgreSQL; the surviving Mongo reads are
+    # untouched, and auth must never write a MongoDB `users` document.
     suffix = str(ObjectId())
     email = f"deepak-{suffix}@example.com"
     username = f"deepak{suffix}"
@@ -422,7 +415,7 @@ def test_auth_uses_postgres_while_mongo_routes_stay_real(
     app = create_app(database=scratch_database)
 
     def override_get_session():
-        with postgres_session_factory() as session:
+        with book_session_factory() as session:
             yield session
 
     app.dependency_overrides[get_session] = override_get_session
@@ -434,23 +427,24 @@ def test_auth_uses_postgres_while_mongo_routes_stay_real(
         )
         user_id = signup.json()["user"]["id"]
 
-        scratch_database["holdings"].insert_one(
-            {
-                "_id": ObjectId(),
-                "user": ObjectId(user_id),
-                "symbol": "INFY",
-                "name": "Infosys",
-                "exchange": "NSE",
-                "qty": 1,
-                "avgPrice": 100.0,
-                "ltp": 110.0,
-                "dayChangePct": 0.0,
-                "sector": "IT",
-                "createdAt": datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc),
-                "updatedAt": datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc),
-                "__v": 0,
-            }
-        )
+        with book_session_factory() as session:
+            created = datetime(2026, 9, 1, 4, 15, 30, tzinfo=timezone.utc)
+            session.add(
+                Holding(
+                    id=secrets.token_hex(12),
+                    user_id=user_id,
+                    symbol="INFY",
+                    name="Infosys",
+                    exchange="NSE",
+                    qty=1,
+                    avg_price=Decimal("100"),
+                    created_at=created,
+                    updated_at=created,
+                    version=0,
+                )
+            )
+            session.commit()
+
         along_with_signup_cookie = client.get("/api/holdings")
         login = client.post(
             "/api/auth/login",
@@ -461,7 +455,7 @@ def test_auth_uses_postgres_while_mongo_routes_stay_real(
     assert signup.status_code == 201
     assert login.status_code == 200
     assert login.json()["user"] == signup.json()["user"]
-    # The cookie a signup sets is already enough for the Mongo-backed route.
+    # The cookie a signup sets is already enough for the holdings route.
     assert along_with_signup_cookie.status_code == 200
     assert [row["symbol"] for row in along_with_signup_cookie.json()] == ["INFY"]
 
@@ -470,10 +464,10 @@ def test_auth_uses_postgres_while_mongo_routes_stay_real(
     assert set(returned) == {"_id", "username", "email", "createdAt", "updatedAt", "__v"}
     assert returned["createdAt"].endswith("Z")
 
-    # Auth must no longer write users to MongoDB.
+    # Auth must not write users to MongoDB.
     assert scratch_database["users"].count_documents({}) == 0
 
-    with postgres_session_factory() as session:
+    with book_session_factory() as session:
         stored = session.scalar(select(User).where(User.email == email))
     assert stored.password_hash.startswith("$2b$10$")
     assert bcrypt.checkpw(b"hunter2hunter2", stored.password_hash.encode())

@@ -1,19 +1,21 @@
 """Database failure handling."""
 
+import mongomock
 from fastapi.testclient import TestClient
 
 from api.main import create_app
+from api.postgres.session import get_session
 
 
-class BrokenDatabase:
-    """Stands in for a database whose query fails at runtime."""
-
-    def __getitem__(self, name):
-        raise RuntimeError("connection lost")
+def _broken_session():
+    """A PostgreSQL session dependency whose first query fails."""
+    raise RuntimeError("connection lost")
+    yield  # pragma: no cover - unreachable, keeps this a generator dependency
 
 
 def test_database_error_returns_generic_500():
-    app = create_app(database=BrokenDatabase())
+    app = create_app(database=mongomock.MongoClient()["tradium_errors_test"])
+    app.dependency_overrides[get_session] = _broken_session
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.get(
             "/api/holdings",

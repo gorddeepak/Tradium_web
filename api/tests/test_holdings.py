@@ -1,59 +1,67 @@
-"""Tests for the holdings response content and user isolation."""
+"""PostgreSQL-backed tests for the holdings response and user isolation."""
 
-from bson import ObjectId
+import jwt
+
+from api.tests.conftest import TEST_SECRET
 
 
 def test_returns_only_the_cookie_users_holdings(
-    client, database, make_token, user_id, other_user_id, holdings_factory
+    book_client, book_user, book_user_factory, book_holding_factory
 ):
-    database["holdings"].insert_many(
-        [
-            holdings_factory(user_id, symbol="RELIANCE"),
-            holdings_factory(user_id, symbol="INFY", name="Infosys"),
-            holdings_factory(other_user_id, symbol="TCS", name="Tata Consultancy"),
-        ]
-    )
+    from datetime import datetime, timedelta, timezone
 
-    response = client.get("/api/holdings", cookies={"token": make_token(user_id)})
+    early = datetime(2026, 9, 1, 4, 0, 0, tzinfo=timezone.utc)
+    late = early + timedelta(minutes=5)
+    other = book_user_factory()
+    book_holding_factory(book_user, symbol="RELIANCE", created_at=early)
+    book_holding_factory(book_user, symbol="INFY", name="Infosys", created_at=late)
+    book_holding_factory(other, symbol="TCS", name="Tata Consultancy")
+
+    response = book_client.get("/api/holdings", cookies={"token": _token(book_user)})
 
     assert response.status_code == 200
     symbols = [holding["symbol"] for holding in response.json()]
     assert symbols == ["RELIANCE", "INFY"]
-    assert "TCS" not in symbols
 
 
 def test_user_id_from_query_or_body_is_ignored(
-    client, database, make_token, user_id, other_user_id, holdings_factory
+    book_client, book_user, book_user_factory, book_holding_factory
 ):
-    database["holdings"].insert_many(
-        [
-            holdings_factory(user_id, symbol="RELIANCE"),
-            holdings_factory(other_user_id, symbol="TCS"),
-        ]
-    )
+    other = book_user_factory()
+    book_holding_factory(book_user, symbol="RELIANCE")
+    book_holding_factory(other, symbol="TCS")
 
-    # Try to impersonate: the token decides, never the caller.
-    response = client.get(
-        f"/api/holdings?user={other_user_id}&userId={other_user_id}",
-        cookies={"token": make_token(user_id)},
+    response = book_client.get(
+        f"/api/holdings?user={other}&userId={other}",
+        cookies={"token": _token(book_user)},
     )
 
     assert response.status_code == 200
     assert [h["symbol"] for h in response.json()] == ["RELIANCE"]
 
 
-def test_response_shape_matches_mongoose_serialization(
-    client, database, make_token, user_id, holdings_factory
+def test_response_shape_and_joined_quote(
+    book_client,
+    book_user,
+    book_holding_factory,
+    market_instrument_factory,
 ):
-    holding_id = ObjectId()
-    document = holdings_factory(user_id, _id=holding_id)
-    database["holdings"].insert_one(document)
+    holding = book_holding_factory(book_user, symbol="RELIANCE", avg_price="2400.5")
+    market_instrument_factory(
+        symbol="RELIANCE",
+        name="Reliance Industries",
+        sector="Energy",
+        ltp=2500.0,
+        day_change_pct=1.25,
+    )
 
-    body = client.get("/api/holdings", cookies={"token": make_token(user_id)}).json()
+    body = book_client.get(
+        "/api/holdings", cookies={"token": _token(book_user)}
+    ).json()
 
     assert len(body) == 1
-    holding = body[0]
-    assert set(holding) == {
+    row = body[0]
+    assert set(row) == {
         "_id",
         "user",
         "symbol",
@@ -68,42 +76,61 @@ def test_response_shape_matches_mongoose_serialization(
         "updatedAt",
         "__v",
     }
-    assert holding["_id"] == str(holding_id)
-    assert holding["user"] == str(user_id)
-    assert holding["qty"] == 10
-    assert holding["avgPrice"] == 2400.5
-    assert holding["createdAt"] == "2026-09-01T04:15:30.123Z"
-    assert holding["updatedAt"] == "2026-09-01T04:15:30.123Z"
-    assert holding["__v"] == 0
-    # No ObjectId wrapper, no "ObjectId('...')" text.
-    assert type(holding["_id"]) is str and len(holding["_id"]) == 24
+    assert row["_id"] == holding.id
+    assert row["user"] == book_user
+    assert row["qty"] == 10
+    assert row["avgPrice"] == 2400.5
+    assert row["ltp"] == 2500
+    assert row["dayChangePct"] == 1.25
+    assert row["sector"] == "Energy"
+    assert row["createdAt"] == "2026-09-01T04:15:30.123Z"
+    assert row["updatedAt"] == "2026-09-01T04:15:30.123Z"
+    assert row["__v"] == 0
+    assert type(row["_id"]) is str and len(row["_id"]) == 24
 
 
-def test_empty_holdings_returns_empty_list(client, make_token, user_id):
-    response = client.get("/api/holdings", cookies={"token": make_token(user_id)})
+def test_missing_quote_and_instrument_fall_back_to_zero(
+    book_client, book_user, book_holding_factory
+):
+    book_holding_factory(book_user, symbol="RELIANCE")
+
+    row = book_client.get(
+        "/api/holdings", cookies={"token": _token(book_user)}
+    ).json()[0]
+
+    assert row["ltp"] == 0
+    assert row["dayChangePct"] == 0
+    assert row["sector"] == ""
+
+
+def test_empty_holdings_returns_empty_list(book_client, book_user):
+    response = book_client.get("/api/holdings", cookies={"token": _token(book_user)})
     assert response.status_code == 200
     assert response.json() == []
 
 
-def test_timestamps_are_utc_with_milliseconds(client, database, make_token, user_id, holdings_factory):
+def test_timestamps_are_utc_with_milliseconds(
+    book_client, book_user, book_holding_factory
+):
     from datetime import datetime, timezone
 
     moment = datetime(2026, 1, 2, 3, 4, 5, 6000, tzinfo=timezone.utc)
-    database["holdings"].insert_one(
-        holdings_factory(user_id, createdAt=moment, updatedAt=moment)
-    )
+    book_holding_factory(book_user, created_at=moment)
 
-    holding = client.get("/api/holdings", cookies={"token": make_token(user_id)}).json()[0]
+    holding = book_client.get(
+        "/api/holdings", cookies={"token": _token(book_user)}
+    ).json()[0]
     assert holding["createdAt"] == "2026-01-02T03:04:05.006Z"
 
 
-def test_malformed_user_id_in_token_returns_server_error(client):
-    from api.tests.conftest import TEST_SECRET
-    import jwt
-
-    # Express casts the token id in the query; an invalid cast reaches the
-    # central handler and returns 500.
+def test_malformed_user_id_in_token_matches_no_rows(book_client):
+    # The PostgreSQL ids are text: a malformed token id is not a cast error,
+    # it simply owns no rows. This replaces the old Mongoose CastError -> 500.
     token = jwt.encode({"id": "not-an-object-id"}, TEST_SECRET, algorithm="HS256")
-    response = client.get("/api/holdings", cookies={"token": token})
-    assert response.status_code == 500
-    assert response.json() == {"message": "Something went wrong"}
+    response = book_client.get("/api/holdings", cookies={"token": token})
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def _token(user_id):
+    return jwt.encode({"id": user_id}, TEST_SECRET, algorithm="HS256")

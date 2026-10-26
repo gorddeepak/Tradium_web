@@ -1,26 +1,30 @@
-"""Focused tests for the per-minute price sync and MIS exit settlement.
+"""Focused tests for the PostgreSQL price sync.
 
-No network: the quote/provider seam is patched, and the market-hours gate is
-forced open or closed per test. Dates are synthetic, so nothing depends on the
-wall clock or on a real trading session. mongomock can run every write this job
-uses (``update_one``, ``find_one_and_update`` with ``$inc``, upserts).
+The provider seam is patched and the market-hours gate is forced open or
+closed per test, so nothing here touches the network or the wall clock.
+Price sync now owns only the canonical ``instruments``/``latest_quotes``
+cache; holdings and positions read their prices through the join, so there is
+no Mongo book row to mirror. Order matching lives in ``test_order_fills.py``.
 """
 
 import secrets
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import mongomock
 import pytest
-from bson import ObjectId
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from api import scheduler
 from api.jobs import price_sync
 from api.main import create_app
 from api.market_data import MarketDataError
-from api.order_engine import apply_fill, settle_mis_exit
-from api.postgres.models import Instrument, LatestQuote, User, Watchlist
+from api.postgres.models import Instrument, LatestQuote, Watchlist
+
+NOW = datetime(2026, 10, 25, 10, 0, 0, tzinfo=timezone.utc)
+CREATED = datetime(2026, 9, 1, 4, 15, 30, tzinfo=timezone.utc)
+PROVIDER_TIME = 1792922400  # 2026-10-25 10:00:00 UTC
 
 
 def _open_market(monkeypatch):
@@ -31,8 +35,12 @@ def _closed_market(monkeypatch):
     monkeypatch.setattr(price_sync, "is_market_open", lambda: False)
 
 
-def _row(ltp, day_change_pct=0.0, **overrides):
-    row = {"regularMarketPrice": ltp, "regularMarketChangePercent": day_change_pct}
+def _row(ltp, day_change_pct=0.0, source_time=NOW, **overrides):
+    row = {
+        "regularMarketPrice": ltp,
+        "regularMarketChangePercent": day_change_pct,
+        "regularMarketTime": None if source_time is None else source_time.timestamp(),
+    }
     row.update(overrides)
     return row
 
@@ -42,11 +50,50 @@ def _quotes(monkeypatch, mapping):
     calls = []
 
     def fetch(tickers):
-        calls.append(tickers)
+        calls.append(list(tickers))
         return {ticker: mapping[ticker] for ticker in tickers if ticker in mapping}
 
     monkeypatch.setattr(price_sync, "fetch_quotes", fetch)
     return calls
+
+
+def _run(monkeypatch, session_factory, mapping, *, now=NOW, sector=""):
+    """Run one full tick with both provider seams offline."""
+    calls = _quotes(monkeypatch, mapping)
+    monkeypatch.setattr(price_sync, "fetch_sector", lambda symbol: sector)
+    price_sync.run_sync(session_factory, now=now)
+    return calls
+
+
+def _quote(session_factory, symbol):
+    with session_factory() as session:
+        instrument = session.scalar(
+            select(Instrument).where(Instrument.symbol == symbol)
+        )
+        if instrument is None:
+            return None, None
+        return instrument, session.get(LatestQuote, instrument.id)
+
+
+@pytest.fixture
+def book_watchlist_factory(book_session_factory):
+    def _make(user_id, symbol="TCS", name=None, exchange="NSE"):
+        watch = Watchlist(
+            id=secrets.token_hex(12),
+            user_id=user_id,
+            symbol=symbol,
+            name=name or symbol,
+            exchange=exchange,
+            created_at=CREATED,
+            updated_at=CREATED,
+            version=0,
+        )
+        with book_session_factory() as session:
+            session.add(watch)
+            session.commit()
+        return watch
+
+    return _make
 
 
 # --------------------------------------------------------------------------
@@ -54,128 +101,140 @@ def _quotes(monkeypatch, mapping):
 # --------------------------------------------------------------------------
 
 
-def test_closed_market_does_no_work(database, holdings_factory, monkeypatch):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, sector="Energy"))
+def test_closed_market_does_no_work(
+    book_session_factory, book_user, book_holding_factory, monkeypatch
+):
+    book_holding_factory(book_user, symbol="RELIANCE")
     _closed_market(monkeypatch)
     calls = _quotes(monkeypatch, {"RELIANCE.NS": _row(1.0, 1.0)})
 
-    price_sync.sync_prices(database)
+    price_sync.sync_prices(book_session_factory)
 
     assert calls == []
-    assert database["holdings"].find_one({"user": user})["ltp"] == 2500.0
+    assert _quote(book_session_factory, "RELIANCE") == (None, None)
 
 
 def test_a_tick_is_skipped_while_the_previous_run_holds_the_lock(
-    database, holdings_factory, monkeypatch
+    book_session_factory, book_user, book_holding_factory, monkeypatch
 ):
-    database["holdings"].insert_one(holdings_factory(ObjectId()))
+    book_holding_factory(book_user, symbol="RELIANCE")
     _open_market(monkeypatch)
     calls = _quotes(monkeypatch, {"RELIANCE.NS": _row(2600.0, 1.0)})
 
     assert price_sync._sync_lock.acquire(blocking=False)
     try:
-        price_sync.sync_prices(database)
+        price_sync.sync_prices(book_session_factory)
     finally:
         price_sync._sync_lock.release()
 
     assert calls == []
-    assert database["holdings"].find_one()["ltp"] == 2500.0
+    assert _quote(book_session_factory, "RELIANCE") == (None, None)
 
 
-def test_the_lock_is_released_after_a_successful_run(database, monkeypatch):
+def test_the_lock_is_released_after_a_successful_run(
+    book_session_factory, monkeypatch
+):
     _open_market(monkeypatch)
     _quotes(monkeypatch, {})
+    monkeypatch.setattr(price_sync, "fetch_sector", lambda symbol: "")
 
-    price_sync.sync_prices(database)
+    price_sync.sync_prices(book_session_factory)
 
     assert price_sync._sync_lock.acquire(blocking=False)
     price_sync._sync_lock.release()
 
 
 # --------------------------------------------------------------------------
-# Price refresh
+# Canonical quote refresh
 # --------------------------------------------------------------------------
 
 
-def test_open_tick_refreshes_holdings_positions_and_watchlist(
-    database, holdings_factory, positions_factory, watchlist_factory, monkeypatch
+def test_open_tick_refreshes_holdings_positions_watchlist_and_orders(
+    book_session_factory,
+    book_user,
+    book_holding_factory,
+    book_position_factory,
+    book_order_factory,
+    book_watchlist_factory,
+    monkeypatch,
 ):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, sector="Energy"))
-    database["positions"].insert_one(positions_factory(user))
-    database["watchlists"].insert_one(watchlist_factory(user))
+    book_holding_factory(book_user, symbol="RELIANCE")
+    book_position_factory(book_user, symbol="INFY", side="LONG")
+    book_watchlist_factory(book_user, symbol="TCS")
+    book_order_factory(book_user, symbol="HDFCBANK", price=1)
     _open_market(monkeypatch)
 
-    def fetch(tickers):
-        return {ticker: _row(111.5, -0.5) for ticker in tickers}
+    calls = _run(
+        monkeypatch,
+        book_session_factory,
+        {
+            "RELIANCE.NS": _row(111.5, -0.5),
+            "INFY.NS": _row(222.5, 0.5),
+            "TCS.NS": _row(333.5, 1.5),
+            "HDFCBANK.NS": _row(444.5, 2.5),
+        },
+    )
 
-    monkeypatch.setattr(price_sync, "fetch_quotes", fetch)
-
-    price_sync.sync_prices(database)
-
-    holding = database["holdings"].find_one({"user": user})
-    assert holding["ltp"] == 111.5
-    assert holding["dayChangePct"] == -0.5
-    assert holding["updatedAt"] > holding["createdAt"]
-    assert holding["__v"] == 0  # save() does not bump the version key
-
-    position = database["positions"].find_one({"user": user})
-    assert position["ltp"] == 111.5
-    # Positions only carry a price, never the day percentage.
-    assert "dayChangePct" not in position
-
-    watch = database["watchlists"].find_one({"user": user})
-    assert watch["ltp"] == 111.5
-    assert watch["dayChangePct"] == -0.5
+    assert len(calls) == 1
+    assert sorted(calls[0]) == sorted(
+        ["RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"]
+    )
+    for symbol, ltp, pct in [
+        ("RELIANCE", "111.5000", "0.500000"),
+        ("INFY", "222.5000", "0.500000"),
+        ("TCS", "333.5000", "1.500000"),
+        ("HDFCBANK", "444.5000", "2.500000"),
+    ]:
+        _instrument, quote = _quote(book_session_factory, symbol)
+        assert quote.ltp == Decimal(ltp)
+        assert abs(quote.day_change_pct) == Decimal(pct)
 
 
 def test_each_distinct_symbol_is_quoted_once(
-    database, holdings_factory, positions_factory, watchlist_factory, orders_factory, monkeypatch
+    book_session_factory,
+    book_user,
+    book_holding_factory,
+    book_position_factory,
+    book_order_factory,
+    book_watchlist_factory,
+    monkeypatch,
 ):
-    user = ObjectId()
-    # The same symbol appears in all four sources; the Map dedupes it.
-    database["holdings"].insert_one(holdings_factory(user, symbol="INFY", sector="IT"))
-    database["positions"].insert_one(positions_factory(user, symbol="INFY"))
-    database["watchlists"].insert_one(watchlist_factory(user, symbol="INFY"))
-    database["orders"].insert_one(orders_factory(user, symbol="INFY", price=1.0))
+    # The same symbol appears in all four sources; the symbol map dedupes it.
+    book_holding_factory(book_user, symbol="INFY")
+    book_position_factory(book_user, symbol="INFY", side="LONG")
+    book_watchlist_factory(book_user, symbol="INFY")
+    book_order_factory(book_user, symbol="INFY", price=1)
     _open_market(monkeypatch)
-    calls = _quotes(monkeypatch, {"INFY.NS": _row(1500.0)})
 
-    price_sync.run_sync(database)
+    calls = _run(monkeypatch, book_session_factory, {"INFY.NS": _row(1500.0)})
 
     assert calls == [["INFY.NS"]]
+    assert session_quote_count(book_session_factory) == 1
 
 
-def test_a_symbol_without_a_quote_keeps_its_stored_price(
-    database, holdings_factory, monkeypatch
-):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, sector="Energy"))
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {})  # provider answered "no usable price"
-
-    price_sync.run_sync(database)
-
-    assert database["holdings"].find_one({"user": user})["ltp"] == 2500.0
+def session_quote_count(session_factory):
+    with session_factory() as session:
+        return session.scalar(select(func.count()).select_from(LatestQuote))
 
 
 def test_all_distinct_symbols_are_fetched_in_one_batch(
-    database,
-    holdings_factory,
-    positions_factory,
-    watchlist_factory,
-    orders_factory,
+    book_session_factory,
+    book_user,
+    book_holding_factory,
+    book_position_factory,
+    book_order_factory,
+    book_watchlist_factory,
     monkeypatch,
 ):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, symbol="RELIANCE", sector="Energy"))
-    database["positions"].insert_one(positions_factory(user, symbol="INFY"))
-    database["watchlists"].insert_one(watchlist_factory(user, symbol="TCS"))
-    database["orders"].insert_one(orders_factory(user, symbol="HDFCBANK", price=1.0))
+    book_holding_factory(book_user, symbol="RELIANCE")
+    book_position_factory(book_user, symbol="INFY")
+    book_watchlist_factory(book_user, symbol="TCS")
+    book_order_factory(book_user, symbol="HDFCBANK", price=1)
     _open_market(monkeypatch)
-    calls = _quotes(
+
+    calls = _run(
         monkeypatch,
+        book_session_factory,
         {
             "RELIANCE.NS": _row(2600.0, 1.0),
             "INFY.NS": _row(1500.0, -0.5),
@@ -184,338 +243,260 @@ def test_all_distinct_symbols_are_fetched_in_one_batch(
         },
     )
 
-    price_sync.run_sync(database)
+    assert len(calls) == 1
+    assert sorted(calls[0]) == sorted(
+        ["RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"]
+    )
+    assert _quote(book_session_factory, "RELIANCE")[1].ltp == Decimal("2600.0000")
+    assert _quote(book_session_factory, "INFY")[1].ltp == Decimal("1500.0000")
+    assert _quote(book_session_factory, "TCS")[1].ltp == Decimal("3200.0000")
 
-    assert calls == [["RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS"]]
-    assert database["holdings"].find_one({"symbol": "RELIANCE"})["ltp"] == 2600.0
-    assert database["positions"].find_one({"symbol": "INFY"})["ltp"] == 1500.0
-    assert database["watchlists"].find_one({"symbol": "TCS"})["ltp"] == 3200.0
+
+def test_an_empty_database_does_not_call_the_provider(
+    book_session_factory, monkeypatch
+):
+    _open_market(monkeypatch)
+    calls = _quotes(monkeypatch, {})
+    monkeypatch.setattr(price_sync, "fetch_sector", lambda symbol: "")
+
+    price_sync.run_sync(book_session_factory, now=NOW)
+
+    assert calls == []
 
 
-def test_a_failed_batch_keeps_every_stored_price(database, holdings_factory, monkeypatch):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, sector="Energy"))
+def test_a_failed_batch_keeps_every_stored_quote(
+    book_session_factory, book_user, book_holding_factory,
+    market_instrument_factory, monkeypatch,
+):
+    book_holding_factory(book_user, symbol="RELIANCE")
+    market_instrument_factory(
+        symbol="RELIANCE", ltp=2500.0, day_change_pct=1.25, updated_at=CREATED
+    )
     _open_market(monkeypatch)
 
     def fail(tickers):
         raise MarketDataError("Yahoo is down")
 
     monkeypatch.setattr(price_sync, "fetch_quotes", fail)
+    monkeypatch.setattr(price_sync, "fetch_sector", lambda symbol: "")
 
-    price_sync.run_sync(database)  # must not raise
+    price_sync.run_sync(book_session_factory, now=NOW)  # must not raise
 
-    holding = database["holdings"].find_one({"user": user})
-    assert holding["ltp"] == 2500.0
-    assert holding["dayChangePct"] == 1.25
-    assert holding["updatedAt"] == holding["createdAt"]
+    _instrument, quote = _quote(book_session_factory, "RELIANCE")
+    assert quote.ltp == Decimal("2500.0000")
+    assert quote.day_change_pct == Decimal("1.250000")
+    assert quote.updated_at == CREATED
 
 
 @pytest.mark.parametrize("price", [None, 0, -1.0, "2600.0", True])
-def test_an_unusable_batch_price_keeps_the_stored_price(
-    database, holdings_factory, monkeypatch, price
+def test_an_unusable_batch_price_keeps_the_stored_quote(
+    book_session_factory, book_user, book_holding_factory,
+    market_instrument_factory, monkeypatch, price,
 ):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, sector="Energy"))
+    book_holding_factory(book_user, symbol="RELIANCE")
+    market_instrument_factory(
+        symbol="RELIANCE", ltp=2500.0, day_change_pct=1.25, updated_at=CREATED
+    )
     _open_market(monkeypatch)
-    _quotes(monkeypatch, {"RELIANCE.NS": _row(price)})
 
-    price_sync.run_sync(database)
+    _run(monkeypatch, book_session_factory, {"RELIANCE.NS": _row(price)})
 
-    holding = database["holdings"].find_one({"user": user})
-    assert holding["ltp"] == 2500.0
-    assert holding["dayChangePct"] == 1.25
+    _instrument, quote = _quote(book_session_factory, "RELIANCE")
+    assert quote.ltp == Decimal("2500.0000")
+    assert quote.day_change_pct == Decimal("1.250000")
+    assert quote.updated_at == CREATED
+
+
+def test_a_symbol_without_a_provider_row_keeps_its_stored_quote(
+    book_session_factory, book_user, book_holding_factory,
+    market_instrument_factory, monkeypatch,
+):
+    book_holding_factory(book_user, symbol="RELIANCE")
+    market_instrument_factory(symbol="RELIANCE", ltp=2500.0, updated_at=CREATED)
+    _open_market(monkeypatch)
+
+    _run(monkeypatch, book_session_factory, {})  # provider skipped the symbol
+
+    _instrument, quote = _quote(book_session_factory, "RELIANCE")
+    assert quote.ltp == Decimal("2500.0000")
+    assert quote.updated_at == CREATED
 
 
 def test_a_missing_day_change_percentage_becomes_zero(
-    database, holdings_factory, monkeypatch
+    book_session_factory, book_user, book_holding_factory, monkeypatch
 ):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, sector="Energy"))
+    book_holding_factory(book_user, symbol="RELIANCE")
     _open_market(monkeypatch)
     row = _row(2600.0)
     del row["regularMarketChangePercent"]
-    _quotes(monkeypatch, {"RELIANCE.NS": row})
 
-    price_sync.run_sync(database)
+    _run(monkeypatch, book_session_factory, {"RELIANCE.NS": row})
 
-    holding = database["holdings"].find_one({"user": user})
-    assert holding["ltp"] == 2600.0
-    assert holding["dayChangePct"] == 0
-
-
-def test_an_empty_database_does_not_call_the_provider(database, monkeypatch):
-    _open_market(monkeypatch)
-    calls = _quotes(monkeypatch, {})
-
-    price_sync.run_sync(database)
-
-    assert calls == []
+    _instrument, quote = _quote(book_session_factory, "RELIANCE")
+    assert quote.ltp == Decimal("2600.0000")
+    assert quote.day_change_pct == Decimal("0.000000")
 
 
 # --------------------------------------------------------------------------
-# Order matching
+# Quote persistence shape and instrument ownership
 # --------------------------------------------------------------------------
 
 
-def test_limit_buy_fills_at_its_limit_price_not_the_quote(
-    database, user_id, orders_factory, monkeypatch
+def test_price_sync_writes_the_canonical_quote(
+    book_session_factory, book_user, book_holding_factory, monkeypatch
 ):
-    order = orders_factory(user_id, side="BUY", type="LIMIT", product="CNC", qty=5, price=100.0)
-    database["orders"].insert_one(order)
+    book_holding_factory(book_user, symbol="RELIANCE")
     _open_market(monkeypatch)
-    _quotes(monkeypatch, {"INFY.NS": _row(99.5, -1.0)})
 
-    price_sync.run_sync(database)
-
-    claimed = database["orders"].find_one({"_id": order["_id"]})
-    assert claimed["status"] == "EXECUTED"
-    assert claimed["filled"] == 5
-    assert claimed["price"] == 100.0  # the limit, not the 99.5 quote
-    holding = database["holdings"].find_one({"user": user_id})
-    assert holding["qty"] == 5
-    assert holding["avgPrice"] == 100.0
-
-
-def test_an_order_that_has_not_crossed_stays_open(
-    database, user_id, orders_factory, monkeypatch
-):
-    order = orders_factory(user_id, side="BUY", type="LIMIT", product="CNC", qty=5, price=100.0)
-    database["orders"].insert_one(order)
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"INFY.NS": _row(100.5)})
-
-    price_sync.run_sync(database)
-
-    assert database["orders"].find_one({"_id": order["_id"]})["status"] == "OPEN"
-    assert database["holdings"].count_documents({"user": user_id}) == 0
-
-
-def test_limit_sell_credits_funds_and_records_the_settlement(
-    database, user_id, holdings_factory, orders_factory, funds_factory, monkeypatch
-):
-    database["holdings"].insert_one(
-        holdings_factory(user_id, symbol="INFY", qty=5, avg_price=1400.0, ltp=1500.0, sector="IT")
-    )
-    database["funds"].insert_one(funds_factory(user_id, available=0))
-    order = orders_factory(user_id, side="SELL", type="LIMIT", product="CNC", qty=5, price=1500.0)
-    database["orders"].insert_one(order)
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"INFY.NS": _row(1510.0, 1.0)})
-
-    price_sync.run_sync(database)
-
-    assert database["orders"].find_one({"_id": order["_id"]})["status"] == "EXECUTED"
-    assert database["holdings"].count_documents({"user": user_id}) == 0
-    assert database["funds"].find_one({"user": user_id})["available"] == 7500.0
-    transaction = database["transactions"].find_one({"user": user_id, "kind": "SETTLEMENT"})
-    assert transaction["method"] == "INFY sell"
-    assert transaction["amount"] == 500.0  # (1500 - 1400) * 5
-
-
-def test_slm_fills_at_the_live_price_and_adjusts_the_blocked_cash(
-    database, user_id, orders_factory, funds_factory, monkeypatch
-):
-    # 5 * 100 was blocked at placement; the fill at 106 needs 30 more.
-    database["funds"].insert_one(funds_factory(user_id, available=0))
-    order = orders_factory(
-        user_id, side="BUY", type="SL-M", product="CNC", qty=5, price=100.0, triggerPrice=105.0
-    )
-    database["orders"].insert_one(order)
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"INFY.NS": _row(106.0)})
-
-    price_sync.run_sync(database)
-
-    claimed = database["orders"].find_one({"_id": order["_id"]})
-    assert claimed["status"] == "EXECUTED"
-    assert claimed["price"] == 106.0
-    assert database["funds"].find_one({"user": user_id})["available"] == -30.0
-
-
-def test_slm_exit_does_not_touch_the_blocked_cash_adjustment(
-    database, user_id, orders_factory, funds_factory, positions_factory, monkeypatch
-):
-    database["funds"].insert_one(funds_factory(user_id, available=1000))
-    database["positions"].insert_one(
-        positions_factory(user_id, side="SHORT", entry=1500.0, ltp=1500.0)
-    )
-    # A SHORT is covered by a BUY stop above the market, so 1520 crosses 1500.
-    order = orders_factory(
-        user_id,
-        side="BUY",
-        type="SL-M",
-        product="MIS",
-        qty=5,
-        price=1500.0,
-        triggerPrice=1500.0,
-        isExit=True,
-        groupId="group-1",
-    )
-    database["orders"].insert_one(order)
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"INFY.NS": _row(1520.0)})
-
-    price_sync.run_sync(database)
-
-    # Only settleMisExit's release (1500*5 - 20*5) lands; no SL-M adjustment.
-    assert database["funds"].find_one({"user": user_id})["available"] == 8400.0
-
-
-def test_mis_exit_fill_settles_the_position_and_cancels_its_sibling(
-    database, user_id, positions_factory, orders_factory, funds_factory, monkeypatch
-):
-    database["funds"].insert_one(funds_factory(user_id, available=500))
-    position = positions_factory(user_id, qty=10, entry=100.0, ltp=105.0)
-    database["positions"].insert_one(position)
-    exit_order = orders_factory(
-        user_id,
-        side="SELL",
-        type="LIMIT",
-        product="MIS",
-        qty=10,
-        price=120.0,
-        triggerPrice=0.0,
-        isExit=True,
-        groupId="group-1",
-    )
-    sibling = orders_factory(
-        user_id,
-        side="SELL",
-        type="LIMIT",
-        product="MIS",
-        qty=10,
-        price=130.0,
-        triggerPrice=0.0,
-        isExit=True,
-        groupId="group-1",
-    )
-    database["orders"].insert_many([exit_order, sibling])
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"INFY.NS": _row(120.0)})
-
-    price_sync.run_sync(database)
-
-    assert database["positions"].count_documents({"user": user_id}) == 0
-    # 500 + (100*10 + (120-100)*10)
-    assert database["funds"].find_one({"user": user_id})["available"] == 1700.0
-    transaction = database["transactions"].find_one({"user": user_id})
-    assert transaction["method"] == "INFY MIS exit"
-    assert transaction["amount"] == 200
-    assert database["orders"].find_one({"_id": sibling["_id"]})["status"] == "CANCELLED"
-
-
-def test_one_bad_order_does_not_stop_the_others(
-    database, user_id, orders_factory, monkeypatch
-):
-    first = orders_factory(user_id, symbol="INFY", side="BUY", type="LIMIT", qty=1, price=100.0)
-    second = orders_factory(user_id, symbol="TCS", side="BUY", type="LIMIT", qty=1, price=200.0)
-    database["orders"].insert_many([first, second])
-    _open_market(monkeypatch)
-    _quotes(
+    _run(
         monkeypatch,
+        book_session_factory,
         {
-            "INFY.NS": _row(90.0),
-            "TCS.NS": _row(190.0),
+            "RELIANCE.NS": _row(
+                1600.0,
+                0.5,
+                source_time=None,
+                regularMarketTime=PROVIDER_TIME,
+                regularMarketChange=8.0,
+                regularMarketPreviousClose=1592.0,
+                regularMarketVolume=1234,
+                marketCap=999999,
+            )
         },
     )
 
-    def flaky(db, order):
-        if order["symbol"] == "INFY":
-            raise RuntimeError("boom")
-        return apply_fill(db, order)
+    instrument, quote = _quote(book_session_factory, "RELIANCE")
+    assert instrument.name == "Reliance Industries"
+    assert instrument.in_market_universe is False  # book-only until market sync
+    assert quote.ltp == Decimal("1600.0000")
+    assert quote.day_change_pct == Decimal("0.500000")
+    # Price sync owns only LTP/pct/source/updated; richer fields stay at their
+    # defaults until a market-sync tick writes them.
+    assert quote.day_change == Decimal("0.0000")
+    assert quote.prev_close == Decimal("0.0000")
+    assert quote.volume == 0
+    assert quote.market_cap == Decimal("0.00")
+    assert quote.source_time is not None
+    assert quote.source_time.astimezone(timezone.utc).isoformat() == (
+        "2026-10-25T10:00:00+00:00"
+    )
+    assert quote.updated_at == NOW
 
-    monkeypatch.setattr(price_sync, "apply_fill", flaky)
 
-    price_sync.run_sync(database)  # must not raise
+def test_price_sync_preserves_a_universe_instrument(
+    book_session_factory,
+    book_user,
+    book_holding_factory,
+    market_instrument_factory,
+    monkeypatch,
+):
+    instrument_id = market_instrument_factory(
+        symbol="INFY",
+        name="Infosys",
+        sector="IT",
+        in_market_universe=True,
+        quote=False,
+    )
+    book_holding_factory(book_user, symbol="INFY")
+    _open_market(monkeypatch)
 
-    assert database["orders"].find_one({"_id": first["_id"]})["status"] == "EXECUTED"
-    assert database["orders"].find_one({"_id": second["_id"]})["status"] == "EXECUTED"
-    assert database["holdings"].count_documents({"symbol": "TCS"}) == 1
+    _run(monkeypatch, book_session_factory, {"INFY.NS": _row(1500.0, -0.5)})
+
+    with book_session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Instrument)) == 1
+        instrument = session.get(Instrument, instrument_id)
+        assert instrument.in_market_universe is True
+        assert instrument.name == "Infosys"
+        assert instrument.sector == "IT"
+        quote = session.get(LatestQuote, instrument_id)
+        assert quote.ltp == Decimal("1500.0000")
+
+
+def test_price_sync_repeated_runs_are_idempotent(
+    book_session_factory, book_user, book_holding_factory, monkeypatch
+):
+    book_holding_factory(book_user, symbol="RELIANCE")
+    _open_market(monkeypatch)
+
+    _run(monkeypatch, book_session_factory, {"RELIANCE.NS": _row(1600.0, 0.5)})
+    _run(monkeypatch, book_session_factory, {"RELIANCE.NS": _row(1600.0, 0.5)})
+
+    with book_session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Instrument)) == 1
+        assert session.scalar(select(func.count()).select_from(LatestQuote)) == 1
+
+
+def test_instrument_sectors_are_backfilled_in_postgres(
+    book_session_factory, book_user, book_holding_factory, monkeypatch
+):
+    book_holding_factory(book_user, symbol="RELIANCE")
+    _open_market(monkeypatch)
+
+    _run(
+        monkeypatch,
+        book_session_factory,
+        {"RELIANCE.NS": _row(1600.0, 0.5)},
+        sector="Energy",
+    )
+
+    instrument, _quote_row = _quote(book_session_factory, "RELIANCE")
+    assert instrument.sector == "Energy"
+
+
+def test_an_empty_instrument_sector_is_left_for_a_later_run(
+    book_session_factory, book_user, book_holding_factory, monkeypatch
+):
+    book_holding_factory(book_user, symbol="RELIANCE")
+    _open_market(monkeypatch)
+
+    _run(
+        monkeypatch,
+        book_session_factory,
+        {"RELIANCE.NS": _row(1600.0, 0.5)},
+        sector="",
+    )
+
+    instrument, _quote_row = _quote(book_session_factory, "RELIANCE")
+    assert instrument.sector == ""
 
 
 # --------------------------------------------------------------------------
-# settle_mis_exit (the function the fill loop delegates to)
+# The PostgreSQL watchlist is the only watchlist source
 # --------------------------------------------------------------------------
 
 
-def _exit_order(user_id, orders_factory, **overrides):
-    values = dict(
-        side="SELL",
-        type="SL-M",
-        product="MIS",
-        qty=10,
-        price=110.0,
-        triggerPrice=110.0,
-        isExit=True,
-        groupId="group-1",
-        status="EXECUTED",
-    )
-    values.update(overrides)
-    return orders_factory(user_id, **values)
-
-
-def test_settle_long_releases_entry_plus_profit(
-    database, user_id, positions_factory, orders_factory, funds_factory
+def test_postgres_watchlist_symbols_are_quoted(
+    book_session_factory,
+    book_user,
+    book_watchlist_factory,
+    monkeypatch,
 ):
-    database["positions"].insert_one(
-        positions_factory(user_id, side="LONG", qty=10, entry=100.0, ltp=105.0)
-    )
-    database["funds"].insert_one(funds_factory(user_id, available=0))
-    order = _exit_order(user_id, orders_factory, qty=10, price=110.0)
+    book_watchlist_factory(book_user, symbol="INFY")
+    _open_market(monkeypatch)
 
-    settle_mis_exit(database, order)
+    calls = _run(monkeypatch, book_session_factory, {"INFY.NS": _row(1500.25, 0.5)})
 
-    assert database["positions"].count_documents({}) == 0
-    assert database["funds"].find_one({"user": user_id})["available"] == 1100.0
-    assert database["transactions"].find_one({})["amount"] == 100
+    assert calls == [["INFY.NS"]]
+    _instrument, quote = _quote(book_session_factory, "INFY")
+    assert quote.ltp == Decimal("1500.2500")
+    assert quote.day_change_pct == Decimal("0.500000")
 
 
-def test_settle_short_pnl_sign_is_inverted(
-    database, user_id, positions_factory, orders_factory, funds_factory
+def test_a_watchlist_read_failure_still_refreshes_the_book(
+    book_session_factory, book_user, book_holding_factory, monkeypatch
 ):
-    # Short 10 at 100, covered at 90 -> +100 profit.
-    database["positions"].insert_one(
-        positions_factory(user_id, side="SHORT", qty=10, entry=100.0, ltp=95.0)
-    )
-    database["funds"].insert_one(funds_factory(user_id, available=0))
-    order = _exit_order(user_id, orders_factory, side="BUY", qty=10, price=90.0)
+    book_holding_factory(book_user, symbol="RELIANCE")
+    _open_market(monkeypatch)
 
-    settle_mis_exit(database, order)
+    def broken(session_factory):
+        raise RuntimeError("watchlists unavailable")
 
-    assert database["funds"].find_one({"user": user_id})["available"] == 1100.0
-    assert database["transactions"].find_one({})["amount"] == 100
+    monkeypatch.setattr(price_sync, "_watchlists", broken)
 
+    _run(monkeypatch, book_session_factory, {"RELIANCE.NS": _row(1600.0, 0.5)})
 
-def test_settle_without_a_position_cancels_the_order_and_siblings(
-    database, user_id, orders_factory
-):
-    order = _exit_order(user_id, orders_factory)
-    sibling = _exit_order(user_id, orders_factory, status="OPEN")
-    database["orders"].insert_many([order, sibling])
-
-    settle_mis_exit(database, order)
-
-    assert database["orders"].find_one({"_id": order["_id"]})["status"] == "CANCELLED"
-    assert database["orders"].find_one({"_id": sibling["_id"]})["status"] == "CANCELLED"
-    assert database["funds"].count_documents({}) == 0
-
-
-def test_settle_releases_only_the_open_quantity(
-    database, user_id, positions_factory, orders_factory, funds_factory
-):
-    # The order asks for 10 but only 4 are still open; min() protects the cash
-    # release. Express then removes the position regardless (see the job).
-    database["positions"].insert_one(
-        positions_factory(user_id, side="LONG", qty=4, entry=100.0, ltp=100.0)
-    )
-    database["funds"].insert_one(funds_factory(user_id, available=0))
-    order = _exit_order(user_id, orders_factory, qty=10, price=110.0)
-
-    settle_mis_exit(database, order)
-
-    assert database["funds"].find_one({"user": user_id})["available"] == 440.0
-    assert database["transactions"].find_one({})["amount"] == 40
-    assert database["positions"].count_documents({}) == 0
+    _instrument, quote = _quote(book_session_factory, "RELIANCE")
+    assert quote.ltp == Decimal("1600.0000")
 
 
 # --------------------------------------------------------------------------
@@ -543,33 +524,30 @@ def test_trading_switch_defaults_to_off(monkeypatch):
     assert scheduler.trading_jobs_enabled() is False
 
 
-def test_price_scheduler_runs_once_immediately_then_stops(database, monkeypatch):
+def test_price_scheduler_runs_once_immediately_then_stops(monkeypatch):
     ticks = []
     sentinel = object()
-    monkeypatch.setattr(
-        scheduler, "sync_prices", lambda db, factory: ticks.append((db, factory))
-    )
+    monkeypatch.setattr(scheduler, "sync_prices", lambda factory: ticks.append(factory))
 
     instance = scheduler.PriceSyncScheduler(
-        database, interval_seconds=60, session_factory=sentinel
+        None, interval_seconds=60, session_factory=sentinel
     )
     instance.start()
     instance.stop()
 
-    # Express calls syncPrices() on connect as well as on the cron.
-    assert ticks == [(database, sentinel)]
+    # Express calls syncPrices() on connect as well as on the cron, and the
+    # PostgreSQL job needs only the session factory.
+    assert ticks == [sentinel]
     assert instance._thread is None
 
 
-def test_price_scheduler_does_not_start_twice(database, monkeypatch):
+def test_price_scheduler_does_not_start_twice(monkeypatch):
     ticks = []
     sentinel = object()
-    monkeypatch.setattr(
-        scheduler, "sync_prices", lambda db, factory: ticks.append((db, factory))
-    )
+    monkeypatch.setattr(scheduler, "sync_prices", lambda factory: ticks.append(factory))
 
     instance = scheduler.PriceSyncScheduler(
-        database, interval_seconds=60, session_factory=sentinel
+        None, interval_seconds=60, session_factory=sentinel
     )
     instance.start()
     instance.start()
@@ -578,27 +556,27 @@ def test_price_scheduler_does_not_start_twice(database, monkeypatch):
     assert len(ticks) == 1
 
 
-def test_price_scheduler_survives_a_failing_tick(database, monkeypatch):
+def test_price_scheduler_survives_a_failing_tick(monkeypatch):
     calls = []
     sentinel = object()
 
-    def flaky(db, factory):
-        calls.append((db, factory))
+    def flaky(factory):
+        calls.append(factory)
         raise RuntimeError("boom")
 
     monkeypatch.setattr(scheduler, "sync_prices", flaky)
 
     instance = scheduler.PriceSyncScheduler(
-        database, interval_seconds=60, session_factory=sentinel
+        None, interval_seconds=60, session_factory=sentinel
     )
     instance.start()
     instance.stop()
 
-    assert calls == [(database, sentinel)]
+    assert calls == [sentinel]
     assert instance._thread is None
 
 
-def test_injected_test_database_never_starts_trading_jobs(database, monkeypatch):
+def test_injected_test_database_never_starts_trading_jobs(monkeypatch):
     monkeypatch.setenv("TRADING_JOBS_ENABLED", "true")
     started = []
     monkeypatch.setattr(
@@ -609,288 +587,9 @@ def test_injected_test_database_never_starts_trading_jobs(database, monkeypatch)
         "start",
         lambda self: started.append("snapshot"),
     )
+    database = mongomock.MongoClient()["tradium_price_sync_test"]
 
     with TestClient(create_app(database=database)) as client:
         assert client.get("/api/health").status_code == 200
 
     assert started == []
-
-
-# --------------------------------------------------------------------------
-# PostgreSQL quote persistence and sector ownership
-# --------------------------------------------------------------------------
-
-
-def _pg_quote(postgres_session_factory, symbol):
-    with postgres_session_factory() as session:
-        instrument = session.scalar(
-            select(Instrument).where(Instrument.symbol == symbol)
-        )
-        if instrument is None:
-            return None, None
-        return instrument, session.get(LatestQuote, instrument.id)
-
-
-def test_price_sync_writes_the_canonical_quote(
-    database, holdings_factory, postgres_session_factory, monkeypatch
-):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, symbol="RELIANCE", sector="Energy"))
-    _open_market(monkeypatch)
-    provider_time = 1792922400  # 2026-10-25 10:00:00 UTC
-    _quotes(
-        monkeypatch,
-        {
-            "RELIANCE.NS": _row(
-                1600.0,
-                0.5,
-                regularMarketChange=8.0,
-                regularMarketPreviousClose=1592.0,
-                regularMarketVolume=1234,
-                marketCap=999999,
-                regularMarketTime=provider_time,
-            )
-        },
-    )
-
-    price_sync.run_sync(database, postgres_session_factory)
-
-    instrument, quote = _pg_quote(postgres_session_factory, "RELIANCE")
-    assert instrument.name == "Reliance Industries"
-    assert instrument.in_market_universe is False  # book-only until market sync
-    assert quote.ltp == Decimal("1600.0000")
-    assert quote.day_change_pct == Decimal("0.500000")
-    # Price sync owns only LTP/pct/source/updated; richer fields stay at their
-    # defaults until a market-sync tick writes them.
-    assert quote.day_change == Decimal("0.0000")
-    assert quote.prev_close == Decimal("0.0000")
-    assert quote.volume == 0
-    assert quote.market_cap == Decimal("0.00")
-    assert quote.source_time is not None
-    assert quote.source_time.astimezone(timezone.utc).isoformat() == "2026-10-25T10:00:00+00:00"
-
-    assert database["holdings"].find_one({"user": user})["ltp"] == 1600.0
-
-
-def test_price_sync_preserves_a_universe_instrument(
-    database,
-    holdings_factory,
-    postgres_session_factory,
-    market_instrument_factory,
-    monkeypatch,
-):
-    instrument_id = market_instrument_factory(
-        symbol="INFY",
-        name="Infosys",
-        sector="IT",
-        in_market_universe=True,
-        quote=False,
-    )
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, symbol="INFY", sector="IT"))
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"INFY.NS": _row(1500.0, -0.5)})
-
-    price_sync.run_sync(database, postgres_session_factory)
-
-    with postgres_session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(Instrument)) == 1
-        instrument = session.get(Instrument, instrument_id)
-        assert instrument.in_market_universe is True
-        assert instrument.name == "Infosys"
-        assert instrument.sector == "IT"
-        quote = session.get(LatestQuote, instrument_id)
-        assert quote.ltp == Decimal("1500.0000")
-
-
-def test_price_sync_repeated_runs_are_idempotent(
-    database, holdings_factory, postgres_session_factory, monkeypatch
-):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, symbol="RELIANCE", sector="Energy"))
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"RELIANCE.NS": _row(1600.0, 0.5)})
-
-    price_sync.run_sync(database, postgres_session_factory)
-    price_sync.run_sync(database, postgres_session_factory)
-
-    with postgres_session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(Instrument)) == 1
-        assert session.scalar(select(func.count()).select_from(LatestQuote)) == 1
-
-
-def test_instrument_sector_backfill_is_projected_to_the_mongo_holding(
-    database, holdings_factory, postgres_session_factory, monkeypatch
-):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, symbol="RELIANCE", sector=""))
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"RELIANCE.NS": _row(1600.0, 0.5)})
-    monkeypatch.setattr(price_sync, "fetch_sector", lambda symbol: "Energy")
-
-    price_sync.run_sync(database, postgres_session_factory)
-
-    instrument, _quote = _pg_quote(postgres_session_factory, "RELIANCE")
-    assert instrument.sector == "Energy"
-    # Temporary projection: the holding still displays its sector from Mongo
-    # until the holdings collection migrates.
-    assert database["holdings"].find_one({"user": user})["sector"] == "Energy"
-
-
-def test_an_empty_instrument_sector_is_left_for_a_later_run(
-    database, holdings_factory, postgres_session_factory, monkeypatch
-):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, symbol="RELIANCE", sector=""))
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"RELIANCE.NS": _row(1600.0, 0.5)})
-    monkeypatch.setattr(price_sync, "fetch_sector", lambda symbol: "")
-
-    price_sync.run_sync(database, postgres_session_factory)
-
-    instrument, _quote = _pg_quote(postgres_session_factory, "RELIANCE")
-    assert instrument.sector == ""
-    assert database["holdings"].find_one({"user": user})["sector"] == ""
-
-
-# --------------------------------------------------------------------------
-# Watchlist symbols: PostgreSQL is the source when a factory is supplied
-# --------------------------------------------------------------------------
-
-
-@pytest.fixture
-def postgres_watchlist(postgres_session_factory):
-    """Seed PostgreSQL watchlist rows and leave the table empty afterwards."""
-    created = datetime(2026, 9, 1, 4, 15, 30, tzinfo=timezone.utc)
-
-    def _insert(symbol, user_id=None):
-        if user_id is None:
-            user_id = secrets.token_hex(12)
-            with postgres_session_factory() as session:
-                session.add(
-                    User(
-                        id=user_id,
-                        username=f"user-{user_id}",
-                        email=f"{user_id}@example.com",
-                        password_hash="not-used-in-price-sync-tests",
-                        created_at=created,
-                        updated_at=created,
-                        version=0,
-                    )
-                )
-                session.commit()
-        with postgres_session_factory() as session:
-            session.add(
-                Watchlist(
-                    id=secrets.token_hex(12),
-                    user_id=user_id,
-                    symbol=symbol,
-                    name=symbol,
-                    exchange="NSE",
-                    created_at=created,
-                    updated_at=created,
-                    version=0,
-                )
-            )
-            session.commit()
-        return user_id
-
-    # Other modules seed users and watchlists against the same database.
-    with postgres_session_factory.begin() as connection:
-        connection.execute(text("TRUNCATE TABLE watchlists"))
-    yield _insert
-    with postgres_session_factory.begin() as connection:
-        connection.execute(text("TRUNCATE TABLE watchlists"))
-
-
-def test_postgres_watchlist_symbols_are_quoted_and_the_mongo_row_is_gone(
-    database, postgres_session_factory, postgres_watchlist, monkeypatch
-):
-    postgres_watchlist("INFY")
-    _open_market(monkeypatch)
-    calls = _quotes(monkeypatch, {"INFY.NS": _row(1500.25, 0.5)})
-
-    price_sync.run_sync(database, postgres_session_factory)
-
-    assert calls == [["INFY.NS"]]
-    _instrument, quote = _pg_quote(postgres_session_factory, "INFY")
-    assert quote.ltp == Decimal("1500.2500")
-    assert quote.day_change_pct == Decimal("0.500000")
-    # There is no MongoDB watchlist row any more, so nothing is mirrored.
-    assert database["watchlists"].count_documents({}) == 0
-
-
-def test_book_refresh_is_unchanged_and_mongo_watchlists_are_not_read(
-    database,
-    holdings_factory,
-    positions_factory,
-    watchlist_factory,
-    postgres_session_factory,
-    postgres_watchlist,
-    monkeypatch,
-):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, symbol="RELIANCE", sector="Energy"))
-    database["positions"].insert_one(positions_factory(user, symbol="INFY"))
-    # A leftover Mongo watchlist row must not be treated as a source.
-    database["watchlists"].insert_one(watchlist_factory(user, symbol="TCS"))
-
-    postgres_watchlist("INFY")
-    postgres_watchlist("WIPRO")
-    _open_market(monkeypatch)
-    calls = _quotes(
-        monkeypatch,
-        {
-            "RELIANCE.NS": _row(1600.0, 0.5),
-            "INFY.NS": _row(1500.0, -0.5),
-            "WIPRO.NS": _row(400.0, 0.25),
-        },
-    )
-
-    price_sync.run_sync(database, postgres_session_factory)
-
-    # Holdings, positions, then the PostgreSQL watchlist; TCS is not quoted.
-    assert calls == [["RELIANCE.NS", "INFY.NS", "WIPRO.NS"]]
-    assert database["holdings"].find_one({"user": user})["ltp"] == 1600.0
-    assert database["positions"].find_one({"user": user})["ltp"] == 1500.0
-    assert database["watchlists"].find_one({"user": user})["ltp"] == 1500.0
-
-
-def test_a_watchlist_read_failure_still_refreshes_the_book(
-    database, holdings_factory, postgres_session_factory, monkeypatch
-):
-    user = ObjectId()
-    database["holdings"].insert_one(holdings_factory(user, symbol="RELIANCE", sector="Energy"))
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"RELIANCE.NS": _row(1600.0, 0.5)})
-
-    def broken(session_factory):
-        raise RuntimeError("watchlists unavailable")
-
-    monkeypatch.setattr(price_sync, "_postgres_watchlist", broken)
-
-    price_sync.run_sync(database, postgres_session_factory)
-
-    assert database["holdings"].find_one({"user": user})["ltp"] == 1600.0
-
-
-def test_open_limit_orders_still_fill_with_postgres_watchlists(
-    database,
-    user_id,
-    orders_factory,
-    postgres_session_factory,
-    postgres_watchlist,
-    monkeypatch,
-):
-    order = orders_factory(user_id, side="BUY", type="LIMIT", product="CNC", qty=5, price=100.0)
-    database["orders"].insert_one(order)
-    postgres_watchlist("INFY")
-    _open_market(monkeypatch)
-    _quotes(monkeypatch, {"INFY.NS": _row(99.5, -1.0)})
-
-    price_sync.run_sync(database, postgres_session_factory)
-
-    claimed = database["orders"].find_one({"_id": order["_id"]})
-    assert claimed["status"] == "EXECUTED"
-    assert claimed["price"] == 100.0
-    assert database["holdings"].find_one({"user": user_id})["qty"] == 5
