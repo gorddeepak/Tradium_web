@@ -62,6 +62,9 @@ class Settings:
     # NODE_ENV controls the `Secure` flag on the auth cookie, exactly as the
     # Express controller's isProduction check does.
     node_env: str
+    # PostgreSQL backs authentication (Phase 3B1). The pooled connection is
+    # read when the session module asks for it.
+    database_url: str
 
 
 def get_settings() -> Settings:
@@ -72,7 +75,13 @@ def get_settings() -> Settings:
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
         node_env=os.getenv("NODE_ENV", ""),
+        database_url=os.getenv("DATABASE_URL", ""),
     )
+
+
+def get_direct_database_url() -> str:
+    """Read the direct (non-pooled) URL used by Alembic and the loader."""
+    return os.getenv("DIRECT_DATABASE_URL", "").strip()
 
 
 # The same model as server/config/ai.js. GEMINI_MODEL is an escape hatch for

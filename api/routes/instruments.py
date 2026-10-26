@@ -13,14 +13,15 @@ but the paths are registered in the same order to keep that obvious.
 """
 
 import logging
-import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pymongo.database import Database
+from sqlalchemy.orm import Session
 
 from ..auth import require_user
-from ..db import get_database
 from ..market_data import MarketDataError, fetch_candles, fetch_quote_row
+from ..market_store import search_market_instruments
+from ..postgres.session import get_session
+from ..serialization import to_json_value
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -32,29 +33,14 @@ INSTRUMENT_NOT_FOUND = "Instrument not found"
 def search_instruments(
     q: str = "",
     user_id: str = Depends(require_user),
-    db: Database = Depends(get_database),
+    session: Session = Depends(get_session),
 ):
     query = q.strip()
     if not query:
         return []
 
-    # Escape user input so regex metacharacters match literally.
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
-    rows = list(
-        db["marketquotes"].find({"$or": [{"symbol": pattern}, {"name": pattern}]}).limit(10)
-    )
-
     # Field names are renamed for the client: price <- ltp, changePct <- dayChangePct.
-    return [
-        {
-            "symbol": row["symbol"],
-            "name": row["name"],
-            "kind": row.get("kind"),
-            "price": row.get("ltp"),
-            "changePct": row.get("dayChangePct"),
-        }
-        for row in rows
-    ]
+    return to_json_value(search_market_instruments(session, query))
 
 
 def _omit_missing(document):

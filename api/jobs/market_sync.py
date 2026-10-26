@@ -1,30 +1,33 @@
-"""Port of server/jobs/marketSync.js.
+"""Port of server/jobs/marketSync.js, persisted in PostgreSQL.
 
-Refreshes the shared ``marketquotes`` cache from one batched Yahoo quote
-request, then fills in sectors a few at a time.
+Refreshes the shared market cache from one batched Yahoo quote request, then
+fills in sectors a few at a time.
 
 Two details are load-bearing and were observed rather than assumed:
 
-- ``syncQuotes`` never writes ``sector``. The backfill owns that field, so a
-  price cycle must not blank it. The upsert therefore puts ``sector`` in
-  ``$setOnInsert``, which is exactly what Mongoose's ``bulkWrite`` generated.
-- ``backfillSectors`` writes with ``doc.save()``, which refreshes ``updatedAt``
-  and leaves ``__v`` alone. Mongoose's upsert does the same, so both paths are
-  reproduced through ``documents.utcnow()``.
+- Quote sync never writes ``sector``. The backfill owns that field, so a price
+  cycle must not blank it. The instrument upsert therefore leaves sector alone.
+- A quote without a usable price never overwrites the stored quote. Provider
+  failures leave the last good cache untouched: stale prices beat an empty
+  Markets page.
 
-The job keeps the last good cache on a provider failure: stale prices beat an
-empty Markets page.
+``updated_at`` is the quote receipt time; ``source_time`` is the provider's
+market time and stays ``NULL`` when Yahoo does not send one.
 """
 
 import logging
 import threading
 
-from pymongo import UpdateOne
-
 from ..data.nifty50 import INDICES, NIFTY50
-from ..documents import utcnow
 from ..market_data import MarketDataError, fetch_quotes, fetch_sector
 from ..market_hours import is_market_open
+from ..market_store import (
+    backfill_sectors as backfill_instrument_sectors,
+    count_market_quotes,
+    is_usable_quote,
+    persist_market_quotes,
+)
+from ..postgres.session import get_session_factory
 
 logger = logging.getLogger(__name__)
 
@@ -47,62 +50,12 @@ TICKERS = list(BY_TICKER)
 _sync_lock = threading.Lock()
 
 
-def _quote_value(row, field):
-    """``q.field ?? 0`` -- null/absent becomes 0, and 0 stays 0."""
-    value = row.get(field)
-    return 0 if value is None else value
+def sync_quotes(session_factory):
+    """One batched request for all 53 symbols, then a PostgreSQL upsert.
 
-
-def quote_operations(quotes):
-    """Build the bulk upserts for a ``{ticker: quote_row}`` batch.
-
-    Returns ``(operations, seen)``. Pure, so the field mapping and the
-    ``sector``-preserving ``$setOnInsert`` can be asserted without a database.
-    """
-    operations = []
-    seen = set()
-    # One timestamp for the batch, as Mongoose's timestamping does for a
-    # synchronous bulkWrite.
-    now = utcnow()
-
-    for ticker, quote in quotes.items():
-        row = BY_TICKER.get(ticker)
-        if row is None:
-            continue  # Yahoo echoed something we did not ask for
-        seen.add(ticker)
-
-        operations.append(
-            UpdateOne(
-                {"symbol": row["symbol"]},
-                {
-                    # `sector` is left alone here -- the backfill below owns it.
-                    "$set": {
-                        "name": row["name"],
-                        "kind": row["kind"],
-                        "ltp": _quote_value(quote, "regularMarketPrice"),
-                        "dayChange": _quote_value(quote, "regularMarketChange"),
-                        "dayChangePct": _quote_value(quote, "regularMarketChangePercent"),
-                        "prevClose": _quote_value(quote, "regularMarketPreviousClose"),
-                        "volume": _quote_value(quote, "regularMarketVolume"),
-                        "marketCap": _quote_value(quote, "marketCap"),
-                        "updatedAt": now,
-                    },
-                    # Mongoose's upsert supplies the model defaults and createdAt
-                    # on insert only.
-                    "$setOnInsert": {"createdAt": now, "sector": "", "__v": 0},
-                },
-                upsert=True,
-            )
-        )
-
-    return operations, seen
-
-
-def sync_quotes(db):
-    """One batched request for all 53 symbols, then a bulk upsert.
-
-    Returns ``(cached, missing)``. A provider failure is logged and returns
-    ``(0, [])`` after leaving the cache untouched.
+    Returns ``(cached, missing)``. ``cached`` counts usable quotes written;
+    ``missing`` lists tickers Yahoo did not return. A provider failure is
+    logged and returns ``(0, [])`` after leaving the cache untouched.
     """
     try:
         quotes = fetch_quotes(TICKERS)
@@ -110,55 +63,47 @@ def sync_quotes(db):
         logger.error("Market sync failed, keeping previous cache: %s", err)
         return 0, []
 
-    operations, seen = quote_operations(quotes)
-    if operations:
-        # Ordered, like Mongoose's default bulkWrite.
-        db["marketquotes"].bulk_write(operations)
+    entries = []
+    for ticker, instrument in BY_TICKER.items():
+        entries.append(
+            {
+                "symbol": instrument["symbol"],
+                "name": instrument["name"],
+                "kind": instrument["kind"],
+                "row": quotes.get(ticker),
+            }
+        )
 
-    missing = [ticker for ticker in TICKERS if ticker not in seen]
-    logger.info("Market sync: %s/%s symbols cached", len(operations), len(TICKERS))
+    cached = persist_market_quotes(session_factory, entries)
+    missing = [ticker for ticker in TICKERS if ticker not in quotes]
+    unusable = [
+        BY_TICKER[ticker]["symbol"]
+        for ticker in TICKERS
+        if ticker in quotes and not is_usable_quote(quotes[ticker])
+    ]
+
+    logger.info("Market sync: %s/%s symbols cached", cached, len(TICKERS))
+    if unusable:
+        logger.warning("Market sync: no usable price for %s", ", ".join(unusable))
     if missing:
         # Likely dead tickers after renames or demergers.
         logger.warning("Market sync: no quote for %s", ", ".join(missing))
 
-    return len(operations), missing
+    return cached, missing
 
 
-def backfill_sectors(db):
-    """Resolve up to SECTORS_PER_RUN missing sectors.
+def backfill_sectors(session_factory):
+    """Resolve up to SECTORS_PER_RUN missing instrument sectors.
 
     A stock's sector never changes, so this is outside the price cycle. A
-    symbol Yahoo has no profile for is left empty and retried on a later run,
-    which matches the Express loop's ``if (!sector) continue;``.
+    symbol Yahoo has no profile for is left empty and retried on a later run.
     """
-    pending = list(db["marketquotes"].find({"kind": "stock", "sector": ""}).limit(SECTORS_PER_RUN))
-    if not pending:
-        return 0
-
-    filled = 0
-    for document in pending:
-        try:
-            sector = fetch_sector(document["symbol"])
-        except MarketDataError as err:
-            # Express's fetchSector catches its own failure and returns "";
-            # here the error surfaces, so it is logged and treated the same.
-            logger.error("Sector fetch failed for %s: %s", document["symbol"], err)
-            continue
-        if not sector:
-            continue
-
-        db["marketquotes"].update_one(
-            {"_id": document["_id"]},
-            {"$set": {"sector": sector, "updatedAt": utcnow()}},
-        )
-        filled += 1
-
-    if filled:
-        logger.info("Market sync: %s sectors resolved", filled)
-    return filled
+    return backfill_instrument_sectors(
+        session_factory, fetch_sector, limit=SECTORS_PER_RUN
+    )
 
 
-def market_sync(db):
+def market_sync(session_factory=None):
     """One scheduled tick: quote refresh (when it makes sense) plus backfill.
 
     Syncs only while the market is open, or when the cache is empty, so a cold
@@ -169,12 +114,14 @@ def market_sync(db):
         return  # previous run still going
 
     try:
-        cached = db["marketquotes"].estimated_document_count()
+        factory = session_factory or get_session_factory()
+        with factory() as session:
+            cached = count_market_quotes(session)
 
         if is_market_open() or cached == 0:
-            sync_quotes(db)
+            sync_quotes(factory)
 
-        backfill_sectors(db)
+        backfill_sectors(factory)
     except Exception:  # noqa: BLE001 - a job must never take the process down
         logger.exception("Market sync failed")
     finally:

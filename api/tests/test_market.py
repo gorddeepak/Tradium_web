@@ -1,24 +1,54 @@
-"""Focused tests for GET /api/market/overview (cache-backed).
+"""PostgreSQL-backed tests for GET /api/market/overview.
 
-Authentication behaviour is shared with the holdings suite and not repeated.
+Phase 3B2 moved the persisted market cache from MongoDB's ``marketquotes`` to
+PostgreSQL. These run only when TEST_DATABASE_URL points at a disposable
+PostgreSQL database; there is no SQLite fallback. Authentication behaviour is
+shared with the holdings suite and not repeated.
 """
 
+import os
 from datetime import datetime, timezone
+
+import mongomock
+import pytest
+from fastapi.testclient import TestClient
+
+from api.main import create_app
+from api.postgres.session import get_session
 
 EARLIER = datetime(2026, 9, 1, 4, 0, 0, tzinfo=timezone.utc)
 LATER = datetime(2026, 9, 2, 4, 0, 0, tzinfo=timezone.utc)
 
+pytestmark = pytest.mark.skipif(
+    not os.getenv("TEST_DATABASE_URL", "").strip(),
+    reason="TEST_DATABASE_URL is not set; PostgreSQL market tests skipped",
+)
+
+
+@pytest.fixture
+def client(postgres_session_factory):
+    app = create_app(database=mongomock.MongoClient()["tradium_test"])
+
+    def override_get_session():
+        with postgres_session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_get_session
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
+
 
 def test_indices_follow_seed_order_and_stocks_are_split_out(
-    client, database, make_token, user_id, market_quote_factory
+    client, make_token, user_id, market_instrument_factory
 ):
-    database["marketquotes"].insert_many(
-        [
-            market_quote_factory(symbol="^BSESN", name="SENSEX", kind="index"),
-            market_quote_factory(symbol="^NSEI", name="NIFTY 50", kind="index"),
-            market_quote_factory(symbol="^NSEBANK", name="BANK NIFTY", kind="index"),
-            market_quote_factory(symbol="INFY", name="Infosys", kind="stock"),
-        ]
+    market_instrument_factory(symbol="^BSESN", name="SENSEX", kind="index")
+    market_instrument_factory(symbol="^NSEI", name="NIFTY 50", kind="index")
+    market_instrument_factory(symbol="^NSEBANK", name="BANK NIFTY", kind="index")
+    market_instrument_factory(symbol="INFY", name="Infosys", kind="stock")
+    # A book-only instrument must not leak into the visible market universe.
+    market_instrument_factory(
+        symbol="TCS", name="Tata Consultancy Services", in_market_universe=False
     )
 
     body = client.get("/api/market/overview", cookies={"token": make_token(user_id)}).json()
@@ -33,15 +63,13 @@ def test_cold_cache_returns_nulls_and_empty_lists(client, make_token, user_id):
     assert body == {"asOf": None, "indices": [], "stocks": []}
 
 
-def test_as_of_is_the_freshest_row_and_rows_keep_mongoose_keys(
-    client, database, make_token, user_id, market_quote_factory
+def test_as_of_is_the_freshest_quote_and_rows_keep_the_legacy_keys(
+    client, make_token, user_id, market_instrument_factory
 ):
-    database["marketquotes"].insert_many(
-        [
-            market_quote_factory(symbol="INFY", updatedAt=EARLIER),
-            market_quote_factory(symbol="TCS", updatedAt=LATER),
-        ]
+    market_instrument_factory(
+        symbol="INFY", name="Infosys", updated_at=EARLIER, ltp=1500.0
     )
+    market_instrument_factory(symbol="TCS", name="TCS", updated_at=LATER, ltp=3200.0)
 
     body = client.get("/api/market/overview", cookies={"token": make_token(user_id)}).json()
 
@@ -63,3 +91,33 @@ def test_as_of_is_the_freshest_row_and_rows_keep_mongoose_keys(
         "updatedAt",
         "__v",
     }
+    assert row["symbol"] == "INFY"
+    assert row["ltp"] == 1500
+    assert row["dayChange"] == 12
+    assert row["dayChangePct"] == 0.8
+    assert row["createdAt"] == "2026-09-01T04:15:30.123Z"
+    assert row["updatedAt"] == "2026-09-01T04:00:00.000Z"
+
+
+def test_sector_backfill_does_not_move_as_of(
+    client, make_token, user_id, market_instrument_factory, postgres_session_factory
+):
+    import api.market_store as market_store
+
+    market_instrument_factory(
+        symbol="INFY", name="Infosys", sector="", updated_at=EARLIER
+    )
+    initial = client.get(
+        "/api/market/overview", cookies={"token": make_token(user_id)}
+    ).json()
+
+    market_store.backfill_sectors(
+        postgres_session_factory, lambda symbol: "Technology"
+    )
+    after = client.get(
+        "/api/market/overview", cookies={"token": make_token(user_id)}
+    ).json()
+
+    assert initial["stocks"][0]["sector"] == ""
+    assert after["stocks"][0]["sector"] == "Technology"
+    assert after["asOf"] == initial["asOf"] == "2026-09-01T04:00:00.000Z"

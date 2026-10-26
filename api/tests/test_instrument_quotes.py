@@ -186,16 +186,3 @@ def test_detail_is_404_when_the_provider_fails(client, make_token, user_id, monk
 def test_both_routes_require_authentication(client):
     assert client.get("/api/instruments/lookup/INFY").status_code == 401
     assert client.get("/api/instruments/INFY").status_code == 401
-
-
-def test_search_is_not_shadowed_by_the_symbol_route(
-    client, database, make_token, user_id, market_quote_factory
-):
-    """`/search` must still reach the cache route, not `/:symbol`."""
-    database["marketquotes"].insert_one(market_quote_factory(symbol="INFY", name="Infosys"))
-
-    body = client.get(
-        "/api/instruments/search", params={"q": "INFY"}, cookies={"token": make_token(user_id)}
-    ).json()
-
-    assert [row["symbol"] for row in body] == ["INFY"]

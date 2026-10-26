@@ -1,6 +1,7 @@
 """Unit tests for the document-to-JSON conversion."""
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from bson import ObjectId
 
@@ -45,3 +46,15 @@ def test_nested_documents_and_lists_are_converted():
     assert isinstance(converted["items"][0]["_id"], str)
     assert converted["items"][0]["when"] == "2026-01-01T00:00:00.000Z"
     assert converted["count"] == 2
+
+
+def test_decimal_integral_values_become_json_integers():
+    assert to_json_value(Decimal("500.0000")) == 500
+    assert type(to_json_value(Decimal("500.0000"))) is int
+    assert to_json_value(Decimal("16276858601472.00")) == 16276858601472
+
+
+def test_decimal_fractional_values_keep_their_decimal_text():
+    # This is the design's documented float fallback without simplejson.
+    assert to_json_value(Decimal("1202.8000")) == 1202.8
+    assert to_json_value(Decimal("-0.690000")) == -0.69

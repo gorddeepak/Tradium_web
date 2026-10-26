@@ -1,9 +1,9 @@
 # Market Data Plan
 
-**Status:** Phase 2a (historical candles) is implemented and measured — see §3.1. Phase 2b evaluated
-streaming and decided **not** to adopt it — see §3.2. Everything about the quote phase, the cache jobs
-and the provider adapter (§3.3 – §3.5) is still a plan: nothing there should be described as working
-until it has been tested and the result recorded.
+**Status:** Phases 2a–2d are implemented and measured: historical candles (§3.1), streaming evaluated
+and **not** adopted (§3.2), REST quotes and the provider adapter (§3.3), and the scheduled jobs
+(§3.4). The cache those jobs fill was moved from MongoDB's `marketquotes` collection to PostgreSQL in
+Phase 3B2 — see §3.6. No WebSocket, push channel or streaming ingestion exists in the application.
 
 ---
 
@@ -11,14 +11,14 @@ until it has been tested and the result recorded.
 
 | Consumer | Endpoint / job | Provider call | Required fields |
 |---|---|---|---|
-| Instrument search | `GET /api/instruments/search` | none (Mongo cache only) | cached `ltp`, `dayChangePct` |
+| Instrument search | `GET /api/instruments/search` | none (PostgreSQL cache only) | cached `ltp`, `dayChangePct` |
 | Instrument lookup | `GET /api/instruments/lookup/:symbol` | `quote()` | `regularMarketPrice`, `regularMarketChange`, `regularMarketChangePercent`, names |
 | Instrument detail | `GET /api/instruments/:symbol` | `quote()` | above + open, high, low, prevClose, volume, 52-week high/low |
 | Candles | `GET /api/instruments/:symbol/candles` | `chart()` | OHLC per bar, with empty bars filtered |
-| Markets page | `GET /api/market/overview` | none (cache only) | full `MarketQuote` docs, max `updatedAt` |
-| Market cache refresh | `jobs/marketSync.js` | batch `quote(53 tickers)` | ltp, dayChange, dayChangePct, prevClose, volume, marketCap, sector |
-| Price sync | `jobs/priceSync.js` | `quote()` per symbol | `regularMarketPrice`, `regularMarketChangePercent` |
-| Sector backfill | both jobs | `quoteSummary()` `assetProfile` | `sector` |
+| Markets page | `GET /api/market/overview` | none (PostgreSQL cache only) | `instruments` ⋈ `latest_quotes`, max `updated_at` |
+| Market cache refresh | `jobs/market_sync.py` | batch `quote(53 tickers)` | ltp, dayChange, dayChangePct, prevClose, volume, marketCap, sector → `instruments`/`latest_quotes` |
+| Price sync | `jobs/price_sync.py` | batch `quote()` for held/ordered/watchlisted symbols | `regularMarketPrice`, `regularMarketChangePercent`; mirrors Mongo `ltp` and upserts the PostgreSQL quote (§3.6) |
+| Sector backfill | both jobs | `quoteSummary()` `assetProfile` | `sector` on `instruments` |
 | MARKET order fill | `POST /api/orders` → `fetchQuote` | `quote()` | `regularMarketPrice` |
 | Square-off | `POST /api/positions/:id/square-off` | `quote()` | `regularMarketPrice` (optional; falls back to stored `ltp`) |
 
@@ -345,6 +345,69 @@ If live prices are adopted, the provider → backend ingestion and backend → f
 WebSocket to the browser. Choose one deliberately and document it. Do not introduce a push channel
 that the React app does not already consume.
 
+### 3.6 Cache persistence — moved to PostgreSQL in Phase 3B2
+
+The cache is no longer MongoDB's `marketquotes` collection. It lives in two PostgreSQL tables created
+by `api/migrations/versions/0001_initial_schema.py`:
+
+| Table | Holds |
+|---|---|
+| `instruments` | one row per symbol: `symbol` (unique), `name`, `kind` (`stock`/`index`), `sector`, `in_market_universe` |
+| `latest_quotes` | one row per instrument (`instrument_id` primary key, `ON DELETE CASCADE`): `ltp`, `day_change`, `day_change_pct`, `prev_close`, `volume`, `market_cap`, `updated_at`, `source_time` |
+
+Ownership:
+
+- `api/jobs/market_sync.py` owns the **53-symbol universe** (3 indices + 50 stocks). It upserts every
+  universe symbol even when the provider omits a row, so `instruments` can hold all 53 while
+  `latest_quotes` holds only the symbols that returned a usable price. A seeded symbol with no quote
+  stays invisible to both read routes, which is what the Mongo cache did implicitly.
+- `api/jobs/price_sync.py` adds **book-only** instruments (`in_market_universe = false`) for symbols
+  that are held, watchlisted or in an OPEN order but outside the universe. It writes only `ltp`,
+  `day_change_pct`, `updated_at` and `source_time`, so the richer market-sync columns and the
+  instrument's identity survive a one-minute tick.
+- Sector backfill belongs to `instruments`. Either job may call it, capped at 10 unresolved symbols per
+  run. The quote upsert never writes `sector`, so a price cycle cannot blank it; the backfill never
+  touches `latest_quotes.updated_at`. While holdings remain Mongo-backed, `price_sync` also mirrors a
+  sector it just resolved onto a holding whose `sector` is still empty, as a temporary read projection.
+
+Two timestamps, deliberately separate:
+
+- `updated_at` — when this service persisted the quote. It is the `updatedAt` the API has always
+  exposed and the value `asOf` reports on `/api/market/overview`.
+- `source_time` — the provider's `regularMarketTime`, or `NULL`. A missing provider time is **never**
+  replaced by the write time.
+
+Stale-quote rule (`api/market_store.py`):
+
+- An incoming row whose `source_time` is **older** than the stored one is dropped, so a late provider
+  response cannot overwrite a newer price.
+- A row with **no** `source_time` is applied and clears the stored `source_time`: the price is the
+  newest poll result but cannot be tied to a provider timestamp.
+- A missing, zero, negative or non-numeric price never creates or overwrites a quote. A provider
+  failure leaves the last good cache in place, so stale prices survive instead of blanking the Markets
+  page.
+
+Reads:
+
+- `GET /api/market/overview` and `GET /api/instruments/search` join `instruments` to `latest_quotes`
+  and filter `in_market_universe = true`.
+- The wire shape is unchanged: `_id`, `symbol`, `name`, `kind`, `sector`, `ltp`, `dayChange`,
+  `dayChangePct`, `prevClose`, `volume`, `marketCap`, `createdAt`, `updatedAt`, `__v`.
+- `search` keeps the approved relevance order — exact symbol, symbol prefix, name prefix, substring —
+  escapes `%` and `_` so the term is literal, and caps the result at 10 rows.
+- Order is explicit, because PostgreSQL has none: overview returns indices `^NSEI`, `^NSEBANK`,
+  `^BSESN` (unknown indices first) and stocks by `symbol ASC`. Express returned MongoDB natural order,
+  which happened to follow the seed list; the change is approved in `POSTGRES_SCHEMA_DESIGN.md` §2.10.
+- Both routes keep `Decimal` columns rendering as JSON numbers: integral values as integers, the rest
+  as the shortest float (`api/serialization.py`).
+
+Still Mongo: holdings, positions, orders, funds, transactions, watchlists and portfolio snapshots,
+including everything Nova's tools read. Authentication (`users`) and the market cache are the only
+PostgreSQL-backed surfaces so far.
+
+The market-hours gate, the single-flight locks and the opt-in scheduler switches are unchanged
+(§3.4); `MARKET_SYNC_ENABLED` and `TRADING_JOBS_ENABLED` still default to off.
+
 ---
 
 ## 4. Fallbacks and alternatives
@@ -373,7 +436,7 @@ Do not state that a provider is approved for this use until its terms have been 
 | d | How do timestamps, field names and symbol formats normalise? | **Answered (Phase 2a):** `time` = the bar's UTC epoch + 19800; fields are `time`/`open`/`high`/`low`/`close`; `^` symbols pass through and everything else gets `.NS`. Verified against `yahoo-finance2` itself; see §3.1 |
 | e | Is provider data permitted for the intended display and deployment? | Read the provider terms; record the conclusion — **still open**; Phase 2b did not settle it |
 | f | If streaming fails, which fallback is approved, and what account/infrastructure does it need? | **Answered (Phase 2b):** no new infrastructure. Keep REST polling; the stream stays an option, see §3.2 |
-| g | How old may a quote be before it must not become a fill price? | **Open.** No cutoff is enforced today, because Express has none and because a 5-minute rule would have rejected a current `^BSESN` quote (ages 1 s / 106 s / 903 s at 15:31 IST). Needs a decision, not a silent change — see §3.3 |
+| g | How old may a quote be before it must not become a fill price? | **Open, narrower.** Phase 3B2 added a provider-time guard to the canonical cache (an older `source_time` cannot overwrite a newer quote — see §3.6), but there is still no age cutoff, and MARKET fills and square-offs use live `fetch_quote`, not the cache. A cutoff needs a decision, not a silent change — see §3.3 |
 
 ---
 
@@ -389,10 +452,13 @@ Do not state that a provider is approved for this use until its terms have been 
 | Lookup for an unknown symbol | 404 `{ message: "Instrument not found" }` — **closed in Phase 2c** (also for a zero price and a provider failure, as Express does) |
 | Batch quote for the whole universe | 53/53 tickers in one request; field-for-field identical to `yahoo-finance2` — **closed in Phase 2c** |
 | Market cap and sector survive a price cycle | `sector` written only by the backfill; `marketCap` never blanked — **closed in Phase 2c** |
+| Cache persistence after the move to PostgreSQL | 53 instruments seeded, quotes upserted, repeated syncs neither duplicate nor blank metadata — **closed in Phase 3B2**, see §3.6 |
+| Stale provider response | An older `source_time` does not overwrite a newer stored quote; a missing one is applied and clears it — **closed in Phase 3B2** |
+| Price sync dual-write | Mongo `ltp` updates and the PostgreSQL quote upsert from one provider batch; a PostgreSQL failure does not block fills — **closed in Phase 3B2** |
 | MARKET order with a live quote | Fills at the quote; holdings/positions/funds updated — unit-tested with a stubbed quote; Express HTTP parity still PENDING |
 | MARKET order while provider is down | 503 with the documented message — covered by `fetch_quote` returning `None` |
 | Square-off while provider is down | Falls back to stored `ltp`, still succeeds — covered |
-| Quote staleness | **Undecided.** No cutoff today, with measurements in §3.3 explaining why a naive one is unsafe |
+| Quote staleness | **Partly decided (Phase 3B2):** the canonical cache rejects a row whose provider `source_time` is older than the stored one. **No age cutoff on a fresh row** — §3.3 explains why a naive threshold is unsafe |
 | Price sync outside market hours | No provider calls |
 | Price sync with one symbol failing | Other symbols still update; failure is logged |
 | LIMIT order crossing | Fills once, at the limit price |

@@ -11,7 +11,7 @@ The operations are:
 - ``fetch_quote_row`` — the raw Yahoo quote row, used by the two instrument
   detail routes.
 - ``fetch_quotes`` / ``fetch_sector`` — the batch and profile reads behind the
-  ``marketquotes`` cache sync.
+  market-data sync jobs.
 
 The candle and quote endpoints are not the same, and neither is trivial to
 reach: candles need no credentials, while the quote endpoints require a cookie
@@ -228,9 +228,10 @@ def fetch_quotes(tickers):
 
     Used by the market-cache sync, which needs the raw row rather than the
     reduced ``fetch_quote`` shape. Missing tickers are absent from the result,
-    which is how ``marketSync`` detects dead symbols.
+    which is how ``marketSync`` detects dead symbols. Duplicate tickers are
+    removed before the provider request.
     """
-    rows = _request_quotes(list(tickers))
+    rows = _request_quotes(list(dict.fromkeys(tickers)))
     found = {}
     for row in rows:
         ticker = row.get("symbol")

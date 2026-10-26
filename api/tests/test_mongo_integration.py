@@ -19,11 +19,13 @@ import pytest
 from bson import ObjectId
 from fastapi.testclient import TestClient
 from pymongo import MongoClient
+from sqlalchemy import select
 
 from api.main import create_app
-from api.jobs.market_sync import backfill_sectors, sync_quotes
 from api.jobs.portfolio_snapshot import record_daily_snapshot, snapshot_date
 from api.jobs.price_sync import run_sync
+from api.postgres.models import User
+from api.postgres.session import get_session
 
 TEST_MONGO_URL = os.getenv("TEST_MONGO_URL")
 
@@ -191,11 +193,12 @@ def test_positions_and_funds_read_real_mongo_documents(scratch_database, monkeyp
     assert body["realizedPnl"] == -250.5
 
 
-def test_portfolio_market_search_and_transactions_read_real_mongo_documents(
+def test_portfolio_and_transactions_read_real_mongo_documents(
     scratch_database, monkeypatch
 ):
     # Confirms the newly used collection names (`portfoliosnapshots`,
-    # `marketquotes`, `transactions`) resolve against a real MongoDB.
+    # `transactions`) resolve against a real MongoDB. Market data moved to
+    # PostgreSQL in Phase 3B2 and is covered by the PostgreSQL suite.
     monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
 
     user_id = ObjectId()
@@ -211,16 +214,6 @@ def test_portfolio_market_search_and_transactions_read_real_mongo_documents(
          "value": 200.0, "invested": 180.0, "misInvested": 0.0, "misValue": 0.0,
          "createdAt": created, "updatedAt": created, "__v": 0}
     )
-    scratch_database["marketquotes"].insert_many(
-        [
-            {"_id": ObjectId(), "symbol": "^NSEI", "name": "NIFTY 50", "kind": "index",
-             "ltp": 1.0, "dayChange": 0.0, "dayChangePct": 0.0, "prevClose": 0.0, "volume": 0,
-             "marketCap": 0, "sector": "", "createdAt": created, "updatedAt": created, "__v": 0},
-            {"_id": ObjectId(), "symbol": "INFY", "name": "Infosys", "kind": "stock",
-             "ltp": 110.0, "dayChange": 0.0, "dayChangePct": 0.0, "prevClose": 0.0, "volume": 0,
-             "marketCap": 0, "sector": "", "createdAt": created, "updatedAt": created, "__v": 0},
-        ]
-    )
     scratch_database["transactions"].insert_one(
         {"_id": ObjectId(), "user": user_id, "kind": "DEPOSIT", "method": "UPI",
          "amount": 5000.0, "symbol": "", "status": "COMPLETED",
@@ -233,8 +226,6 @@ def test_portfolio_market_search_and_transactions_read_real_mongo_documents(
     with TestClient(app) as client:
         transactions = client.get("/api/funds/transactions", cookies={"token": token})
         history = client.get("/api/portfolio/history", params={"range": "ALL"}, cookies={"token": token})
-        overview = client.get("/api/market/overview", cookies={"token": token})
-        search = client.get("/api/instruments/search", params={"q": "INF"}, cookies={"token": token})
 
     assert transactions.status_code == 200
     assert [row["kind"] for row in transactions.json()] == ["DEPOSIT"]
@@ -244,13 +235,6 @@ def test_portfolio_market_search_and_transactions_read_real_mongo_documents(
     labels = [point["label"] for point in history.json()]
     assert "2026-09-01" in labels
 
-    assert overview.status_code == 200
-    assert [row["symbol"] for row in overview.json()["indices"]] == ["^NSEI"]
-    assert [row["symbol"] for row in overview.json()["stocks"]] == ["INFY"]
-    assert overview.json()["asOf"] == "2026-09-01T04:15:30.123Z"
-
-    assert search.status_code == 200
-    assert [row["symbol"] for row in search.json()] == ["INFY"]
 
 
 def test_write_routes_against_real_mongo(scratch_database, monkeypatch):
@@ -315,85 +299,21 @@ def test_write_routes_against_real_mongo(scratch_database, monkeypatch):
     assert scratch_database["orders"].find_one({"_id": ObjectId(limit.json()["_id"])})["status"] == "CANCELLED"
 
 
-def test_market_sync_against_real_mongo(scratch_database, monkeypatch):
-    # mongomock cannot run a bulk update with this pymongo version, so the
-    # actual cache write is exercised here. The provider is still patched: no
-    # test contacts Yahoo.
-    monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
-
-    quote_rows = {
-        "RELIANCE.NS": {
-            "symbol": "RELIANCE.NS",
-            "regularMarketPrice": 1202.8,
-            "regularMarketChange": -8.4,
-            "regularMarketChangePercent": -0.69,
-            "regularMarketPreviousClose": 1211.2,
-            "regularMarketVolume": 15138916,
-            "marketCap": 16276858601472,
-        },
-        "^NSEI": {
-            "symbol": "^NSEI",
-            "regularMarketPrice": 22888.95,
-            "regularMarketChange": -257.2,
-            "regularMarketChangePercent": -1.11,
-            "regularMarketPreviousClose": 23146.15,
-            "regularMarketVolume": 0,
-            "marketCap": None,  # indices have no market cap
-        },
-    }
-    monkeypatch.setattr("api.jobs.market_sync.fetch_quotes", lambda tickers: quote_rows)
-    monkeypatch.setattr("api.jobs.market_sync.fetch_sector", lambda symbol: "Energy")
-
-    sync_quotes(scratch_database)
-
-    reliance = scratch_database["marketquotes"].find_one({"symbol": "RELIANCE"})
-    nifty = scratch_database["marketquotes"].find_one({"symbol": "^NSEI"})
-
-    # Nine quote fields plus the Mongoose insert fields.
-    assert reliance["ltp"] == 1202.8
-    assert reliance["dayChange"] == -8.4
-    assert reliance["dayChangePct"] == -0.69
-    assert reliance["prevClose"] == 1211.2
-    assert reliance["volume"] == 15138916
-    assert reliance["marketCap"] == 16276858601472
-    assert reliance["name"] == "Reliance Industries"
-    assert reliance["kind"] == "stock"
-    assert reliance["sector"] == ""  # the backfill owns it
-    assert reliance["__v"] == 0
-    assert reliance["createdAt"] == reliance["updatedAt"]
-
-    # `?? 0` turns an absent market cap into 0 for an index.
-    assert nifty["kind"] == "index"
-    assert nifty["marketCap"] == 0
-    assert nifty["name"] == "NIFTY 50"
-
-    # A second run updates the price without touching createdAt or the sector.
-    backfill_sectors(scratch_database)
-    assert scratch_database["marketquotes"].find_one({"symbol": "RELIANCE"})["sector"] == "Energy"
-
-    quote_rows["RELIANCE.NS"]["regularMarketPrice"] = 1210.0
-    sync_quotes(scratch_database)
-
-    refreshed = scratch_database["marketquotes"].find_one({"symbol": "RELIANCE"})
-    assert refreshed["ltp"] == 1210.0
-    assert refreshed["sector"] == "Energy"  # preserved by $setOnInsert
-    assert refreshed["createdAt"] == reliance["createdAt"]
-    assert refreshed["updatedAt"] > reliance["updatedAt"]
-
-    # One row per symbol, not one per run.
-    assert scratch_database["marketquotes"].count_documents({}) == 2
-
-
 def test_scheduled_jobs_against_real_mongo(scratch_database, monkeypatch):
     # Confirms the per-minute fill path and the daily upsert outside mongomock:
     # a real $inc, a real delete, and a real findOneAndUpdate upsert.
     monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
     monkeypatch.setattr("api.jobs.price_sync.is_market_open", lambda: True)
     monkeypatch.setattr(
-        "api.jobs.price_sync.fetch_quote",
-        lambda symbol: {"ltp": 1600.0, "dayChangePct": 0.5},
+        "api.jobs.price_sync.fetch_quotes",
+        lambda tickers: {
+            ticker: {
+                "regularMarketPrice": 1600.0,
+                "regularMarketChangePercent": 0.5,
+            }
+            for ticker in tickers
+        },
     )
-    monkeypatch.setattr("api.jobs.price_sync.fetch_sector", lambda symbol: "IT")
 
     user_id = ObjectId()
     created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
@@ -428,7 +348,9 @@ def test_scheduled_jobs_against_real_mongo(scratch_database, monkeypatch):
     holding = scratch_database["holdings"].find_one({"user": user_id})
     assert holding["ltp"] == 1600.0
     assert holding["dayChangePct"] == 0.5
-    assert holding["sector"] == "IT"  # backfilled by the same run
+    # Sector metadata moved to PostgreSQL instruments in Phase 3B2; this
+    # Mongo-only run has no session factory, so the stored sector is untouched.
+    assert holding["sector"] == ""
 
     # The MIS exit settled: position gone, cash and ledger written.
     assert scratch_database["positions"].count_documents({"user": user_id}) == 0
@@ -451,39 +373,73 @@ def test_scheduled_jobs_against_real_mongo(scratch_database, monkeypatch):
     assert scratch_database["portfoliosnapshots"].count_documents({"user": user_id}) == 1
 
 
-def test_auth_routes_against_real_mongo(scratch_database, monkeypatch):
-    # Confirms the `users` collection resolves against a real MongoDB, and that
-    # signup -> cookie -> login -> protected route works end to end outside
-    # mongomock, including a stored bcrypt hash written by this app.
+def test_auth_uses_postgres_while_mongo_routes_stay_real(
+    scratch_database, postgres_session_factory, monkeypatch
+):
+    # Authentication moved to PostgreSQL in Phase 3B1; the remaining routes
+    # still read a real MongoDB. This test only needs a real MongoDB for those
+    # routes and checks that auth writes nothing into the `users` collection.
     monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
 
+    suffix = str(ObjectId())
+    email = f"deepak-{suffix}@example.com"
+    username = f"deepak{suffix}"
+
     app = create_app(database=scratch_database)
+
+    def override_get_session():
+        with postgres_session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_get_session
 
     with TestClient(app) as client:
         signup = client.post(
             "/api/auth/signup",
-            json={"username": "deepak", "email": "deepak@example.com", "password": "hunter2hunter2"},
+            json={"username": username, "email": email, "password": "hunter2hunter2"},
+        )
+        user_id = signup.json()["user"]["id"]
+
+        scratch_database["holdings"].insert_one(
+            {
+                "_id": ObjectId(),
+                "user": ObjectId(user_id),
+                "symbol": "INFY",
+                "name": "Infosys",
+                "exchange": "NSE",
+                "qty": 1,
+                "avgPrice": 100.0,
+                "ltp": 110.0,
+                "dayChangePct": 0.0,
+                "sector": "IT",
+                "createdAt": datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc),
+                "updatedAt": datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc),
+                "__v": 0,
+            }
         )
         along_with_signup_cookie = client.get("/api/holdings")
         login = client.post(
             "/api/auth/login",
-            json={"email": "deepak@example.com", "password": "hunter2hunter2"},
+            json={"email": email, "password": "hunter2hunter2"},
         )
         me = client.get("/api/auth/me")
 
     assert signup.status_code == 201
     assert login.status_code == 200
     assert login.json()["user"] == signup.json()["user"]
-    # The cookie a signup sets is already enough for the protected routes.
+    # The cookie a signup sets is already enough for the Mongo-backed route.
     assert along_with_signup_cookie.status_code == 200
+    assert [row["symbol"] for row in along_with_signup_cookie.json()] == ["INFY"]
 
     assert me.status_code == 200
     returned = me.json()["user"]
     assert set(returned) == {"_id", "username", "email", "createdAt", "updatedAt", "__v"}
     assert returned["createdAt"].endswith("Z")
 
-    stored = scratch_database["users"].find_one({"email": "deepak@example.com"})
-    assert stored["password"].startswith("$2b$10$")
-    assert bcrypt.checkpw(b"hunter2hunter2", stored["password"].encode())
+    # Auth must no longer write users to MongoDB.
+    assert scratch_database["users"].count_documents({}) == 0
 
-
+    with postgres_session_factory() as session:
+        stored = session.scalar(select(User).where(User.email == email))
+    assert stored.password_hash.startswith("$2b$10$")
+    assert bcrypt.checkpw(b"hunter2hunter2", stored.password_hash.encode())

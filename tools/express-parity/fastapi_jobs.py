@@ -31,6 +31,7 @@ def main():
     from bson import ObjectId
 
     from api.jobs import portfolio_snapshot, price_sync
+    from api.market_data import ticker_for
 
     scenario = load_scenario()
     seeded = frozenset(scenario["seededIds"])
@@ -53,16 +54,24 @@ def main():
             database[name].insert_many(documents)
 
     # Patch the provider seams exactly where run_sync looks them up.
-    def fake_fetch_quote(symbol):
-        quote = scenario["quotes"].get(symbol)
-        if quote is None:
-            return None
-        return {"ltp": quote["ltp"], "dayChangePct": quote["dayChangePct"]}
+    quotes_by_ticker = {
+        ticker_for(symbol): quote for symbol, quote in scenario["quotes"].items()
+    }
+
+    def fake_fetch_quotes(tickers):
+        return {
+            ticker: {
+                "regularMarketPrice": quotes_by_ticker[ticker]["ltp"],
+                "regularMarketChangePercent": quotes_by_ticker[ticker]["dayChangePct"],
+            }
+            for ticker in tickers
+            if ticker in quotes_by_ticker
+        }
 
     def fake_fetch_sector(symbol):
         return scenario["sectors"].get(symbol, "")
 
-    price_sync.fetch_quote = fake_fetch_quote
+    price_sync.fetch_quotes = fake_fetch_quotes
     price_sync.fetch_sector = fake_fetch_sector
     price_sync.is_market_open = lambda: True
 

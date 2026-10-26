@@ -1,11 +1,11 @@
 # Migration Status
 
-**Last updated:** 2026-10-19 (Phase 4b)
-**Current phase:** **Phase 4b — final pre-deployment readiness review**
-**Application code modified:** **Yes.** CORS settings and the Nova assistant under `api/`, static
-serving and the SPA fallback in `api/main.py`, the frontend API origin and signup call under `src/`;
-`server/` and the original repository are untouched. Phase 4b changed no application code — it added the
-read-route parity harness and untracked two local artifacts.
+**Last updated:** 2026-10-26 (Phase 3B2)
+**Current phase:** **Phase 3B2 — PostgreSQL market cache (`instruments` and `latest_quotes`)**
+**Application code modified:** **Yes.** Phase 3B1 moved authentication to PostgreSQL; Phase 3B2 moved
+the market cache there and made `price_sync` a dual writer. `server/` and the original repository remain
+untouched. The book collections (`holdings`, `positions`, `orders`, `funds`, `transactions`,
+`watchlists`, `portfoliosnapshots`) and Nova's tools are still MongoDB-backed.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -15,16 +15,22 @@ read-route parity harness and untracked two local artifacts.
 
 | Item | Value |
 |---|---|
-| Phase | 4b — final pre-deployment readiness review |
+| Phase | 3B2 — PostgreSQL market cache |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
-| Market cache | `marketquotes` populated for **53/53** symbols in `tradium_fastapi_dev`; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
-| Trading jobs | per-minute `priceSync` (fills orders, settles MIS exits) and the daily 18:00 IST snapshot; **off unless `TRADING_JOBS_ENABLED` is set** |
+| PostgreSQL schema | **created by Alembic** — `api/migrations/versions/0001_initial_schema.py` creates all 10 tables (`users`, `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists`, `instruments`, `latest_quotes`, `portfolio_snapshots`) plus `alembic_version`; verified by `alembic upgrade head` on a disposable PostgreSQL 17.6 cluster |
+| PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1) and the **market cache** (`instruments`/`latest_quotes`, Phase 3B2) |
+| MongoDB-backed surfaces | **still all book data and AI tools** — holdings, positions, orders, funds, transactions, watchlists, portfolio snapshots, and everything Nova reads |
+| Market cache | `instruments` + `latest_quotes` in PostgreSQL; market sync seeds the **53-symbol universe**; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
+| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices and upserts the canonical PostgreSQL quote) and the daily 18:00 IST snapshot; **off unless `TRADING_JOBS_ENABLED` is set** |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | **switched** to FastAPI on `localhost:8000`; a production build is now **served by FastAPI** (SPA fallback) when `SERVE_STATIC`/`NODE_ENV=production`; `VITE_API_URL` still overrides |
 | CORS | Vite dev origins (5173-5177) with credentials; `CORS_ORIGINS` overrides for deployed origins; a same-origin production build needs neither |
 | Development MongoDB | **local** `mongodb://127.0.0.1:27017/tradium_fastapi_dev` via gitignored `api/.env` |
+| Development PostgreSQL | whatever `DATABASE_URL` names — a local database such as `tradium`; `DIRECT_DATABASE_URL` is read only by Alembic |
 | Test MongoDB | in-memory `mongomock` plus the guarded `*_test` scratch DB; `MONGO_URL` is never used |
+| Test PostgreSQL | a guarded disposable `*_test` database named by `TEST_DATABASE_URL`; the suite runs `alembic upgrade head` and skips when it is unset |
 | Production MongoDB | never contacted; no data copied |
+| Production PostgreSQL | never contacted; no data copied, no data loader written |
 | New repository path | `D:\deepak\coding\Full Stack Dev\Tradium-FastAPI` |
 | Intended GitHub repository | `tradium-fastapi` (private) |
 | GitHub push | **BLOCKED** — no `gh` CLI and no authenticated remote |
@@ -32,10 +38,11 @@ read-route parity harness and untracked two local artifacts.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **269 passed, 8 skipped** (default); **277 passed** with `TEST_MONGO_URL` — see §5. Not rerun in Phase 4b (no application code changed) |
-| Express parity check | **run** — cookies, numeric rendering and job side effects compared against the original modules; **no functional difference** (§3K) |
-| Read-route parity check | **run (Phase 4b)** — orders, watchlist, positions, funds, funds/transactions, portfolio/history, market/overview and instruments/search compared live against Express on the same seeded data; **byte-identical** (§3O) |
-| Repository secret scan | **clean (Phase 4b)** — no credentials, API keys, private keys or `.env` files in tracked files; the real key/secret/URL from the original `.env` appear in none (§3O) |
+| Tests executed | **358 passed, 7 skipped** with only `TEST_DATABASE_URL`; **365 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26) — see §5 |
+| PostgreSQL test instance | PostgreSQL 17.6, disposable local cluster on a temporary path, database `tradium_phase3b_wrapup_test`; scoped to this run and outside the repository |
+| Express parity check | **run (Phase 2e)** — cookies, numeric rendering and job side effects; **no functional difference** (§3K) |
+| Read-route parity check | **run (Phase 4b)** — byte-identical for the Mongo-backed read routes at the time; **not rerun after the Phase 3B2 backend move** (§3Q) |
+| Repository secret scan | **clean (Phase 4b/3B2)** — no credentials, API keys, private keys or `.env` files in tracked files; the PostgreSQL docs contain placeholders only |
 | Browser cutover check | **run** — signup, login, reload, logout and all six dashboard pages against a live FastAPI server (§3L) |
 | Nova browser check | **run** — dashboard briefing, a page insight, and chat with one- and two-tool turns against live Gemini (§3M) |
 | Production static check | **run** — the built SPA served by FastAPI: deep links, refresh, assets, login, same-origin API, Nova, and the `Secure` cookie (§3N) |
@@ -1246,6 +1253,129 @@ switches all match. Notes added or confirmed:
 
 ---
 
+## 3P. Phase 3B1 — PostgreSQL schema foundation and authentication
+
+**Goal:** put the approved relational schema under Alembic and move exactly one surface — user identity —
+from MongoDB to PostgreSQL. Every other route keeps reading MongoDB.
+
+> **Naming.** `Phase 3B1` and `Phase 3B2` label the PostgreSQL workstream. §3L and §3M keep their
+> historical labels (`Phase 3a` — CORS/frontend cutover, `Phase 3b` — Nova) because earlier documents
+> already refer to them that way. The two schemes are unrelated.
+
+### Schema
+
+| File | Purpose |
+|---|---|
+| `alembic.ini` | `script_location = api/migrations`; `sqlalchemy.url` is deliberately empty |
+| `api/migrations/env.py` | reads `DIRECT_DATABASE_URL`; migrations never use the pooled URL |
+| `api/migrations/versions/0001_initial_schema.py` | revision `0001`, the only revision so far |
+| `api/postgres/base.py` | declarative base and the shared 24-hex id pattern |
+| `api/postgres/models.py` | the ten tables |
+| `api/postgres/session.py` | lazily created engine and session factory |
+
+`alembic upgrade head` creates `users`, `funds`, `holdings`, `positions`, `orders`, `transactions`,
+`watchlists`, `instruments`, `latest_quotes`, `portfolio_snapshots` and `alembic_version`. The tables
+carry the checks, unique keys, foreign keys and indexes from `POSTGRES_SCHEMA_DESIGN.md`, including
+24-hex id checks, `exchange = 'NSE'`, `timestamptz(3)` and `numeric` columns. Alembic owns schema
+creation; nothing calls `create_all()` at application startup.
+
+### Authentication
+
+- `POST /api/auth/signup`, `POST /api/auth/login` and `GET /api/auth/me` read and write `users` in
+  PostgreSQL. `POST /api/auth/logout` is unchanged — it only clears the cookie.
+- Response bodies, the `{ message }` / `{ message, error }` envelopes, status codes, the rate limiter,
+  the cookie flags and the JWT claims are unchanged.
+- Ids are `secrets.token_hex(12)` — 24 lowercase hex characters, the same external shape as an
+  `ObjectId`. Book rows still key on `ObjectId(user_id)`, so a PostgreSQL id still opens the
+  Mongo-backed routes; a test goes signup → cookie → `GET /api/holdings` to prove it.
+- Duplicate signup is still rejected by pre-checks, but the `users` unique constraints close the race
+  between two concurrent requests: an `IntegrityError` maps to the same 400 `"User already exists"`.
+- bcrypt hashes stay compatible in both directions — a Node-generated hash logs in, and a Python hash
+  verifies under the npm package.
+- `/me` with a malformed id is a 404, not a 500.
+- `DATABASE_URL` is read on first use. Importing the app and calling `/api/health` need no PostgreSQL;
+  the failure surfaces on the first request that needs it. With the variable unset, the auth routes
+  answer their own 500 body and the two market routes answer the central
+  `{"message": "Something went wrong"}`.
+
+### What did not change
+
+- Only `users` is PostgreSQL-backed. `funds`, `holdings`, `positions`, `orders`, `transactions`,
+  `watchlists`, `portfolio_snapshots` and every Nova tool still use MongoDB.
+- No data was copied. There is no loader, so a user that exists only in MongoDB cannot log in, and a
+  user created after 3B1 exists only in PostgreSQL (§4).
+- The `users` table starts empty; signup is the only way a row appears.
+
+---
+
+## 3Q. Phase 3B2 — market cache moved to PostgreSQL
+
+**Goal:** move the quote cache behind `/api/market/overview`, `/api/instruments/search` and both sync
+jobs from MongoDB's `marketquotes` collection to `instruments` + `latest_quotes`, without touching the
+book tables. Runtime rules and field ownership: `MARKET_DATA_PLAN.md` §3.6.
+
+### Tables and ownership
+
+| Writer | Writes |
+|---|---|
+| `api/jobs/market_sync.py` | all **53 universe** instruments (3 indices + 50 stocks) with full quotes; owns `in_market_universe = true` |
+| `api/jobs/price_sync.py` | `ltp`, `day_change_pct`, `updated_at`, `source_time` for held/watched/open-order symbols; inserts book-only instruments (`in_market_universe = false`) |
+
+- `persist_market_quotes` upserts every universe symbol even when the provider returned nothing for it,
+  so `instruments` can hold 53 rows while `latest_quotes` holds only usable prices. That seeding is
+  deliberate and separately tested (`test_missing_provider_rows_still_seed_the_53_symbol_universe`).
+- The quote upsert never writes `sector` and never moves `instruments.updated_at`. The sector backfill
+  owns `sector`, is capped at 10 symbols per run and leaves `latest_quotes.updated_at` alone.
+- `price_sync` writes only the four price fields, so a one-minute tick cannot blank `day_change`,
+  `prev_close`, `volume`, `market_cap`, the instrument's name/kind or its universe membership.
+- `price_sync` derives both writes from one provider batch. A PostgreSQL failure is logged and does not
+  stop the MongoDB price update, the order fill or the MIS settlement.
+
+### Stale quotes
+
+`latest_quotes` keeps two timestamps apart: `updated_at` is when this service persisted the quote (the
+legacy `updatedAt`, and the source of `asOf`); `source_time` is the provider's `regularMarketTime`, or
+`NULL`.
+
+- An incoming row whose `source_time` is **older** than the stored one is dropped, so a late provider
+  response cannot overwrite a newer price.
+- A row with **no** `source_time` is applied and clears the stored `source_time`: the price is the
+  newest poll result but cannot be tied to a provider timestamp.
+- A missing, zero, negative or non-numeric price never creates or overwrites a quote. A provider
+  failure leaves the last good cache in place, so stale prices survive instead of blanking the Markets
+  page.
+
+### Reads and one approved ordering change
+
+- Both routes join `instruments` to `latest_quotes` and filter `in_market_universe = true`; a seeded
+  instrument with no quote stays invisible, which is what the Mongo cache did implicitly.
+- The wire shape is unchanged: `_id`, `symbol`, `name`, `kind`, `sector`, `ltp`, `dayChange`,
+  `dayChangePct`, `prevClose`, `volume`, `marketCap`, `createdAt`, `updatedAt`, `__v`.
+- **Visible change:** overview now returns indices in `^NSEI`, `^NSEBANK`, `^BSESN` order (any unknown
+  index first) and stocks by `symbol ASC`. Express returned MongoDB natural order, which happened to
+  follow the seed list. This is the approved decision in `POSTGRES_SCHEMA_DESIGN.md` §2.10 and §4.13,
+  because PostgreSQL has no natural order.
+- Search keeps the relevance order — exact symbol, symbol prefix, name prefix, substring, then
+  `symbol ASC`, limit 10 — and escapes `%` and `_` so the term is literal.
+
+### Verification and limits
+
+- Targeted phase suites: **163 passed** (`test_postgres_migration`, `test_postgres_models`,
+  `test_auth_routes`, `test_market`, `test_instruments`, `test_market_sync`).
+- Full suite: **358 passed, 7 skipped** with `TEST_DATABASE_URL`; **365 passed, 0 skipped** with
+  `TEST_MONGO_URL` as well. The 7 skips are the optional real-MongoDB tests.
+- The Express-vs-FastAPI **read-route parity check was not rerun** for the two market routes after the
+  backend switch, so the new ordering has not been compared side by side with Express. The Phase 4b
+  result in §3O describes the Mongo-backed implementation.
+- While Express remains runnable, its jobs still write `marketquotes`; the two caches are independent
+  and can diverge. The one-scheduler-owner rule already covers this.
+- If `DATABASE_URL` is unset or unreachable, the failure is logged and `price_sync` continues on
+  MongoDB: prices still update and orders still fill, but the canonical quote and the sector backfill
+  are skipped.
+- No loader and no `marketquotes` removal. The MongoDB cache is left in place, untouched.
+
+---
+
 ## 4. Known issues recorded
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and
@@ -1268,6 +1398,25 @@ unchanged.
 10. ~~Nova `getPositions` reported SHORT P&L with the long-side sign.~~ **Fixed in FastAPI.**
 
 Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
+
+### Introduced or exposed by the move to PostgreSQL
+
+11. **Identity is split across two databases.** `record_daily_snapshot` still enumerates
+    `db["users"]`, so a user created after Phase 3B1 never receives a daily portfolio snapshot, and a
+    user that exists only in MongoDB cannot log in because authentication reads PostgreSQL. There is no
+    loader in either direction. This must be closed before the snapshot job is trusted, and before any
+    deployment that expects existing accounts to keep working.
+12. **Two market caches exist while Express is runnable.** `server/jobs/marketSync.js` still writes
+    `marketquotes`; the FastAPI jobs write `instruments`/`latest_quotes`. They are independent. The
+    single-scheduler-owner rule keeps both from refreshing at once, but a dormant cache will go stale and
+    must not be read by anything.
+13. **Nova's watchlist tool still reads the wrong collection** (`db["watchlist"]`,
+    `api/assistant.py:227`; the real one is `watchlists`). Phase 3B2 did not touch it. It is recorded in
+    `POSTGRES_AUDIT.md` §5 issue 5 and must be fixed when watchlists migrate, or a table-for-collection
+    mapping would create a phantom table.
+14. **`DEPLOYMENT.md` is stale.** Its environment table does not list `DATABASE_URL`, does not mention
+    `DIRECT_DATABASE_URL`/`alembic upgrade head`, and still implies MongoDB alone is sufficient. The code
+    is correct; the deployment guide was outside this slice.
 
 ---
 
@@ -1359,6 +1508,17 @@ Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
 | Secret scan (Phase 4b) | **clean** — no API keys, private keys, credential URLs or JWTs in tracked files; the original `.env` values are absent; `.env` has never been committed |
 | Repository hygiene (Phase 4b) | **fixed** — `CLAUDE.md` and `.claude/launch.json` untracked (files kept on disk), `.claude/` added to `.gitignore` |
 | Application tests (Phase 4b) | **not rerun** — no application code changed, so `269 passed, 8 skipped` / `277` with `TEST_MONGO_URL` from Phase 4a stands |
+| Alembic migration (Phase 3B1) | **verified** — `alembic upgrade head` on an empty PostgreSQL 17.6 database created all 10 tables plus `alembic_version`; `alembic current` reported `0001 (head)`; the upgrade is repeatable |
+| Schema tests (Phase 3B1) | **run** — `test_postgres_migration.py` and `test_postgres_models.py` cover table/column types, checks, uniques, FKs, partial and descending indexes, id formats and the quote cascade |
+| Authentication against PostgreSQL (Phase 3B1) | **verified** — signup, login and `/me` read `users` in PostgreSQL; duplicate signup and the unique-constraint race return 400; a PostgreSQL 24-hex id still opens Mongo-backed routes; malformed id → 404; bcrypt hashes work both ways |
+| Market cache against PostgreSQL (Phase 3B2) | **verified** — 53 universe instruments seeded, usable quotes upserted, repeated syncs neither duplicate nor blank metadata, book-only instruments do not join the universe |
+| Stale-quote handling (Phase 3B2) | **verified** — an older `source_time` does not overwrite a newer quote; a missing one is applied and clears the stored value; an unusable price never creates or overwrites a row |
+| Price sync dual-write (Phase 3B2) | **verified** — one provider batch updates the Mongo `ltp`/`dayChangePct` and upserts the PostgreSQL quote; a PostgreSQL failure is logged and the Mongo fill path still completes |
+| Application tests with no database configured (Phase 3B1/3B2) | **run:** 282 passed, 83 skipped — `TEST_DATABASE_URL` unset, so every PostgreSQL-dependent test skips instead of failing |
+| Targeted phase suites (Phase 3B1/3B2) | **run:** 163 passed — `test_postgres_migration`, `test_postgres_models`, `test_auth_routes`, `test_market`, `test_instruments`, `test_market_sync` |
+| Application tests (Phase 3B1/3B2) | **run:** 358 passed, 7 skipped with `TEST_DATABASE_URL` only (the 7 are the optional real-MongoDB tests); 365 passed, 0 skipped with `TEST_MONGO_URL` too |
+| Test PostgreSQL instance (Phase 3B1/3B2) | disposable local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_phase3b_wrapup_test`; `initdb` trust auth; outside the repository |
+| Scratch databases after Phase 3B2 | **dropped** — `tradium_fastapi_phase3b_test` absent from MongoDB; `tradium_fastapi_dev` and `zerodha` untouched |
 
 ---
 
@@ -1388,7 +1548,7 @@ git remote -v                      # exactly one URL, the NEW empty repo
 git branch -a                      # main and migration/fastapi-backend
 git branch --show-current          # expect: migration/fastapi-backend
 git status --short                 # expect: empty
-git log --oneline -1               # Phase 4b commit
+git log --oneline -1               # expect: the latest Phase 3B1/3B2 commit
 
 # 4. Push the baseline and the migration branch.
 git push -u origin main
@@ -1426,6 +1586,13 @@ From `ARCHITECTURE_DECISIONS.md`:
 9. Whether the two job switches — `MARKET_SYNC_ENABLED` for the cache and `TRADING_JOBS_ENABLED` for
    order filling and snapshots — should ever both be set in one production process, and which service
    owns them once Express is retired.
+10. Where PostgreSQL runs, whether connections are pooled (PgBouncer/Neon-style) and what the pool
+    limits are. `DATABASE_URL` is pooled, `DIRECT_DATABASE_URL` is direct; no host has been chosen.
+11. **How existing data reaches PostgreSQL, and in what order.** No loader exists. Authentication is
+    already PostgreSQL-only, so the choice is either a loader for Mongo users first, or a full cutover
+    of users and book tables together. The book tables have not been migrated at all.
+12. When Express's `marketquotes` cache is retired. It is still written by the Express jobs and must not
+    be read once the FastAPI service is the only backend.
 
 ---
 
@@ -1442,7 +1609,8 @@ From `ARCHITECTURE_DECISIONS.md`:
   (`POST /api/assistant/chat`, `POST /api/assistant/insight`, `POST /api/assistant/briefing`).
 - The per-minute `priceSync`, `settleMisExit` and the daily `portfolioSnapshot` **are ported**, but both
   schedulers are **off by default**; neither was enabled against any deployment, so the FastAPI app does
-  not refresh prices or fill orders on its own yet.
+  not refresh prices or fill orders on its own yet. `price_sync` now also upserts the PostgreSQL quote,
+  and both schedulers fall back to `DATABASE_URL` at tick time rather than at startup.
 - No exchange holiday calendar, no staleness cutoff on quotes (deliberate — see §3I), and no auto
   square-off of open MIS positions at the close (Express has none).
 - No WebSocket, streaming, or push channel **in the application**: no socket is opened at runtime and
@@ -1460,7 +1628,19 @@ From `ARCHITECTURE_DECISIONS.md`:
   with an SPA fallback (Phase 4a), but no service was deployed.
 - No change to `server/` or the original repository; `src/` changed only for the API origin and the
   signup call (§3L).
-- No database migration, schema change, or write to the application database.
+- **Schema created on a disposable test cluster only.** `alembic upgrade head` was applied to
+  `tradium_phase3b_wrapup_test` on a local PostgreSQL 17.6 instance. No production database was
+  contacted, no developer PostgreSQL database was written, and no data was copied from MongoDB.
+- No PostgreSQL reads or writes for `funds`, `holdings`, `positions`, `orders`, `transactions`,
+  `watchlists` or `portfolio_snapshots`, even though the tables exist. Those routes and the Nova tools
+  remain MongoDB-only.
+- No one-shot data loader and no dual-read/dual-write for book data. Users and the market cache are the
+  only PostgreSQL-backed surfaces.
+- No `marketquotes` backfill, drop or retirement, and no Express scheduler change. Express remains
+  runnable and still writes its own cache.
+- No parity rerun for the two PostgreSQL-backed read routes (`/api/market/overview`,
+  `/api/instruments/search`) after the move; their new ordering is approved but not compared live
+  against Express.
 - No Render service created, modified, or deployed.
 - No change to the original repository's history, branch, remotes, or working tree.
 - No merge of `migration/fastapi-backend` into `main`.
@@ -1470,53 +1650,28 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 4b complete (final pre-deployment readiness review). Awaiting review.** The last open parity
-rows for the ordinary read routes are now closed (byte-identical to Express), the tracked files are
-secret-free, and the deployment guide matches the implementation. The codebase is ready to publish to a
-new private repository and to deploy as a separate service once a remote and a platform are chosen.
+**Phase 3B1 and 3B2 complete. Awaiting review.** The approved schema is under Alembic, authentication
+reads and writes PostgreSQL, and the market cache lives in `instruments` / `latest_quotes` with
+`price_sync` dual-writing the Mongo price and the canonical quote. With a disposable PostgreSQL 17.6
+cluster the suite reports **358 passed, 7 skipped** (`TEST_DATABASE_URL` alone) and **365 passed, 0
+skipped** (`TEST_MONGO_URL` too). The branch is still local-only; nothing was deployed.
 
-Open items:
+Recommended next: **Phase 3B3 — the book tables and the load path.** Not started and not approved; the
+order below is a recommendation, not a decision.
 
-0. **Nova is ported and verified** (§3M): chat, insight and briefing routes stream with the same
-   protocols as Express, the six tools return request-scoped data, and four Express tool defects were
-   fixed deliberately with tests. The step cap is configured but not adversarially probed, and there
-   is no provider retry policy.
-0b. **The build is servable** (§3N): static serving matches Express (on with `NODE_ENV=production`,
-   overridable with `SERVE_STATIC`), deep links and refreshes return the app shell, and `/api` is never
-   shadowed. The one divergence is that a missing asset returns a JSON 404 instead of the shell.
-0c. **Read-route parity is closed** (§3O): orders, watchlist, positions, funds, funds/transactions,
-   portfolio/history, market/overview and instruments/search are byte-identical to Express on the same
-   seeded data. Only the Yahoo-backed instrument routes (row 1I.36), the cron schedule and the central
-   error handler remain outside the harness.
+1. **Close the identity split first** (§4 item 11). Enumerate PostgreSQL users in the daily snapshot job,
+   and decide the loader/cutover order for accounts that exist only in MongoDB. Until then a new signup
+   gets no snapshot and an old account cannot log in.
+2. **Move the book tables** — `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists` —
+   into the tables that already exist, starting with reads and keeping one owner per write path.
+3. **Write the one-shot Mongo → PostgreSQL loader**, with counts and checksums, and retire
+   `marketquotes` at the same time.
+4. **Rerun the Express-vs-FastAPI read-route harness**, including `/api/market/overview` and
+   `/api/instruments/search`, before any cutover. Their new ordering is approved but has not been
+   compared live.
+5. **Update `DEPLOYMENT.md`** with `DATABASE_URL`, `DIRECT_DATABASE_URL`, the `alembic upgrade head`
+   step and the chosen pool limits.
 
-1. **The harness blocker is gone.** `tools/express-parity/` compares auth cookies, `GET /api/holdings`
-   JSON, the three jobs and now the ordinary read-route bodies against the real Express modules without
-   booting the app or touching real data (§3K, §3O).
-2. **Quotes are not age-checked.** Missing, non-numeric, zero and negative prices are rejected; a
-   quote that is minutes old is accepted, because a cutoff would have rejected a legitimately current
-   `^BSESN` quote (§3I). Whether to add one — and at what threshold — is a decision, not a bug fix.
-3. **Nothing is scheduled by default.** Enabling the cache is `MARKET_SYNC_ENABLED=true`; enabling
-   order filling and the daily snapshot is `TRADING_JOBS_ENABLED=true`, each on exactly one process.
-   Until then prices only move through the write routes and the cache only fills by calling
-   `market_sync` manually.
-4. **Numeric rendering is closed** (§3E, §3K): whole floats differ only in their JSON spelling and no
-   client can observe it. The residual `int32` vs `double` type difference on the two snapshot MIS
-   fields is recorded, not fixed.
-5. **Cookie parity is closed** (§3K): identical `Max-Age`, `Path`, `HttpOnly`, `SameSite`, `Secure`,
-   deletion on logout and JWT claims; only `Expires` presence, attribute order and the empty-value
-   quoting differ. Cross-app cookie validation still needs the same `JWT_SECRET` as Express.
-6. **The local cutover is complete** (§3L): CORS works with credentials, signup/login/reload/logout and
-   all six dashboard pages were exercised in a browser against a live FastAPI process, and the signup
-   caller now sends `{ username, email, password }`.
-7. **Publication and deployment are the remaining actions.** The repository has no remote and `gh` is
-   not installed (§6.1), so publication is a manual step. The FastAPI service is unbuilt on any host;
-   [DEPLOYMENT.md](./DEPLOYMENT.md) records the build/start commands, the required environment
-   variables, scheduler ownership and the HTTPS requirement for the `Secure` cookie.
-8. Recommended next, in order:
-   1. Publish the branch to a new private GitHub repository (§6.1) — no code change needed.
-   2. A deliberate deployment: a separate Render service (or equivalent) with `MONGO_URL`,
-      `JWT_SECRET`, `GOOGLE_GENERATIVE_AI_API_KEY`, `NODE_ENV=production` and HTTPS, then flip the
-      scheduler switches and the rollback target by explicit decision.
-   3. A step-cap probe and a live provider-error probe to close the two `PARTIAL` rows in
-      `AI_INTEGRATION_PLAN.md` §11, if wanted.
-   4. Any remaining Express-defect decisions (orders debit/refund, `settleMisExit` partial fill).
+Deferred, unchanged: WebSockets/streaming, an exchange holiday calendar, a quote-age cutoff, the
+remaining Express-defect fixes (orders debit/refund, `settleMisExit` partial fill), and publication to a
+remote (§6.1).

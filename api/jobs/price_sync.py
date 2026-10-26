@@ -18,18 +18,24 @@ than inferred:
 fills, exactly as the orders route does. MIS exits go through ``settle_mis_exit``
 instead, and every filled exit cancels its still-open siblings (OCO).
 
-The provider is called once per distinct symbol, sequentially, matching
-Express's loop. No test touches the network: the seam is patched.
+The provider is called once for the whole batch of distinct symbols. No test
+touches the network: the seam is patched.
 """
 
 import logging
+import math
 import threading
 
 from pymongo import ReturnDocument
 
 from ..documents import inc_funds, utcnow
-from ..market_data import MarketDataError, fetch_quote, fetch_sector
+from ..market_data import MarketDataError, fetch_quotes, fetch_sector, ticker_for
 from ..market_hours import is_market_open
+from ..market_store import (
+    backfill_sectors as backfill_instrument_sectors,
+    instrument_sectors,
+    persist_price_quotes,
+)
 from ..order_engine import apply_fill, cancel_sibling_exits, settle_mis_exit
 
 logger = logging.getLogger(__name__)
@@ -39,7 +45,30 @@ logger = logging.getLogger(__name__)
 _sync_lock = threading.Lock()
 
 
-def sync_prices(db):
+def _quote_from_row(row):
+    """Reduce a raw Yahoo row to ``{"ltp", "dayChangePct"}``, or ``None``.
+
+    Mirrors ``fetch_quote``'s validation: a missing, zero, negative or
+    non-numeric price means "no usable quote", and a bad percentage becomes 0.
+    """
+    price = row.get("regularMarketPrice")
+    if not _is_usable_number(price) or price <= 0:
+        return None
+
+    change_pct = row.get("regularMarketChangePercent")
+    if not _is_usable_number(change_pct):
+        change_pct = 0
+    return {"ltp": price, "dayChangePct": change_pct}
+
+
+def _is_usable_number(value):
+    """True for a real number, excluding ``bool`` and ``NaN``/``inf``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
+
+
+def sync_prices(db, session_factory=None):
     """One scheduled tick, gated on market hours, like ``syncPrices()``."""
     # Yahoo quotes don't move while the market is closed, so syncing is wasted
     # calls. Open limit orders wait for the next open market.
@@ -51,15 +80,20 @@ def sync_prices(db):
         return
 
     try:
-        run_sync(db)
+        run_sync(db, session_factory)
     except Exception:  # noqa: BLE001 - an unhandled error would kill the thread
         logger.exception("Price sync failed")
     finally:
         _sync_lock.release()
 
 
-def run_sync(db):
-    """One full price/fill cycle. Exposed separately so tests can skip the gate."""
+def run_sync(db, session_factory=None):
+    """One full price/fill cycle. Exposed separately so tests can skip the gate.
+
+    When a PostgreSQL session factory is supplied, the canonical quote state is
+    refreshed too. The book/order path stays MongoDB-backed and keeps using the
+    in-memory provider batch, so fills do not depend on that write succeeding.
+    """
     holdings = list(db["holdings"].find({}))
     positions = list(db["positions"].find({}))
     watchlist = list(db["watchlists"].find({}))
@@ -69,15 +103,57 @@ def run_sync(db):
     # One quote per symbol+exchange, in first-seen order (holdings, positions,
     # watchlist, open orders), exactly like the Express Map.
     symbols = {}
+    names = {}
     for document in [*holdings, *positions, *watchlist, *open_orders]:
         key = f"{document['symbol']}-{document['exchange']}"
         symbols[key] = {"symbol": document["symbol"], "exchange": document["exchange"]}
+        names.setdefault(document["symbol"], document.get("name") or document["symbol"])
+
+    # One batched request for every distinct Yahoo ticker. A provider failure
+    # leaves the stored prices alone, just as a per-symbol failure did.
+    tickers = list(dict.fromkeys(ticker_for(item["symbol"]) for item in symbols.values()))
+    rows = {}
+    if tickers:
+        try:
+            rows = fetch_quotes(tickers)
+        except MarketDataError as err:
+            logger.error("Price fetch failed, keeping stored prices: %s", err)
 
     quotes = {}
     for key, item in symbols.items():
-        quote = fetch_quote(item["symbol"])
-        if quote:
-            quotes[key] = quote
+        ticker = ticker_for(item["symbol"])
+        row = rows.get(ticker)
+        if row is None:
+            continue
+        quote = _quote_from_row(row)
+        if quote is None:
+            logger.error("No price returned for %s, skipping", ticker)
+            continue
+        quotes[key] = quote
+
+    # The canonical PostgreSQL quote is written from the same provider batch.
+    # A persistence failure must not stop the MongoDB price/fill cycle.
+    if session_factory is not None and quotes:
+        entries = []
+        for key, item in symbols.items():
+            if key not in quotes:
+                continue
+            ticker = ticker_for(item["symbol"])
+            row = rows.get(ticker)
+            if row is None:
+                continue
+            entries.append(
+                {
+                    "symbol": item["symbol"],
+                    "name": names.get(item["symbol"], item["symbol"]),
+                    "kind": "stock",
+                    "row": row,
+                }
+            )
+        try:
+            persist_price_quotes(session_factory, entries)
+        except Exception:  # noqa: BLE001 - Mongo book updates still proceed
+            logger.exception("PostgreSQL quote persistence failed")
 
     for holding in holdings:
         quote = quotes.get(f"{holding['symbol']}-{holding['exchange']}")
@@ -118,28 +194,35 @@ def run_sync(db):
             },
         )
 
-    # Sectors last -- this call is slow and only runs for holdings that have
-    # none yet. A symbol Yahoo has no profile for is retried on a later run.
-    sectors_filled = 0
-    for holding in holdings:
-        if holding.get("sector"):
-            continue
+    # Sectors live on PostgreSQL instruments now. This call is slow and only
+    # runs for stocks without one. Holdings still display a stored Mongo
+    # sector until that collection migrates, so the resolved value is mirrored
+    # onto an empty holding as a temporary read projection.
+    if session_factory is not None:
         try:
-            sector = fetch_sector(holding["symbol"])
-        except MarketDataError as err:
-            # Express's fetchSector catches its own failure and returns "";
-            # here the error surfaces, so it is logged and treated the same.
-            logger.error("Sector fetch failed for %s: %s", holding["symbol"], err)
-            continue
-        if not sector:
-            continue
-        db["holdings"].update_one(
-            {"_id": holding["_id"]},
-            {"$set": {"sector": sector, "updatedAt": utcnow()}},
-        )
-        sectors_filled += 1
-    if sectors_filled > 0:
-        logger.info("Sector backfill: %s holdings updated", sectors_filled)
+            sectors_filled = backfill_instrument_sectors(
+                session_factory, fetch_sector
+            )
+            if sectors_filled:
+                logger.info(
+                    "Sector backfill: %s instruments updated", sectors_filled
+                )
+
+            sectors = instrument_sectors(
+                session_factory, [holding["symbol"] for holding in holdings]
+            )
+            for holding in holdings:
+                if holding.get("sector"):
+                    continue
+                sector = sectors.get(holding["symbol"])
+                if not sector:
+                    continue
+                db["holdings"].update_one(
+                    {"_id": holding["_id"], "sector": ""},
+                    {"$set": {"sector": sector, "updatedAt": utcnow()}},
+                )
+        except Exception:  # noqa: BLE001 - sector metadata is not a fill blocker
+            logger.exception("PostgreSQL sector backfill failed")
 
     filled_count = 0
     for order in open_orders:

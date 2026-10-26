@@ -34,6 +34,7 @@ from .jobs.market_sync import market_sync
 from .jobs.portfolio_snapshot import record_daily_snapshot
 from .jobs.price_sync import sync_prices
 from .market_hours import IST
+from .postgres.session import get_session_factory
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +76,10 @@ def seconds_until_snapshot(hour=SNAPSHOT_HOUR_IST, now=None):
 class MarketSyncScheduler:
     """Runs ``market_sync`` every five minutes until stopped."""
 
-    def __init__(self, db, interval_seconds=SYNC_INTERVAL_SECONDS):
+    def __init__(self, db, interval_seconds=SYNC_INTERVAL_SECONDS, session_factory=None):
         self.db = db
         self.interval_seconds = interval_seconds
+        self.session_factory = session_factory
         self._stop = threading.Event()
         self._thread = None
 
@@ -104,7 +106,8 @@ class MarketSyncScheduler:
 
     def _tick(self):
         try:
-            market_sync(self.db)
+            factory = self.session_factory or get_session_factory()
+            market_sync(factory)
         except Exception:  # noqa: BLE001 - keep the thread alive
             logger.exception("Market sync tick failed")
 
@@ -116,9 +119,10 @@ class PriceSyncScheduler:
     IST costs nothing and no order is filled.
     """
 
-    def __init__(self, db, interval_seconds=PRICE_SYNC_INTERVAL_SECONDS):
+    def __init__(self, db, interval_seconds=PRICE_SYNC_INTERVAL_SECONDS, session_factory=None):
         self.db = db
         self.interval_seconds = interval_seconds
+        self.session_factory = session_factory
         self._stop = threading.Event()
         self._thread = None
 
@@ -144,7 +148,16 @@ class PriceSyncScheduler:
 
     def _tick(self):
         try:
-            sync_prices(self.db)
+            factory = self.session_factory
+            if factory is None:
+                try:
+                    factory = get_session_factory()
+                except Exception:  # noqa: BLE001 - Mongo prices can still refresh
+                    logger.exception(
+                        "PostgreSQL is not configured; price sync will skip "
+                        "canonical quote updates"
+                    )
+            sync_prices(self.db, factory)
         except Exception:  # noqa: BLE001 - keep the thread alive
             logger.exception("Price sync tick failed")
 
