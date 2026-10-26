@@ -18,13 +18,13 @@ snapshot archive, and Nova's other tools are still MongoDB-backed.
 
 | Item | Value |
 |---|---|
-| Phase | 3C1 — portfolio snapshots on PostgreSQL |
+| Phase | 3C2-B — the remaining trading-book readers on PostgreSQL |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
 | PostgreSQL schema | **created by Alembic** — `api/migrations/versions/0001_initial_schema.py` creates all 10 tables (`users`, `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists`, `instruments`, `latest_quotes`, `portfolio_snapshots`) plus `alembic_version`; verified by `alembic upgrade head` on a disposable PostgreSQL 17.6 cluster |
-| PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3), **price sync's watchlist symbols** (Phase 3B3.1), **Nova's `getWatchlist`** (Phase 3B3.1) and **portfolio snapshots** (`portfolio_snapshots`, Phase 3C1) |
-| MongoDB-backed surfaces | **book data, the retired snapshot archive and the other AI tools** — holdings, positions, orders, funds, transactions, the old `portfoliosnapshots` documents (read-only archive), and Nova's other reads |
+| PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3), **price sync's watchlist symbols** (Phase 3B3.1), **Nova's `getWatchlist`** (Phase 3B3.1), **portfolio snapshots** (`portfolio_snapshots`, Phase 3C1), the **whole trading book** (`funds`, `holdings`, `positions`, `orders`, `transactions`, Phase 3C2) and its **remaining readers** — the live portfolio point, the daily snapshot's book read and Nova's five book tools (Phase 3C2-B) |
+| MongoDB-backed surfaces | **none in either FastAPI app** — only the `db.connect()` startup wiring, unused `db` parameters on the market/price schedulers and the insight/briefing routes, and the Express reference in `server/` remain |
 | Market cache | `instruments` + `latest_quotes` in PostgreSQL; market sync seeds the **53-symbol universe**; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
-| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices, upserts the canonical PostgreSQL quote and reads watchlist symbols from PostgreSQL) and the daily 18:00 IST snapshot, which enumerates users from PostgreSQL, reads holdings/positions from MongoDB and upserts `portfolio_snapshots` in PostgreSQL; **off unless `TRADING_JOBS_ENABLED` is set** |
+| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices, upserts the canonical PostgreSQL quote and reads watchlist symbols from PostgreSQL) and the daily 18:00 IST snapshot, which enumerates users from PostgreSQL, reads holdings/positions from PostgreSQL and upserts `portfolio_snapshots` in PostgreSQL; **off unless `TRADING_JOBS_ENABLED` is set** |
 | Known transition gaps | there is no automatic MongoDB → PostgreSQL loader for users, watchlists or snapshots, so pre-migration rows stay invisible and portfolio history only shows snapshots written after Phase 3C1 |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | **switched** to FastAPI on `localhost:8000`; a production build is now **served by FastAPI** (SPA fallback) when `SERVE_STATIC`/`NODE_ENV=production`; `VITE_API_URL` still overrides |
@@ -42,8 +42,8 @@ snapshot archive, and Nova's other tools are still MongoDB-backed.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **373 passed, 7 skipped** with only `TEST_DATABASE_URL`; **380 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3C1) — see §5 |
-| PostgreSQL test instance | PostgreSQL 17.6, disposable local cluster on a temporary path, database `tradium_phase3c1_test`; scoped to this run and outside the repository |
+| Tests executed | **405 passed, 7 skipped** with only `TEST_DATABASE_URL`; **412 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3C2-B) — see §5 |
+| PostgreSQL test instance | PostgreSQL 17.6, local cluster on `127.0.0.1:5433`, database `tradium_phase3c2b_test`; scoped to this run and outside the repository |
 | Express parity check | **run (Phase 2e)** — cookies, numeric rendering and the non-snapshot job side effects; **no functional difference** (§3K). The snapshot job and portfolio history were removed from the harness in Phase 3C1 because they no longer share a database |
 | Read-route parity check | **run (Phase 4b)** — byte-identical for the Mongo-backed read routes at the time; **not rerun since the PostgreSQL moves** (§3Q), and `portfolio/history` is no longer in the harness |
 | Repository secret scan | **clean (Phase 4b/3B2)** — no credentials, API keys, private keys or `.env` files in tracked files; the PostgreSQL docs contain placeholders only |
@@ -1631,6 +1631,51 @@ MongoDB book collections once no reader remains.
 
 ---
 
+## 3W. Phase 3C2-B — the remaining trading-book readers on PostgreSQL
+
+The live portfolio point, the daily snapshot's book read and Nova's five book tools
+(`getPortfolioSummary`, `getHoldings`, `getPositions`, `getFunds`, `getOrders`) now read
+PostgreSQL. They were the last FastAPI readers of the MongoDB book collections.
+
+### What changed
+
+- `api/trading_book.py` gained three shared read helpers — `holding_rows()`, `position_rows()`
+  and `portfolio_totals()` — that return Mongoose-named dicts with `Decimal` values and join
+  `latest_quotes` for `ltp`/`dayChangePct` (`0` when a symbol has no quote). The chart, the
+  snapshot job and Nova all call them, so the three cannot drift apart.
+- `GET /api/portfolio/history`'s live today point and `api/jobs/portfolio_snapshot.py` both call
+  `portfolio_totals(session, user_id)`. The route still returns plain JSON numbers, an empty book
+  still yields zeros, and the today label is still the IST day.
+- Nova's `*_snapshot()` helpers take `(user_id, session_factory=None)` like `watchlist_snapshot`,
+  `NovaDeps` is now only `user_id`, and the chat route no longer needs a Mongo `db`, so a chat
+  turn without a tool call does not open PostgreSQL.
+- `api/portfolio_math.py`'s `mis_components()` now does `Decimal` arithmetic, because its inputs
+  are `Numeric` columns; the values it returns are unchanged.
+- `record_daily_snapshot()` and `PortfolioSnapshotScheduler` dropped their unused `db` parameter.
+
+### Verification and limits
+
+- Focused: **18 passed** (`test_portfolio.py`, `test_portfolio_snapshot.py`) after the
+  portfolio/snapshot batch, then **17 passed** (`test_assistant.py`,
+  `test_assistant_trading_book.py`) after the Nova batch.
+- Full suite: **405 passed, 7 skipped** with `TEST_DATABASE_URL` only (the 7 are the optional
+  real-MongoDB tests); **412 passed, 0 skipped** with `TEST_MONGO_URL` too.
+  `python -m compileall -q api` is clean.
+- No FastAPI code reads a MongoDB book collection any more: searching `api/` outside the tests
+  and migrations for `get_collection`, `db[` and `portfoliosnapshots` finds nothing.
+- Still on MongoDB, deliberately: the `db.connect()` startup wiring and `app.state.db` (a missing
+  `MONGO_URL` still stops startup), the unused `db` parameters on `MarketSyncScheduler`,
+  `PriceSyncScheduler` and the insight/briefing routes, and the Express reference in `server/`.
+- `test_mongo_integration.py` kept its `TEST_MONGO_URL` gate even though it no longer reads book
+  collections, so the PostgreSQL-only skip count stays at 7.
+
+### Next
+
+Nothing in FastAPI still reads the MongoDB book. Retiring the collection and the `db` plumbing
+needs a loader decision for data that exists only in MongoDB (§4, item 11) and is a separate phase.
+
+---
+
 ## 4. Known issues recorded
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and
@@ -1799,6 +1844,9 @@ Items 5–8 are still reproduced as-is; fix separately with approval (AD-9).
 | Application tests (Phase 3C1) | **run:** 373 passed, 7 skipped with `TEST_DATABASE_URL` only; 380 passed, 0 skipped with `TEST_MONGO_URL` too; focused snapshot/portfolio/integration run **25 passed** |
 | Test PostgreSQL instance (Phase 3C1) | disposable local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_phase3c1_test`; `initdb` trust auth; outside the repository; dropped after the run |
 | Express parity harness after the snapshot move (Phase 3C1) | **updated, not rerun** — `recordDailySnapshot`/`record_daily_snapshot` and the `portfoliosnapshots` dump were removed, and `portfolio/history` was removed from the route list, because FastAPI now uses PostgreSQL for both |
+| Application tests (Phase 3C2-B) | **run:** 405 passed, 7 skipped with `TEST_DATABASE_URL` only; 412 passed, 0 skipped with `TEST_MONGO_URL` too; focused runs **18 passed** (portfolio + snapshot) and **17 passed** (assistant + Nova book tools) |
+| MongoDB book readers after Phase 3C2-B | **none** — searching `api/` outside tests and migrations for `get_collection`, `db[` and `portfoliosnapshots` returns nothing; the live portfolio point, snapshot job and Nova's five tools all read PostgreSQL |
+| Test PostgreSQL instance (Phase 3C2-B) | local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_phase3c2b_test`; `initdb` trust auth; outside the repository |
 
 ---
 
@@ -1930,17 +1978,16 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phases 3B1–3C1 are complete and awaiting review.** Authentication, the market cache, watchlists,
-price-sync watchlist symbols, Nova's `getWatchlist` and portfolio snapshots are PostgreSQL-backed. The
-suite reports **373 passed, 7 skipped** (`TEST_DATABASE_URL` alone) and **380 passed, 0 skipped** with
-`TEST_MONGO_URL` too. The branch is still local-only; nothing was deployed.
+**Phases 3B1–3C2-B are complete and awaiting review.** Authentication, the market cache, watchlists,
+price-sync watchlist symbols, Nova's `getWatchlist`, portfolio snapshots and the whole trading book —
+including its last readers — are PostgreSQL-backed. The suite reports **405 passed, 7 skipped**
+(`TEST_DATABASE_URL` alone) and **412 passed, 0 skipped** with `TEST_MONGO_URL` too. The branch is
+still local-only; nothing was deployed.
 
-Recommended next: **Phase 3C2 — the whole trading book in one cutover** (§3T). `funds`, `holdings`,
-`positions`, `orders` and `transactions` are one write graph and must move together with the loader and
-the `POSTGRES_SCHEMA_DESIGN.md` §6 transaction boundaries. Do not move them separately.
-
-Keep the MongoDB `portfoliosnapshots` collection as the rollback copy until acceptance; PostgreSQL
-history intentionally starts from the first post-3C1 snapshot (§3U).
+Recommended next: **retire the MongoDB `db` plumbing** (startup connection, `app.state.db`, the unused
+scheduler and insight/briefing parameters) together with a decision on moving data that exists only in
+MongoDB (§4, item 11). Keep the MongoDB `portfoliosnapshots` collection as the rollback copy until
+acceptance; PostgreSQL history intentionally starts from the first post-3C1 snapshot (§3U).
 
 Still required before any cutover that includes existing data: the MongoDB → PostgreSQL loader for users
 and watchlists (§4 item 11), and the reconciliation gates in `POSTGRES_SCHEMA_DESIGN.md` §9.6.

@@ -88,8 +88,28 @@ Backend:
   production build at a deployed backend.
 
 ## Testing
-- Manual testing via the UI; no automated test suite yet
-- `npm run lint` should pass; check the browser console for warnings
+- Backend: `python -m pytest -q` from the repo root.
+  - Set `TEST_DATABASE_URL` first. It must name a disposable PostgreSQL database
+    ending in `_test`; the suite runs `alembic upgrade head` against it. With it
+    unset every PostgreSQL test skips instead of failing.
+  - Set `TEST_MONGO_URL` too to also run the optional real-MongoDB tests, which
+    otherwise skip.
+  - Never point the tests at `DATABASE_URL` or at a database with real data.
+- Frontend: no automated suite; verify manually in the browser.
+- `npm run lint` should pass; check the browser console for warnings.
+
+### Batch implementation and testing by coherent functionality
+- Split migration work into batches that each touch one coherent feature area —
+  for example portfolio reads and the snapshot job first, then the assistant
+  tools, then any remaining readers.
+- Implement a batch, then immediately run the focused tests for that area and
+  fix the failures before starting the next batch. Don't stack a second batch on
+  a red suite.
+- After the final batch run the **full** suite with both `TEST_DATABASE_URL` and
+  `TEST_MONGO_URL`, plus `python -m compileall -q api` and a grep proving no
+  reads of a migrated collection remain.
+- Batch gates are checkpoints, not a replacement for the full run. Record the
+  focused and full totals in `docs/migration/MIGRATION_STATUS.md`.
 
 ## Workflow
 1. `npm install` in the root and in `server/`
