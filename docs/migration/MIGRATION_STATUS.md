@@ -1,13 +1,13 @@
 # Migration Status
 
-**Last updated:** 2026-10-26 (Phase 3B3.1)
-**Current phase:** **Phase 3B3.1 — PostgreSQL watchlist consumers**
-**Application code modified:** **Yes.** Phase 3B1 moved authentication to PostgreSQL; Phase 3B2 moved
-the market cache there and made `price_sync` a dual writer; Phase 3B3 moved watchlists there and made
-the daily snapshot enumerate users from PostgreSQL; Phase 3B3.1 moved price sync and Nova's watchlist
-tool onto the same table. `server/` and the original repository remain untouched. Holdings, positions,
-orders, funds, transactions, the snapshot documents themselves, and Nova's other tools are still
-MongoDB-backed.
+**Last updated:** 2026-10-26 (Phase 3B4 audit)
+**Current phase:** **Phase 3B4 — trading-book dependency audit (recommendation only)**
+**Application code modified:** **Yes, up to Phase 3B3.1; no code change in 3B4.** Phase 3B1 moved
+authentication to PostgreSQL; Phase 3B2 moved the market cache there and made `price_sync` a dual
+writer; Phase 3B3 moved watchlists there and made the daily snapshot enumerate users from PostgreSQL;
+Phase 3B3.1 moved price sync and Nova's watchlist tool onto the same table. `server/` and the original
+repository remain untouched. Holdings, positions, orders, funds, transactions, the snapshot documents
+themselves, and Nova's other tools are still MongoDB-backed.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -17,7 +17,7 @@ MongoDB-backed.
 
 | Item | Value |
 |---|---|
-| Phase | 3B3.1 — PostgreSQL watchlist consumers |
+| Phase | 3B4 — trading-book dependency audit (recommendation only) |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
 | PostgreSQL schema | **created by Alembic** — `api/migrations/versions/0001_initial_schema.py` creates all 10 tables (`users`, `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists`, `instruments`, `latest_quotes`, `portfolio_snapshots`) plus `alembic_version`; verified by `alembic upgrade head` on a disposable PostgreSQL 17.6 cluster |
 | PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3), the **snapshot user list** (Phase 3B3), **price sync's watchlist symbols** (Phase 3B3.1) and **Nova's `getWatchlist`** (Phase 3B3.1) |
@@ -1439,6 +1439,46 @@ No other collection or tool moved.
 
 ---
 
+## 3T. Phase 3B4 — trading-book dependency audit (no code change)
+
+**Goal:** find the smallest next migration slice among the remaining MongoDB-backed book data without
+creating a split source of truth. The audit read the routes, `order_engine.py`, both jobs, the snapshot
+math, Nova's tools, the tests and the Express-parity harness. Nothing was migrated.
+
+### Coupling found
+
+The five book collections form one write graph. Every collection is written by a flow that also writes
+at least one other:
+
+| Collection | Written by | Also writes |
+|---|---|---|
+| `funds` | placement debit, cancel refund, fill/settlement credit, sibling refund, square-off, deposit/withdrawal, first `GET /funds` | `orders`, `holdings`/`positions`, `transactions` |
+| `holdings` | CNC fills, `price_sync` price refresh | `funds`, `transactions`, `orders` (on a failed sell) |
+| `positions` | MIS fills, MIS exit settlement, square-off, `price_sync` price refresh | `funds`, `transactions`, `orders` |
+| `orders` | placement, fills, exits, cancel, set-exits, square-off, `price_sync` claim | `funds`, `holdings`, `positions`, `transactions` |
+| `transactions` | deposit/withdrawal, CNC sell, MIS exit, square-off | `funds`, `holdings`/`positions`, `orders` |
+
+`portfoliosnapshots` is the exception: the daily job is its only writer, it is derived only from
+holdings and positions, and the history route is its only reader. No trading flow reads it.
+
+### Conclusion
+
+There is **no safe subset** of `funds`, `holdings`, `positions`, `orders`, `transactions`. Moving any one
+of them would make a single fill, cancel or square-off write across MongoDB and PostgreSQL with no shared
+transaction, which is exactly the inconsistency this migration must avoid. A dual write is not a fix;
+`POSTGRES_SCHEMA_DESIGN.md` §9.1 already rules it out.
+
+**Recommended next slice — Phase 3C1: snapshot persistence.** Move `portfoliosnapshots` to
+`portfolio_snapshots` and read history from PostgreSQL while the live point still comes from MongoDB.
+It is one-way derived data, so a failure or rollback cannot corrupt cash, holdings or orders. It also
+completes the Phase 3B3 identity work, because the job already enumerates PostgreSQL users.
+
+**Then Phase 3C2: the whole trading book in one cutover.** `funds`, `holdings`, `positions`, `orders`
+and `transactions` must move together, behind the transaction boundaries in
+`POSTGRES_SCHEMA_DESIGN.md` §6.2–§6.10 and the one-shot loader in §9.
+
+---
+
 ## 4. Known issues recorded
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and
@@ -1726,27 +1766,22 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phase 3B1 and 3B2 complete. Awaiting review.** The approved schema is under Alembic, authentication
-reads and writes PostgreSQL, and the market cache lives in `instruments` / `latest_quotes` with
-`price_sync` dual-writing the Mongo price and the canonical quote. With a disposable PostgreSQL 17.6
-cluster the suite reports **358 passed, 7 skipped** (`TEST_DATABASE_URL` alone) and **365 passed, 0
-skipped** (`TEST_MONGO_URL` too). The branch is still local-only; nothing was deployed.
+**Phases 3B1–3B3.1 are complete and awaiting review; Phase 3B4 was an audit only.** Authentication, the
+market cache, watchlists, price-sync watchlist symbols and Nova's `getWatchlist` are PostgreSQL-backed.
+The suite reports **373 passed, 7 skipped** (`TEST_DATABASE_URL` alone) and **380 passed, 0 skipped**
+with `TEST_MONGO_URL` too. The branch is still local-only; nothing was deployed.
 
-Recommended next: **Phase 3B3 — the book tables and the load path.** Not started and not approved; the
-order below is a recommendation, not a decision.
+Recommended next: **Phase 3C1 — snapshot persistence** (§3T). It is the only remaining slice that can
+move alone without splitting a write path. Not started and not approved.
 
-1. **Close the identity split first** (§4 item 11). Enumerate PostgreSQL users in the daily snapshot job,
-   and decide the loader/cutover order for accounts that exist only in MongoDB. Until then a new signup
-   gets no snapshot and an old account cannot log in.
-2. **Move the book tables** — `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists` —
-   into the tables that already exist, starting with reads and keeping one owner per write path.
-3. **Write the one-shot Mongo → PostgreSQL loader**, with counts and checksums, and retire
-   `marketquotes` at the same time.
-4. **Rerun the Express-vs-FastAPI read-route harness**, including `/api/market/overview` and
-   `/api/instruments/search`, before any cutover. Their new ordering is approved but has not been
-   compared live.
-5. **Update `DEPLOYMENT.md`** with `DATABASE_URL`, `DIRECT_DATABASE_URL`, the `alembic upgrade head`
-   step and the chosen pool limits.
+1. Move the daily snapshot upsert to `portfolio_snapshots` and read `/api/portfolio/history` from it;
+   keep the live "today" point reading MongoDB holdings/positions until Phase 3C2.
+2. Keep the MongoDB `portfoliosnapshots` collection as the rollback copy until acceptance.
+3. Do not move `funds`, `holdings`, `positions`, `orders` or `transactions` separately. They are one write
+   graph and belong to a single Phase 3C2 cutover with the loader and the §6 transaction boundaries.
+
+Still required before any cutover that includes existing data: the MongoDB → PostgreSQL loader for users
+and watchlists (§4 item 11), and the reconciliation gates in `POSTGRES_SCHEMA_DESIGN.md` §9.6.
 
 Deferred, unchanged: WebSockets/streaming, an exchange holiday calendar, a quote-age cutoff, the
 remaining Express-defect fixes (orders debit/refund, `settleMisExit` partial fill), and publication to a
