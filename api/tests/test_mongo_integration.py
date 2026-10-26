@@ -8,9 +8,13 @@ Skipped unless TEST_MONGO_URL is set. Example:
 The database name must end with "_test" so this can never touch the live
 `zerodha` database. The test writes only to its own database and drops it
 afterwards.
+
+The scheduled-job test also needs TEST_DATABASE_URL, because the daily
+snapshot now enumerates users from PostgreSQL; it is skipped without it.
 """
 
 import os
+import secrets
 from datetime import datetime, timezone
 
 import bcrypt
@@ -50,6 +54,25 @@ def scratch_database():
     finally:
         client.drop_database(database.name)
         client.close()
+
+
+def _insert_postgres_user(session_factory, created):
+    """Insert a user into the canonical PostgreSQL identity table."""
+    user_id = secrets.token_hex(12)
+    with session_factory() as session:
+        session.add(
+            User(
+                id=user_id,
+                username=f"integration-{user_id}",
+                email=f"{user_id}@example.com",
+                password_hash="unused-in-integration-tests",
+                created_at=created,
+                updated_at=created,
+                version=0,
+            )
+        )
+        session.commit()
+    return ObjectId(user_id)
 
 
 def test_holdings_reads_real_mongo_documents(scratch_database, monkeypatch):
@@ -299,7 +322,9 @@ def test_write_routes_against_real_mongo(scratch_database, monkeypatch):
     assert scratch_database["orders"].find_one({"_id": ObjectId(limit.json()["_id"])})["status"] == "CANCELLED"
 
 
-def test_scheduled_jobs_against_real_mongo(scratch_database, monkeypatch):
+def test_scheduled_jobs_against_real_mongo(
+    scratch_database, postgres_session_factory, monkeypatch
+):
     # Confirms the per-minute fill path and the daily upsert outside mongomock:
     # a real $inc, a real delete, and a real findOneAndUpdate upsert.
     monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
@@ -315,10 +340,9 @@ def test_scheduled_jobs_against_real_mongo(scratch_database, monkeypatch):
         },
     )
 
-    user_id = ObjectId()
     created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+    user_id = _insert_postgres_user(postgres_session_factory, created)
 
-    scratch_database["users"].insert_one({"_id": user_id})
     scratch_database["holdings"].insert_one(
         {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
          "exchange": "NSE", "qty": 10, "avgPrice": 1500.0, "ltp": 1500.0,
@@ -359,7 +383,7 @@ def test_scheduled_jobs_against_real_mongo(scratch_database, monkeypatch):
     assert settlement["method"] == "INFY MIS exit"
     assert settlement["amount"] == 500.0
 
-    record_daily_snapshot(scratch_database)
+    record_daily_snapshot(scratch_database, postgres_session_factory)
 
     snapshot = scratch_database["portfoliosnapshots"].find_one({"user": user_id})
     assert snapshot["value"] == 16000.0
@@ -369,7 +393,7 @@ def test_scheduled_jobs_against_real_mongo(scratch_database, monkeypatch):
     assert snapshot["__v"] == 0
     assert snapshot["date"].replace(tzinfo=timezone.utc) == snapshot_date()
     # Idempotent per IST day: a second run updates the same row.
-    record_daily_snapshot(scratch_database)
+    record_daily_snapshot(scratch_database, postgres_session_factory)
     assert scratch_database["portfoliosnapshots"].count_documents({"user": user_id}) == 1
 
 
