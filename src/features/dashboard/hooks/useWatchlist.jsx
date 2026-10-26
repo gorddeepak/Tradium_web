@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from "@/services/api";
 import { usePolling } from "./usePolling";
+import { useWatchlistStream } from "./useWatchlistStream";
 
 /* Poll the watchlist while the market is open; the backend refreshes ltp
    every minute. */
@@ -37,6 +38,39 @@ export function useWatchlist() {
   }, []);
 
   usePolling(getWatchlist, apply, POLL_MS, onFirstError);
+
+  /* WebSocket frames carry only the fields price_sync owns. The REST poll
+     remains the fallback, so a missing socket degrades to the old behaviour. */
+  const applyQuotes = useCallback((quotes) => {
+    const byId = new Map(quotes.map((quote) => [quote._id, quote]));
+    const changed = {};
+    for (const quote of quotes) {
+      const prev = prevPrices.current[quote._id];
+      if (prev !== undefined && quote.ltp !== undefined && quote.ltp !== prev) {
+        changed[quote._id] = {
+          dir: quote.ltp > prev ? "up" : "down",
+          stamp: Date.now(),
+        };
+      }
+      if (quote.ltp !== undefined) prevPrices.current[quote._id] = quote.ltp;
+    }
+
+    setWatchlist((list) =>
+      list.map((item) => {
+        const quote = byId.get(item._id);
+        if (!quote) return item;
+        return {
+          ...item,
+          ltp: quote.ltp ?? item.ltp,
+          dayChangePct: quote.dayChangePct ?? item.dayChangePct,
+          updatedAt: quote.updatedAt ?? item.updatedAt,
+        };
+      })
+    );
+    if (Object.keys(changed).length > 0) setFlashes(changed);
+  }, []);
+
+  useWatchlistStream(applyQuotes, !loading);
 
   async function add(item) {
     const created = await addToWatchlist(item);

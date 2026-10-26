@@ -5,6 +5,13 @@ export const BASE_URL =
   import.meta.env.VITE_API_URL ||
   (import.meta.env.DEV ? "http://localhost:8000/api" : "/api");
 
+// The watchlist stream lives beside the REST routes. In development BASE_URL
+// is absolute; in production it is relative, so build the origin from the page.
+const STREAM_BASE = BASE_URL.startsWith("http")
+  ? BASE_URL.replace(/^http/, "ws")
+  : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}${BASE_URL}`;
+export const WATCHLIST_STREAM_URL = `${STREAM_BASE}/watchlist/stream`;
+
 async function request(path, options = {}) {
   const res = await fetch(`${BASE_URL}${path}`, {
     credentials: "include",
