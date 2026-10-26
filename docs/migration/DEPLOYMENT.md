@@ -31,7 +31,7 @@ python -m venv .venv
 # optional, for the test suite: -r api/requirements-dev.txt (it includes the runtime file)
 ```
 
-`api/requirements.txt` pins FastAPI 0.144.0, Uvicorn 0.54.0, SQLAlchemy 2.1.6, Alembic 1.20.1,
+`api/requirements.txt` includes FastAPI 0.144.0, Uvicorn 0.54.0, SQLAlchemy 2.1.6, Alembic 1.20.1,
 `psycopg[binary]` 3.3.6 and `pydantic-ai-slim[google]` 2.57.0.
 
 ## 2. Database: provision, migrate, then start
