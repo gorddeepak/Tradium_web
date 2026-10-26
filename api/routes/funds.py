@@ -5,24 +5,36 @@ The Express routes are:
     router.get("/transactions", protect, ...)  // GET /api/funds/transactions
     router.post("/transactions", protect, ...) // POST /api/funds/transactions
 
-`GET /api/funds` mirrors `derivedFunds`: it upserts a funds row with
-`available: 0` when the user has none, then computes the derived keys the
-frontend reads. `available` is free cash; `usedMargin` is derived, never
-stored.
+Phase 3C2 moves funds and the transaction ledger to PostgreSQL. ``available``
+is free cash; ``usedMargin`` is derived, never stored. Every balance change and
+its ledger row commit in one transaction.
 """
 
 import math
+from decimal import Decimal
 
-from bson import ObjectId
 from fastapi import APIRouter, Body, Depends, HTTPException
-from pymongo import ReturnDocument
-from pymongo.database import Database
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session
 
 from ..auth import require_user
-from ..db import get_database
-from ..documents import inc_funds, new_document, utcnow
 from ..js_compat import js_number
+from ..postgres.models import Order, Position, Transaction
+from ..postgres.session import get_session
 from ..serialization import to_json_value
+from ..trading_book import (
+    CASH,
+    adjust_funds,
+    decimal_from,
+    debit_existing_funds,
+    fund_document,
+    get_or_create_fund,
+    lock_user,
+    new_id,
+    quantize,
+    transaction_document,
+    utcnow,
+)
 
 router = APIRouter()
 
@@ -35,88 +47,125 @@ DEFAULT_METHOD = {"DEPOSIT": "Bank transfer", "WITHDRAWAL": "Bank withdrawal"}
 @router.get("/api/funds")
 def get_funds(
     user_id: str = Depends(require_user),
-    db: Database = Depends(get_database),
+    session: Session = Depends(get_session),
 ):
-    user = ObjectId(user_id)
-
-    funds = db["funds"].find_one({"user": user})
-    if funds is None:
+    now = utcnow()
+    with session.begin():
         # Express creates an empty funds row on the first read; keep that.
-        funds = new_document(user=user, available=0)
-        db["funds"].insert_one(funds)
+        fund = get_or_create_fund(session, user_id, now)
 
-    # Only entry orders block cash: not exits, and BUY or MIS.
-    open_orders = list(db["orders"].find({"user": user, "status": "OPEN"}))
-    blocked_in_orders = sum(
-        (order["qty"] - order.get("filled", 0)) * order["price"]
-        for order in open_orders
-        if not order.get("isExit") and (order["side"] == "BUY" or order["product"] == "MIS")
-    )
+        # Only entry orders block cash: not exits, and BUY or MIS.
+        open_orders = session.scalars(
+            select(Order).where(
+                Order.user_id == user_id,
+                Order.status == "OPEN",
+                Order.is_exit.is_(False),
+                or_(Order.side == "BUY", Order.product == "MIS"),
+            )
+        ).all()
+        blocked_in_orders = sum(
+            (Decimal(order.qty - order.filled) * order.price for order in open_orders),
+            Decimal(0),
+        )
 
-    positions = list(db["positions"].find({"user": user, "product": "MIS"}))
-    mis_margin = sum(position["entry"] * position["qty"] for position in positions)
+        positions = session.scalars(
+            select(Position).where(
+                Position.user_id == user_id, Position.product == "MIS"
+            )
+        ).all()
+        mis_margin = sum(
+            (position.entry * Decimal(position.qty) for position in positions),
+            Decimal(0),
+        )
 
-    settlements = list(db["transactions"].find({"user": user, "kind": "SETTLEMENT"}))
-    realized_pnl = sum(settlement["amount"] for settlement in settlements)
+        realized_pnl = session.scalar(
+            select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+                Transaction.user_id == user_id,
+                Transaction.kind == "SETTLEMENT",
+            )
+        )
 
-    result = dict(funds)
-    result["usedMargin"] = blocked_in_orders + mis_margin
-    result["blockedInOrders"] = blocked_in_orders
-    result["misMargin"] = mis_margin
-    result["realizedPnl"] = realized_pnl
-    return to_json_value(result)
+        document = fund_document(fund)
+        blocked_in_orders = quantize(blocked_in_orders, CASH)
+        mis_margin = quantize(mis_margin, CASH)
+        document["usedMargin"] = blocked_in_orders + mis_margin
+        document["blockedInOrders"] = blocked_in_orders
+        document["misMargin"] = mis_margin
+        document["realizedPnl"] = quantize(realized_pnl, CASH)
+
+    return to_json_value(document)
 
 
 @router.get("/api/funds/transactions")
 def list_transactions(
     user_id: str = Depends(require_user),
-    db: Database = Depends(get_database),
+    session: Session = Depends(get_session),
 ):
-    # The user field is stored as an ObjectId, so cast the token claim.
-    user = ObjectId(user_id)
     # Express sorts newest first; the ledger renders in this order.
-    transactions = list(db["transactions"].find({"user": user}).sort("createdAt", -1))
-    return [to_json_value(transaction) for transaction in transactions]
+    transactions = session.scalars(
+        select(Transaction)
+        .where(Transaction.user_id == user_id)
+        .order_by(Transaction.created_at.desc(), Transaction.id.desc())
+    ).all()
+    return [to_json_value(transaction_document(row)) for row in transactions]
 
 
 @router.post("/api/funds/transactions", status_code=201)
 def create_transaction(
     body: dict = Body(default={}),
     user_id: str = Depends(require_user),
-    db: Database = Depends(get_database),
+    session: Session = Depends(get_session),
 ):
     kind = body.get("kind")
     # Coerce to a number, like qty in the orders route.
-    amount = js_number(body.get("amount"))
-    if kind not in ("DEPOSIT", "WITHDRAWAL") or not math.isfinite(amount) or amount <= 0:
+    amount_number = js_number(body.get("amount"))
+    if (
+        kind not in ("DEPOSIT", "WITHDRAWAL")
+        or not math.isfinite(amount_number)
+        or amount_number <= 0
+    ):
         raise HTTPException(status_code=400, detail="Invalid transaction")
 
-    user = ObjectId(user_id)
-    if kind == "DEPOSIT":
-        funds = inc_funds(db, user, amount)
-    else:
-        # The $gte guard makes the debit atomic so the balance can't go negative.
-        funds = db["funds"].find_one_and_update(
-            {"user": user, "available": {"$gte": amount}},
-            {"$inc": {"available": -amount}, "$set": {"updatedAt": utcnow()}},
-            return_document=ReturnDocument.AFTER,
+    amount = quantize(decimal_from(amount_number), CASH)
+    now = utcnow()
+
+    with session.begin():
+        lock_user(session, user_id)
+
+        if kind == "DEPOSIT":
+            fund = adjust_funds(session, user_id, amount, now)
+        else:
+            # The guard makes the debit atomic so the balance can't go negative.
+            fund = debit_existing_funds(session, user_id, amount, now)
+            if fund is None:
+                raise HTTPException(
+                    status_code=400, detail="Amount exceeds available balance"
+                )
+
+        sent_method = body.get("method")
+        if sent_method not in ALLOWED_METHODS:
+            sent_method = None
+
+        transaction = Transaction(
+            id=new_id(),
+            user_id=user_id,
+            kind=kind,
+            method=sent_method or DEFAULT_METHOD[kind],
+            amount=amount if kind == "DEPOSIT" else -amount,
+            symbol="",
+            status="COMPLETED",
+            created_at=now,
+            updated_at=now,
+            version=0,
         )
-        if funds is None:
-            raise HTTPException(status_code=400, detail="Amount exceeds available balance")
+        session.add(transaction)
+        session.flush()
 
-    sent_method = body.get("method")
-    if sent_method not in ALLOWED_METHODS:
-        sent_method = None
-
-    transaction = new_document(
-        user=user,
-        kind=kind,
-        method=sent_method or DEFAULT_METHOD[kind],
-        amount=amount if kind == "DEPOSIT" else -amount,
-        symbol="",
-        status="COMPLETED",
-    )
-    db["transactions"].insert_one(transaction)
+        funds_document = fund_document(fund)
+        transaction_doc = transaction_document(transaction)
 
     # `funds` here is the raw document, without the derived keys GET adds.
-    return {"funds": to_json_value(funds), "transaction": to_json_value(transaction)}
+    return {
+        "funds": to_json_value(funds_document),
+        "transaction": to_json_value(transaction_doc),
+    }

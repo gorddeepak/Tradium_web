@@ -1,4 +1,4 @@
-"""Port of server/routes/holdingsRoutes.js.
+"""Port of server/routes/holdingsRoutes.js, now backed by PostgreSQL.
 
 The Express route is:
     router.get("/", protect, async (req, res) => {
@@ -6,18 +6,20 @@ The Express route is:
       res.json(holdings);
     });
 
-It returns a plain JSON array in natural order with no sort, and the
-documents keep `_id`, `__v`, `createdAt` and `updatedAt`.
+The book stores quantity and cost basis only. ``ltp``/``dayChangePct`` come
+from ``latest_quotes`` and ``sector`` from ``instruments``, keeping the legacy
+response keys without a second copy of the price.
 """
 
-from bson import ObjectId
-from bson.errors import InvalidId
 from fastapi import APIRouter, Depends
-from pymongo.database import Database
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from ..auth import require_user
-from ..db import get_database
+from ..postgres.models import Holding, Instrument, LatestQuote
+from ..postgres.session import get_session
 from ..serialization import to_json_value
+from ..trading_book import holding_document
 
 router = APIRouter()
 
@@ -25,11 +27,22 @@ router = APIRouter()
 @router.get("/api/holdings")
 def list_holdings(
     user_id: str = Depends(require_user),
-    db: Database = Depends(get_database),
+    session: Session = Depends(get_session),
 ):
-    # The user field is stored as an ObjectId, so cast the token claim.
-    # Casting outside the find() also rejects a malformed id explicitly
-    # instead of silently returning an empty list.
-    user = ObjectId(user_id)
-    holdings = list(db["holdings"].find({"user": user}))
-    return [to_json_value(holding) for holding in holdings]
+    rows = session.execute(
+        select(
+            Holding,
+            func.coalesce(LatestQuote.ltp, 0),
+            func.coalesce(LatestQuote.day_change_pct, 0),
+            func.coalesce(Instrument.sector, ""),
+        )
+        .outerjoin(Instrument, Instrument.symbol == Holding.symbol)
+        .outerjoin(LatestQuote, LatestQuote.instrument_id == Instrument.id)
+        .where(Holding.user_id == user_id)
+        .order_by(Holding.created_at.asc(), Holding.id.asc())
+    ).all()
+
+    return [
+        to_json_value(holding_document(holding, ltp, day_change_pct, sector))
+        for holding, ltp, day_change_pct, sector in rows
+    ]

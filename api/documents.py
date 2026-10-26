@@ -1,47 +1,12 @@
-"""Document helpers that mirror Mongoose's write behaviour.
+"""Small time helper shared by the remaining MongoDB-backed job.
 
-Mongoose adds ``createdAt``, ``updatedAt`` and ``__v`` to every document and
-refreshes ``updatedAt`` on every update. PyMongo does neither, so writes go
-through these helpers to keep the stored documents — and the API responses
-that read them back — identical to the Express app.
+Mongoose adds ``createdAt``/``updatedAt`` itself. The trading book now writes
+its own timestamps in PostgreSQL, but the daily snapshot job still builds Mongo
+dates, so ``utcnow`` stays here.
 """
 
 from datetime import datetime, timezone
 
-from bson import ObjectId
-from pymongo import ReturnDocument
-
 
 def utcnow():
     return datetime.now(timezone.utc)
-
-
-def new_document(**fields):
-    """Build a fresh document the way Mongoose's ``create()`` would."""
-    document = {"_id": ObjectId()}
-    document.update(fields)
-    now = utcnow()
-    document["createdAt"] = now
-    document["updatedAt"] = now
-    document["__v"] = 0
-    return document
-
-
-def inc_funds(db, user, amount):
-    """Credit/debit funds, creating the row when the user has none.
-
-    Port of ``FundsModel.findOneAndUpdate({ user }, { $inc }, { upsert: true,
-    new: true })``: the increment runs in the server so concurrent updates
-    can't be lost.
-    """
-    now = utcnow()
-    return db["funds"].find_one_and_update(
-        {"user": user},
-        {
-            "$inc": {"available": amount},
-            "$set": {"updatedAt": now},
-            "$setOnInsert": {"createdAt": now, "__v": 0},
-        },
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )

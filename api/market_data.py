@@ -5,9 +5,9 @@ The operations are:
 
 - ``fetch_candles`` — historical OHLC for the instrument chart (§3.1 of
   ``MARKET_DATA_PLAN.md``).
-- ``fetch_quote`` — the reduced ``{"ltp", "dayChangePct"}`` shape used by
-  MARKET order placement and square-off, matching ``fetchQuote`` in
-  ``server/jobs/priceSync.js``.
+- ``fetch_quote`` — the reduced ``{"ltp", "dayChangePct", "sourceTime"}`` shape
+  used by MARKET order placement and square-off, matching ``fetchQuote`` in
+  ``server/jobs/priceSync.js`` plus the provider time the fill guard needs.
 - ``fetch_quote_row`` — the raw Yahoo quote row, used by the two instrument
   detail routes.
 - ``fetch_quotes`` / ``fetch_sector`` — the batch and profile reads behind the
@@ -29,6 +29,8 @@ import threading
 from datetime import datetime, timedelta
 
 import requests
+
+from .market_store import provider_source_time
 
 logger = logging.getLogger(__name__)
 
@@ -181,12 +183,12 @@ def fetch_quote_row(symbol):
 
 
 def fetch_quote(symbol):
-    """Return ``{"ltp", "dayChangePct"}`` for a symbol, or ``None``.
+    """Return ``{"ltp", "dayChangePct", "sourceTime"}`` for a symbol, or ``None``.
 
-    Port of ``fetchQuote`` in ``server/jobs/priceSync.js``: the callers only need
-    the last price and the day's percentage move. ``None`` is the "no usable
-    price" answer, which both callers already handle -- a MARKET order answers
-    503 and a square-off falls back to the stored ``ltp``.
+    Port of ``fetchQuote`` in ``server/jobs/priceSync.js`` plus the provider
+    market time Phase 3C2 needs for the fill-freshness guard. ``None`` is the
+    "no usable price" answer, which both callers already handle -- a MARKET
+    order answers 503 and a square-off falls back to the canonical quote.
 
     Provider errors are swallowed into ``None`` rather than raised, because
     Express catches them inside ``fetchQuote`` itself. The callers have no
@@ -213,7 +215,11 @@ def fetch_quote(symbol):
     change_pct = row.get("regularMarketChangePercent")
     if not _is_usable_number(change_pct):
         change_pct = 0
-    return {"ltp": price, "dayChangePct": change_pct}
+    return {
+        "ltp": price,
+        "dayChangePct": change_pct,
+        "sourceTime": provider_source_time(row.get("regularMarketTime")),
+    }
 
 
 def _is_usable_number(value):

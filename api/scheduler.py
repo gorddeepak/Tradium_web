@@ -150,14 +150,8 @@ class PriceSyncScheduler:
         try:
             factory = self.session_factory
             if factory is None:
-                try:
-                    factory = get_session_factory()
-                except Exception:  # noqa: BLE001 - Mongo prices can still refresh
-                    logger.exception(
-                        "PostgreSQL is not configured; price sync will skip "
-                        "canonical quote updates"
-                    )
-            sync_prices(self.db, factory)
+                factory = get_session_factory()
+            sync_prices(factory)
         except Exception:  # noqa: BLE001 - keep the thread alive
             logger.exception("Price sync tick failed")
 
