@@ -1,6 +1,8 @@
 // Read-only harness: seeds scenario.json into a scratch database, runs the real
-// Express syncPrices() + recordDailySnapshot() with the provider stubbed, then
-// dumps every collection with BSON types preserved.
+// Express syncPrices() with the provider stubbed, then dumps every collection
+// with BSON types preserved. recordDailySnapshot() is not run, because the
+// FastAPI job writes to PostgreSQL since Phase 3C1 and the two sides are no
+// longer comparable in MongoDB.
 // server/index.js is never required, so no cron job is registered.
 //
 // Env: ZERODHA_SERVER (required), PARITY_MONGO, PARITY_OUT_DIR, PARITY_SCENARIO.
@@ -105,7 +107,6 @@ const COLLECTIONS = [
   "orders",
   "funds",
   "transactions",
-  "portfoliosnapshots",
 ];
 
 (async () => {
@@ -120,10 +121,8 @@ const COLLECTIONS = [
   }
 
   const { syncPrices } = require(path.join(SERVER, "jobs", "priceSync"));
-  const { recordDailySnapshot } = require(path.join(SERVER, "jobs", "portfolioSnapshot"));
 
   await syncPrices();
-  await recordDailySnapshot();
 
   const collections = {};
   for (const name of COLLECTIONS) {

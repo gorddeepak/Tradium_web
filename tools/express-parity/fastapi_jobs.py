@@ -1,8 +1,13 @@
 """Harness: the same scenario through the FastAPI port.
 
 Seeds scenario.json into a scratch database, patches the provider seams, runs
-``sync_prices()`` + ``record_daily_snapshot()``, then dumps every collection with
-BSON types preserved. The scheduler is not involved.
+``sync_prices()``, then dumps every collection with BSON types preserved. The
+scheduler is not involved.
+
+The daily snapshot is not run: since Phase 3C1 it writes to PostgreSQL, not to
+the scratch MongoDB, and writing to the configured PostgreSQL database would
+break the harness's scratch-only guarantee. Snapshot behaviour is covered by
+the pytest suite instead.
 Env: PARITY_MONGO, PARITY_OUT_DIR, PARITY_SCENARIO.
 """
 
@@ -23,14 +28,13 @@ COLLECTIONS = [
     "orders",
     "funds",
     "transactions",
-    "portfoliosnapshots",
 ]
 
 
 def main():
     from bson import ObjectId
 
-    from api.jobs import portfolio_snapshot, price_sync
+    from api.jobs import price_sync
     from api.market_data import ticker_for
 
     scenario = load_scenario()
@@ -76,7 +80,6 @@ def main():
     price_sync.is_market_open = lambda: True
 
     price_sync.sync_prices(database)
-    portfolio_snapshot.record_daily_snapshot(database)
 
     collections = {}
     for name in COLLECTIONS:

@@ -1,13 +1,14 @@
 # Migration Status
 
-**Last updated:** 2026-10-26 (Phase 3B4 audit)
-**Current phase:** **Phase 3B4 — trading-book dependency audit (recommendation only)**
-**Application code modified:** **Yes, up to Phase 3B3.1; no code change in 3B4.** Phase 3B1 moved
+**Last updated:** 2026-10-26 (Phase 3C1)
+**Current phase:** **Phase 3C1 — portfolio snapshots on PostgreSQL**
+**Application code modified:** **Yes, up to Phase 3C1.** Phase 3B1 moved
 authentication to PostgreSQL; Phase 3B2 moved the market cache there and made `price_sync` a dual
 writer; Phase 3B3 moved watchlists there and made the daily snapshot enumerate users from PostgreSQL;
-Phase 3B3.1 moved price sync and Nova's watchlist tool onto the same table. `server/` and the original
-repository remain untouched. Holdings, positions, orders, funds, transactions, the snapshot documents
-themselves, and Nova's other tools are still MongoDB-backed.
+Phase 3B3.1 moved price sync and Nova's watchlist tool onto the same table; Phase 3C1 moved the
+snapshot rows and the historical half of `/api/portfolio/history` there. `server/` and the original
+repository remain untouched. Holdings, positions, orders, funds, transactions, the retired MongoDB
+snapshot archive, and Nova's other tools are still MongoDB-backed.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -17,14 +18,14 @@ themselves, and Nova's other tools are still MongoDB-backed.
 
 | Item | Value |
 |---|---|
-| Phase | 3B4 — trading-book dependency audit (recommendation only) |
+| Phase | 3C1 — portfolio snapshots on PostgreSQL |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
 | PostgreSQL schema | **created by Alembic** — `api/migrations/versions/0001_initial_schema.py` creates all 10 tables (`users`, `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists`, `instruments`, `latest_quotes`, `portfolio_snapshots`) plus `alembic_version`; verified by `alembic upgrade head` on a disposable PostgreSQL 17.6 cluster |
-| PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3), the **snapshot user list** (Phase 3B3), **price sync's watchlist symbols** (Phase 3B3.1) and **Nova's `getWatchlist`** (Phase 3B3.1) |
-| MongoDB-backed surfaces | **book data, snapshot documents and the other AI tools** — holdings, positions, orders, funds, transactions, `portfoliosnapshots`, and Nova's other reads |
+| PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3), **price sync's watchlist symbols** (Phase 3B3.1), **Nova's `getWatchlist`** (Phase 3B3.1) and **portfolio snapshots** (`portfolio_snapshots`, Phase 3C1) |
+| MongoDB-backed surfaces | **book data, the retired snapshot archive and the other AI tools** — holdings, positions, orders, funds, transactions, the old `portfoliosnapshots` documents (read-only archive), and Nova's other reads |
 | Market cache | `instruments` + `latest_quotes` in PostgreSQL; market sync seeds the **53-symbol universe**; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
-| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices, upserts the canonical PostgreSQL quote and reads watchlist symbols from PostgreSQL) and the daily 18:00 IST snapshot, which enumerates users from PostgreSQL; **off unless `TRADING_JOBS_ENABLED` is set** |
-| Known transition gaps | there is no automatic MongoDB → PostgreSQL loader for users or watchlists, so pre-migration rows stay invisible |
+| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices, upserts the canonical PostgreSQL quote and reads watchlist symbols from PostgreSQL) and the daily 18:00 IST snapshot, which enumerates users from PostgreSQL, reads holdings/positions from MongoDB and upserts `portfolio_snapshots` in PostgreSQL; **off unless `TRADING_JOBS_ENABLED` is set** |
+| Known transition gaps | there is no automatic MongoDB → PostgreSQL loader for users, watchlists or snapshots, so pre-migration rows stay invisible and portfolio history only shows snapshots written after Phase 3C1 |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | **switched** to FastAPI on `localhost:8000`; a production build is now **served by FastAPI** (SPA fallback) when `SERVE_STATIC`/`NODE_ENV=production`; `VITE_API_URL` still overrides |
 | CORS | Vite dev origins (5173-5177) with credentials; `CORS_ORIGINS` overrides for deployed origins; a same-origin production build needs neither |
@@ -41,10 +42,10 @@ themselves, and Nova's other tools are still MongoDB-backed.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **373 passed, 7 skipped** with only `TEST_DATABASE_URL`; **380 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3B3.1) — see §5 |
-| PostgreSQL test instance | PostgreSQL 17.6, disposable local cluster on a temporary path, database `tradium_phase3b_wrapup_test`; scoped to this run and outside the repository |
-| Express parity check | **run (Phase 2e)** — cookies, numeric rendering and job side effects; **no functional difference** (§3K) |
-| Read-route parity check | **run (Phase 4b)** — byte-identical for the Mongo-backed read routes at the time; **not rerun after the Phase 3B2 backend move** (§3Q) |
+| Tests executed | **373 passed, 7 skipped** with only `TEST_DATABASE_URL`; **380 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3C1) — see §5 |
+| PostgreSQL test instance | PostgreSQL 17.6, disposable local cluster on a temporary path, database `tradium_phase3c1_test`; scoped to this run and outside the repository |
+| Express parity check | **run (Phase 2e)** — cookies, numeric rendering and the non-snapshot job side effects; **no functional difference** (§3K). The snapshot job and portfolio history were removed from the harness in Phase 3C1 because they no longer share a database |
+| Read-route parity check | **run (Phase 4b)** — byte-identical for the Mongo-backed read routes at the time; **not rerun since the PostgreSQL moves** (§3Q), and `portfolio/history` is no longer in the harness |
 | Repository secret scan | **clean (Phase 4b/3B2)** — no credentials, API keys, private keys or `.env` files in tracked files; the PostgreSQL docs contain placeholders only |
 | Browser cutover check | **run** — signup, login, reload, logout and all six dashboard pages against a live FastAPI server (§3L) |
 | Nova browser check | **run** — dashboard briefing, a page insight, and chat with one- and two-tool turns against live Gemini (§3M) |
@@ -1479,6 +1480,74 @@ and `transactions` must move together, behind the transaction boundaries in
 
 ---
 
+## 3U. Phase 3C1 — portfolio snapshots on PostgreSQL
+
+**Goal:** move daily snapshot persistence and the historical half of `/api/portfolio/history` to the
+existing `portfolio_snapshots` table, leaving the trading book on MongoDB. No migration was needed:
+`0001_initial_schema.py` already had the table, the `(user_id, snapshot_date)` unique key and the
+`numeric(20,4)` columns.
+
+### Data sources after this phase
+
+| Surface | Source |
+|---|---|
+| Snapshot user list | PostgreSQL `users` (unchanged from Phase 3B3) |
+| Snapshot values (`value`, `invested`, `mis_value`, `mis_invested`) | MongoDB `holdings` and open MIS `positions`, using the existing formulas |
+| Snapshot rows | PostgreSQL `portfolio_snapshots`, one row per user per IST day |
+| `/api/portfolio/history` historical points | PostgreSQL `portfolio_snapshots`, `snapshot_date ASC` |
+| `/api/portfolio/history` today point | MongoDB `holdings` + open MIS `positions`, still live |
+| Old `portfoliosnapshots` documents | untouched, no longer written or read; rollback archive only |
+
+### What changed
+
+- `api/jobs/portfolio_snapshot.py` uses PostgreSQL `INSERT ... ON CONFLICT (user_id, snapshot_date)
+  DO UPDATE`. A re-run on the same IST day updates the four numbers and `updated_at`, keeps the
+  original `id`, `created_at` and `version`, and creates no duplicate. Users are enumerated in
+  `created_at ASC, id ASC` order so a failure test is deterministic.
+- Each user is committed in its own transaction. The surrounding `try` still stops the run on the
+  first error, matching Express, but earlier users stay committed.
+- `snapshot_date()` still returns the IST calendar day as a UTC-midnight datetime for the existing
+  date tests; the column stores `snapshot_date().date()`.
+- `api/routes/portfolio.py` reads history through `get_session`, filters on the IST calendar-day
+  window (`days` points ending today) and renders `label` with `date.isoformat()`. `value` is
+  `value + mis_value`; `invested` is `invested + mis_invested`, or `null` when `invested` is zero, so
+  legacy rows keep their chart gap. The live today point is appended, or overwrites today's snapshot
+  row, exactly as before. `float()` is applied to the `Decimal` columns so the JSON numbers match the
+  old Mongo response.
+- `api/tests/test_portfolio_snapshot.py`, `test_portfolio.py` and the relevant
+  `test_mongo_integration.py` cases now use a real disposable PostgreSQL database; MongoDB remains
+  `mongomock` except in the optional integration module.
+- `tools/express-parity/` no longer runs `record_daily_snapshot()` (it would write to the configured
+  PostgreSQL database) and no longer compares `portfoliosnapshots` or `portfolio/history`, because the
+  two implementations no longer share a database for those surfaces.
+
+### Historical cutover consequence
+
+**PostgreSQL history starts empty.** Existing MongoDB snapshots are deliberately not loaded and are
+not dual-written, so `/api/portfolio/history` shows only snapshots created by the job after this
+phase, plus the live today point. A user with months of MongoDB history will see a chart that begins
+on their first post-3C1 trading day. This is expected for this phase, not a bug; loading the archive
+is a separate decision. The MongoDB collection is left in place so a rollback can still use it.
+
+### Verification and limits
+
+- Focused suites: **25 passed** (`test_portfolio_snapshot.py`, `test_portfolio.py`,
+  `test_mongo_integration.py`) against disposable PostgreSQL and a real scratch MongoDB.
+- Full suite: **373 passed, 7 skipped** with `TEST_DATABASE_URL` only (the 7 are the optional
+  real-MongoDB tests); **380 passed, 0 skipped** with `TEST_MONGO_URL` as well.
+- No loader, no dual write and no change to holdings, positions, orders, funds, transactions or Nova's
+  other tools. No schema migration was added.
+- The Express parity harness is not a PostgreSQL harness; snapshot and history parity must be covered
+  by the pytest suite until a PostgreSQL-aware harness exists.
+
+### Next
+
+**Phase 3C2 — the whole trading book in one cutover**, as recommended in §3T. The five book
+collections still form one write graph, so they must move together behind shared transaction
+boundaries.
+
+---
+
 ## 4. Known issues recorded
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and
@@ -1524,6 +1593,10 @@ Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
 15. **`DEPLOYMENT.md` is stale.** Its environment table does not list `DATABASE_URL`, does not mention
     `DIRECT_DATABASE_URL`/`alembic upgrade head`, and still implies MongoDB alone is sufficient. The code
     is correct; the deployment guide was outside this slice.
+16. **The MongoDB snapshot archive is not loaded.** Since Phase 3C1 the job writes only PostgreSQL
+    `portfolio_snapshots`. Existing MongoDB `portfoliosnapshots` documents are untouched but invisible
+    to `/api/portfolio/history`, so every user's PostgreSQL history starts at their first post-3C1
+    snapshot (plus the live point). See §3U.
 
 ---
 
@@ -1635,6 +1708,12 @@ Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
 | Watchlist read failure (Phase 3B3.1) | **verified** — a failing PostgreSQL watchlist query is logged and the book refresh still runs |
 | Nova watchlist tool (Phase 3B3.1) | **verified** — reads the token user's PostgreSQL rows in `created_at`/`id` order, joins quotes, reports `0` for missing quotes, and returns an empty list for a user with none |
 | Application tests (Phase 3B3.1) | **run:** 373 passed, 7 skipped with `TEST_DATABASE_URL` only; 380 passed, 0 skipped with `TEST_MONGO_URL` too (6 new tests) |
+| Snapshot persistence on PostgreSQL (Phase 3C1) | **verified** — the job inserts one `portfolio_snapshots` row per PostgreSQL user; a second run updates the same `id`/`created_at` instead of inserting; a zero-holding user still gets a zero row |
+| Snapshot failure behaviour (Phase 3C1) | **verified** — a bad holding aborts the remaining users without raising, and users already processed stay committed; a failing PostgreSQL enumeration logs and writes nothing |
+| Portfolio history mixed source (Phase 3C1) | **verified** — historical points come from `portfolio_snapshots` in ascending order with IST day labels; `invested` is `null` for a zero/legacy row; the live today point still comes from real MongoDB holdings/positions, and an existing today row is overwritten |
+| Application tests (Phase 3C1) | **run:** 373 passed, 7 skipped with `TEST_DATABASE_URL` only; 380 passed, 0 skipped with `TEST_MONGO_URL` too; focused snapshot/portfolio/integration run **25 passed** |
+| Test PostgreSQL instance (Phase 3C1) | disposable local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_phase3c1_test`; `initdb` trust auth; outside the repository; dropped after the run |
+| Express parity harness after the snapshot move (Phase 3C1) | **updated, not rerun** — `recordDailySnapshot`/`record_daily_snapshot` and the `portfoliosnapshots` dump were removed, and `portfolio/history` was removed from the route list, because FastAPI now uses PostgreSQL for both |
 
 ---
 
@@ -1766,19 +1845,17 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phases 3B1–3B3.1 are complete and awaiting review; Phase 3B4 was an audit only.** Authentication, the
-market cache, watchlists, price-sync watchlist symbols and Nova's `getWatchlist` are PostgreSQL-backed.
-The suite reports **373 passed, 7 skipped** (`TEST_DATABASE_URL` alone) and **380 passed, 0 skipped**
-with `TEST_MONGO_URL` too. The branch is still local-only; nothing was deployed.
+**Phases 3B1–3C1 are complete and awaiting review.** Authentication, the market cache, watchlists,
+price-sync watchlist symbols, Nova's `getWatchlist` and portfolio snapshots are PostgreSQL-backed. The
+suite reports **373 passed, 7 skipped** (`TEST_DATABASE_URL` alone) and **380 passed, 0 skipped** with
+`TEST_MONGO_URL` too. The branch is still local-only; nothing was deployed.
 
-Recommended next: **Phase 3C1 — snapshot persistence** (§3T). It is the only remaining slice that can
-move alone without splitting a write path. Not started and not approved.
+Recommended next: **Phase 3C2 — the whole trading book in one cutover** (§3T). `funds`, `holdings`,
+`positions`, `orders` and `transactions` are one write graph and must move together with the loader and
+the `POSTGRES_SCHEMA_DESIGN.md` §6 transaction boundaries. Do not move them separately.
 
-1. Move the daily snapshot upsert to `portfolio_snapshots` and read `/api/portfolio/history` from it;
-   keep the live "today" point reading MongoDB holdings/positions until Phase 3C2.
-2. Keep the MongoDB `portfoliosnapshots` collection as the rollback copy until acceptance.
-3. Do not move `funds`, `holdings`, `positions`, `orders` or `transactions` separately. They are one write
-   graph and belong to a single Phase 3C2 cutover with the loader and the §6 transaction boundaries.
+Keep the MongoDB `portfoliosnapshots` collection as the rollback copy until acceptance; PostgreSQL
+history intentionally starts from the first post-3C1 snapshot (§3U).
 
 Still required before any cutover that includes existing data: the MongoDB → PostgreSQL loader for users
 and watchlists (§4 item 11), and the reconciliation gates in `POSTGRES_SCHEMA_DESIGN.md` §9.6.

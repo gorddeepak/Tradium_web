@@ -42,12 +42,12 @@ python fastapi_auth.py
 node express_numbers.cjs
 python fastapi_numbers.py
 
-# 3. background jobs: priceSync + settleMisExit + portfolioSnapshot side effects
+# 3. background jobs: priceSync side effects
 node express_jobs.cjs
 python fastapi_jobs.py
 
 # 4. read-route bodies: orders, watchlist, positions, funds, funds/transactions,
-#    portfolio/history, market/overview, instruments/search
+#    market/overview, instruments/search
 node express_routes.cjs
 python fastapi_routes.py
 
@@ -72,10 +72,10 @@ observe (a JSON number spelling, a header attribute).
 | `fastapi_auth.py` | the same request sequence against `create_app(database=...)` |
 | `express_numbers.cjs` | serves the real `GET /api/holdings` and captures the raw JSON body |
 | `fastapi_numbers.py` | the same, over the real FastAPI route |
-| `express_jobs.cjs` | seeds `scenario.json`, runs `syncPrices()` + `recordDailySnapshot()`, dumps every collection with BSON types preserved |
-| `fastapi_jobs.py` | the same, through `sync_prices()` + `record_daily_snapshot()` |
+| `express_jobs.cjs` | seeds `scenario.json`, runs `syncPrices()`, dumps every collection with BSON types preserved |
+| `fastapi_jobs.py` | the same, through `sync_prices()` |
 | `routes_scenario.json` | the shared synthetic input for the read-route run (users, holdings, positions, watchlists, orders, funds, transactions, snapshots, quotes) |
-| `express_routes.cjs` | serves the real orders/watchlist/positions/funds/portfolio/market/instrument routers on an ephemeral port and captures each GET body |
+| `express_routes.cjs` | serves the real orders/watchlist/positions/funds/market/instrument routers on an ephemeral port and captures each GET body |
 | `fastapi_routes.py` | the same requests against `create_app(database=...)` |
 | `compare.py` | diffs the job dumps, the auth/number captures and the read-route bodies |
 
@@ -91,3 +91,8 @@ observe (a JSON number spelling, a header attribute).
 - `_id` and `__v` are **not** normalised away, so the write shapes are still checked.
 - The route harness deliberately does **not** call the Yahoo-backed instrument routes
   (`/lookup/:symbol`, `/:symbol`, `/:symbol/candles`), so the whole run stays offline.
+- **Portfolio snapshots are no longer compared.** Since Phase 3C1 the daily snapshot writes PostgreSQL
+  `portfolio_snapshots`, so `record_daily_snapshot()` is not run here (it would write to the configured
+  PostgreSQL database) and `/api/portfolio/history` is not in the route list (its historical points now
+  come from PostgreSQL, not the scratch MongoDB). Both are covered by `api/tests/test_portfolio_snapshot.py`
+  and `api/tests/test_portfolio.py`.

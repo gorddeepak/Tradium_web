@@ -1,30 +1,29 @@
 """Focused tests for the daily portfolio snapshot.
 
-User identity is canonical in PostgreSQL, so the job is given a session
-factory that returns the ``users`` table ids. The snapshot rows themselves
-still use mongomock. One test runs against a real PostgreSQL database when
-TEST_DATABASE_URL is set; the rest use a small session double so the
-calculation and failure branches stay testable without a database.
+User identity and the snapshot rows are canonical in PostgreSQL since Phase
+3C1, so these tests use a real disposable PostgreSQL database. The book data
+read to build the values is still MongoDB (mongomock). The tests are skipped
+when TEST_DATABASE_URL is not set, through the shared `postgres_session_factory`
+fixture.
 
 The job is called directly with synthetic users and holdings — no scheduler and
 no wall clock — plus scheduler tests that prove the 18:00 IST delay and the
-tick. mongomock runs the ``find_one_and_update`` upsert.
+tick.
 """
 
-import os
 import secrets
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 from bson import ObjectId
+from sqlalchemy import select, text
 
 from api import scheduler
 from api.jobs import portfolio_snapshot
 from api.market_hours import IST
-from api.postgres.models import User
-
-TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "").strip()
+from api.postgres.models import PortfolioSnapshot, User
 
 NOW = datetime(2026, 10, 25, 12, 0, 0, 123000, tzinfo=timezone.utc)
 
@@ -34,40 +33,20 @@ def _ist(year, month, day, hour, minute, second=0):
 
 
 # --------------------------------------------------------------------------
-# A session double that returns the PostgreSQL user ids
+# PostgreSQL fixtures and helpers
 # --------------------------------------------------------------------------
 
 
-class _FakeScalars:
-    def __init__(self, user_ids):
-        self.user_ids = user_ids
-
-    def all(self):
-        return list(self.user_ids)
-
-
-class _FakeSession:
-    def __init__(self, user_ids):
-        self.user_ids = user_ids
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        return False
-
-    def scalars(self, statement):
-        return _FakeScalars(self.user_ids)
+@pytest.fixture
+def snapshot_factory(postgres_session_factory):
+    """Start one test with no PostgreSQL users or snapshot rows."""
+    with postgres_session_factory() as session:
+        session.execute(text("TRUNCATE TABLE portfolio_snapshots, users CASCADE"))
+        session.commit()
+    return postgres_session_factory
 
 
-def _session_factory(user_ids):
-    def factory():
-        return _FakeSession(user_ids)
-
-    return factory
-
-
-def _insert_postgres_user(session_factory):
+def _insert_postgres_user(session_factory, created=NOW):
     """Insert one user row the way the signup route stores it."""
     user_id = secrets.token_hex(12)
     with session_factory() as session:
@@ -77,13 +56,18 @@ def _insert_postgres_user(session_factory):
                 username=f"snapshot-{user_id}",
                 email=f"{user_id}@example.com",
                 password_hash="unused-in-snapshot-tests",
-                created_at=NOW,
-                updated_at=NOW,
+                created_at=created,
+                updated_at=created,
                 version=0,
             )
         )
         session.commit()
     return ObjectId(user_id)
+
+
+def _snapshots(session_factory):
+    with session_factory() as session:
+        return session.scalars(select(PortfolioSnapshot)).all()
 
 
 # --------------------------------------------------------------------------
@@ -115,120 +99,117 @@ def test_snapshot_date_handles_the_month_boundary():
 
 
 def test_every_user_gets_one_row_even_with_no_holdings(
-    database, holdings_factory, positions_factory
+    database, holdings_factory, positions_factory, snapshot_factory
 ):
-    holder = ObjectId()
-    empty = ObjectId()
+    holder = _insert_postgres_user(snapshot_factory)
+    empty = _insert_postgres_user(snapshot_factory)
     database["holdings"].insert_one(holdings_factory(holder))
     database["positions"].insert_one(positions_factory(holder))
 
-    # The job receives PostgreSQL's text ids and casts them for MongoDB.
-    portfolio_snapshot.record_daily_snapshot(
-        database, _session_factory([str(holder), str(empty)])
-    )
+    portfolio_snapshot.record_daily_snapshot(database, snapshot_factory)
 
-    assert database["portfoliosnapshots"].count_documents({}) == 2
+    rows = {row.user_id: row for row in _snapshots(snapshot_factory)}
+    assert len(rows) == 2
 
-    snapshot = database["portfoliosnapshots"].find_one({"user": holder})
-    assert snapshot["date"].replace(tzinfo=timezone.utc) == portfolio_snapshot.snapshot_date()
+    snapshot = rows[str(holder)]
+    assert snapshot.snapshot_date == portfolio_snapshot.snapshot_date().date()
     # Holdings only: 10 * 2500 and 10 * 2400.5.
-    assert snapshot["value"] == 25000.0
-    assert snapshot["invested"] == 24005.0
+    assert snapshot.value == Decimal("25000")
+    assert snapshot.invested == Decimal("24005")
     # Open MIS leg: 5 * 1500 entry + (1520 - 1500) * 5.
-    assert snapshot["misValue"] == 7600.0
-    assert snapshot["misInvested"] == 7500.0
-    assert snapshot["__v"] == 0
-    assert snapshot["createdAt"] == snapshot["updatedAt"]
+    assert snapshot.mis_value == Decimal("7600")
+    assert snapshot.mis_invested == Decimal("7500")
+    assert snapshot.version == 0
+    assert snapshot.created_at == snapshot.updated_at
 
-    blank = database["portfoliosnapshots"].find_one({"user": empty})
-    assert blank["value"] == 0.0
-    assert blank["invested"] == 0.0
-    assert blank["misValue"] == 0.0
-    assert blank["misInvested"] == 0.0
+    blank = rows[str(empty)]
+    assert blank.value == Decimal("0")
+    assert blank.invested == Decimal("0")
+    assert blank.mis_value == Decimal("0")
+    assert blank.mis_invested == Decimal("0")
 
 
-def test_zero_postgres_users_writes_no_snapshots(database):
+def test_zero_postgres_users_writes_no_snapshots(database, snapshot_factory):
     # A user that only exists in the legacy MongoDB collection is not part of
     # the canonical identity population any more.
     database["users"].insert_one({"_id": ObjectId()})
 
-    portfolio_snapshot.record_daily_snapshot(database, _session_factory([]))
+    portfolio_snapshot.record_daily_snapshot(database, snapshot_factory)
 
-    assert database["portfoliosnapshots"].count_documents({}) == 0
+    assert _snapshots(snapshot_factory) == []
 
 
-@pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="TEST_DATABASE_URL is not set; PostgreSQL snapshot test skipped",
-)
 def test_postgres_users_are_the_snapshot_population(
-    database, holdings_factory, postgres_session_factory
+    database, holdings_factory, snapshot_factory
 ):
-    holder = _insert_postgres_user(postgres_session_factory)
-    empty = _insert_postgres_user(postgres_session_factory)
+    holder = _insert_postgres_user(snapshot_factory)
+    empty = _insert_postgres_user(snapshot_factory)
     mongo_only = ObjectId()
 
     database["users"].insert_one({"_id": mongo_only})
     database["holdings"].insert_one(holdings_factory(holder))
     database["holdings"].insert_one(holdings_factory(mongo_only, symbol="TCS"))
 
-    portfolio_snapshot.record_daily_snapshot(database, postgres_session_factory)
+    portfolio_snapshot.record_daily_snapshot(database, snapshot_factory)
 
-    snapshot = database["portfoliosnapshots"].find_one({"user": holder})
-    assert snapshot["value"] == 25000.0
-    assert snapshot["invested"] == 24005.0
-
-    blank = database["portfoliosnapshots"].find_one({"user": empty})
-    assert blank["value"] == 0.0
-    assert blank["invested"] == 0.0
+    rows = {row.user_id: row for row in _snapshots(snapshot_factory)}
+    assert rows[str(holder)].value == Decimal("25000")
+    assert rows[str(holder)].invested == Decimal("24005")
+    assert rows[str(empty)].value == Decimal("0")
+    assert rows[str(empty)].invested == Decimal("0")
 
     # The MongoDB `users` collection is no longer the population source.
-    assert database["portfoliosnapshots"].count_documents({"user": mongo_only}) == 0
+    assert str(mongo_only) not in rows
 
 
-def test_short_legs_reduce_the_mis_value(database, holdings_factory, positions_factory):
-    user = ObjectId()
+def test_short_legs_reduce_the_mis_value(
+    database, holdings_factory, positions_factory, snapshot_factory
+):
+    user = _insert_postgres_user(snapshot_factory)
     database["holdings"].insert_one(holdings_factory(user))
     # Short 5 at 1500, now 1520 -> a 100 loss.
     database["positions"].insert_one(
         positions_factory(user, side="SHORT", qty=5, entry=1500.0, ltp=1520.0)
     )
 
-    portfolio_snapshot.record_daily_snapshot(database, _session_factory([str(user)]))
+    portfolio_snapshot.record_daily_snapshot(database, snapshot_factory)
 
-    snapshot = database["portfoliosnapshots"].find_one({"user": user})
-    assert snapshot["misInvested"] == 7500.0
-    assert snapshot["misValue"] == 7400.0
+    snapshot = _snapshots(snapshot_factory)[0]
+    assert snapshot.mis_invested == Decimal("7500")
+    assert snapshot.mis_value == Decimal("7400")
 
 
 def test_a_second_run_on_the_same_day_overwrites_in_place(
-    database, holdings_factory, positions_factory
+    database, holdings_factory, snapshot_factory
 ):
-    user = ObjectId()
+    user = _insert_postgres_user(snapshot_factory)
     holding = holdings_factory(user)
     database["holdings"].insert_one(holding)
 
-    factory = _session_factory([str(user)])
-    portfolio_snapshot.record_daily_snapshot(database, factory)
-    first = database["portfoliosnapshots"].find_one({"user": user})
+    portfolio_snapshot.record_daily_snapshot(database, snapshot_factory)
+    first = _snapshots(snapshot_factory)[0]
 
     database["holdings"].update_one({"_id": holding["_id"]}, {"$set": {"ltp": 2600.0}})
-    time.sleep(0.02)  # MongoDB dates have millisecond resolution
-    portfolio_snapshot.record_daily_snapshot(database, factory)
+    time.sleep(0.02)  # PostgreSQL timestamps have millisecond resolution
+    portfolio_snapshot.record_daily_snapshot(database, snapshot_factory)
 
-    assert database["portfoliosnapshots"].count_documents({"user": user}) == 1
-    second = database["portfoliosnapshots"].find_one({"user": user})
-    assert second["_id"] == first["_id"]
-    assert second["createdAt"] == first["createdAt"]
-    assert second["value"] == 26000.0
-    assert second["updatedAt"] > first["updatedAt"]
+    rows = _snapshots(snapshot_factory)
+    assert len(rows) == 1
+    second = rows[0]
+    assert second.id == first.id
+    assert second.created_at == first.created_at
+    assert second.value == Decimal("26000")
+    assert second.updated_at > first.updated_at
 
 
 def test_a_failure_does_not_raise_and_stops_the_rest(
-    database, holdings_factory, monkeypatch
+    database, holdings_factory, snapshot_factory
 ):
-    first = ObjectId()
-    broken = ObjectId()
+    first = _insert_postgres_user(snapshot_factory)
+    broken = _insert_postgres_user(
+        snapshot_factory,
+        created=datetime(2026, 10, 25, 12, 0, 1, tzinfo=timezone.utc),
+    )
     database["holdings"].insert_one(holdings_factory(first))
     # No `ltp`, so the value sum raises for the second user.
     database["holdings"].insert_one(
@@ -236,21 +217,22 @@ def test_a_failure_does_not_raise_and_stops_the_rest(
     )
 
     # must not raise
-    portfolio_snapshot.record_daily_snapshot(
-        database, _session_factory([str(first), str(broken)])
-    )
+    portfolio_snapshot.record_daily_snapshot(database, snapshot_factory)
 
-    assert database["portfoliosnapshots"].count_documents({"user": first}) == 1
-    assert database["portfoliosnapshots"].count_documents({"user": broken}) == 0
+    rows = {row.user_id: row for row in _snapshots(snapshot_factory)}
+    assert str(first) in rows
+    assert str(broken) not in rows
 
 
-def test_a_postgres_enumeration_failure_is_logged_and_writes_nothing(database, caplog):
+def test_a_postgres_enumeration_failure_is_logged_and_writes_nothing(
+    database, snapshot_factory, caplog
+):
     def broken_factory():
         raise RuntimeError("postgres unavailable")
 
     portfolio_snapshot.record_daily_snapshot(database, broken_factory)
 
-    assert database["portfoliosnapshots"].count_documents({}) == 0
+    assert _snapshots(snapshot_factory) == []
     assert "Portfolio snapshot failed" in caplog.text
 
 

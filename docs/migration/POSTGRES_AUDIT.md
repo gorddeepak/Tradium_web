@@ -17,14 +17,16 @@
 > `docs/migration/MIGRATION_PLAN.md` (phase gates), and `docs/migration/MIGRATION_STATUS.md`
 > (known issues and prior verification).
 >
-> **Current state (2026-10-26, Phase 3B3.1).** This audit is the pre-migration baseline and is kept
-> unchanged below. Since it was written, four surfaces have moved to PostgreSQL:
+> **Current state (2026-10-26, Phase 3C1).** This audit is the pre-migration baseline and is kept
+> unchanged below. Since it was written, five surfaces have moved to PostgreSQL:
 > `users` (Phase 3B1 — authentication and the daily snapshot user list), `instruments` and
-> `latest_quotes` (Phase 3B2 — market cache) and `watchlists` (Phase 3B3 — `GET`/`POST`/`DELETE
-> `/api/watchlist`; Phase 3B3.1 — `price_sync` symbol source and Nova's `getWatchlist`). Still
-> MongoDB-backed: `holdings`, `positions`, `orders`, `funds`, `transactions`, the `portfoliosnapshots`
-> documents, and Nova's other tools. No automatic MongoDB → PostgreSQL data load exists for users or
-> watchlists. See `MIGRATION_STATUS.md` §3P–§3S and §4 for the current gaps.
+> `latest_quotes` (Phase 3B2 — market cache), `watchlists` (Phase 3B3 — `GET`/`POST`/`DELETE
+> `/api/watchlist`; Phase 3B3.1 — `price_sync` symbol source and Nova's `getWatchlist`) and
+> `portfolio_snapshots` (Phase 3C1 — daily job and the historical history points). Still
+> MongoDB-backed: `holdings`, `positions`, `orders`, `funds`, `transactions`, the retired
+> `portfoliosnapshots` archive, and Nova's other tools. No automatic MongoDB → PostgreSQL data load
+> exists for users, watchlists or snapshots. See `MIGRATION_STATUS.md` §3P–§3U and §4 for the
+> current gaps.
 
 ## Contents
 

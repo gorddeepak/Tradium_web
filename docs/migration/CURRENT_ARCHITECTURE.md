@@ -6,13 +6,15 @@
 > different project; where a behaviour could not be confirmed from source, it is marked **UNRESOLVED** or
 > **ASSUMPTION**.
 >
-> **Current state (2026-10-26, Phase 3B3.1).** This document describes the Express reference in
+> **Current state (2026-10-26, Phase 3C1).** This document describes the Express reference in
 > `server/` (the source snapshot) and remains accurate for it. The active FastAPI service in `api/` now
 > splits the data layer: PostgreSQL owns `users` (authentication, snapshot user list), `instruments`,
-> `latest_quotes` (market cache) and `watchlists` (API, `price_sync` symbol source and Nova's
-> `getWatchlist`); MongoDB still owns `holdings`, `positions`, `orders`, `funds`, `transactions`, the
-> `portfoliosnapshots` documents, and Nova's other tools. There is no automatic MongoDB → PostgreSQL
-> loader for users or watchlists. See `MIGRATION_STATUS.md` §4.
+> `latest_quotes` (market cache), `watchlists` (API, `price_sync` symbol source and Nova's
+> `getWatchlist`) and `portfolio_snapshots` (daily job and historical history points, plus the snapshot
+> archive for `/api/portfolio/history`); MongoDB still owns `holdings`, `positions`, `orders`, `funds`,
+> `transactions`, the old `portfoliosnapshots` documents (retired archive) and Nova's other tools. There
+> is no automatic MongoDB → PostgreSQL loader for users, watchlists or snapshots. See
+> `MIGRATION_STATUS.md` §4.
 
 This document describes the application **as it exists today**. The target design is in
 [ARCHITECTURE_DECISIONS.md](./ARCHITECTURE_DECISIONS.md) and [MIGRATION_PLAN.md](./MIGRATION_PLAN.md).

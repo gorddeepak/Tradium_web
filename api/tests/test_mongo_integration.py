@@ -10,12 +10,14 @@ The database name must end with "_test" so this can never touch the live
 afterwards.
 
 The scheduled-job test also needs TEST_DATABASE_URL, because the daily
-snapshot now enumerates users from PostgreSQL; it is skipped without it.
+snapshot enumerates users and writes its rows in PostgreSQL; it is skipped
+without it.
 """
 
 import os
 import secrets
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import bcrypt
 import jwt
@@ -28,7 +30,7 @@ from sqlalchemy import select
 from api.main import create_app
 from api.jobs.portfolio_snapshot import record_daily_snapshot, snapshot_date
 from api.jobs.price_sync import run_sync
-from api.postgres.models import User
+from api.postgres.models import PortfolioSnapshot, User
 from api.postgres.session import get_session
 
 TEST_MONGO_URL = os.getenv("TEST_MONGO_URL")
@@ -56,9 +58,9 @@ def scratch_database():
         client.close()
 
 
-def _insert_postgres_user(session_factory, created):
+def _insert_postgres_user(session_factory, created, user_id=None):
     """Insert a user into the canonical PostgreSQL identity table."""
-    user_id = secrets.token_hex(12)
+    user_id = user_id or secrets.token_hex(12)
     with session_factory() as session:
         session.add(
             User(
@@ -204,26 +206,38 @@ def test_positions_and_funds_read_real_mongo_documents(scratch_database, monkeyp
     assert body["realizedPnl"] == -250.5
 
 
-def test_portfolio_and_transactions_read_real_mongo_documents(
-    scratch_database, monkeypatch
+def test_portfolio_and_transactions_read_real_databases(
+    scratch_database, postgres_session_factory, monkeypatch
 ):
-    # Confirms the newly used collection names (`portfoliosnapshots`,
-    # `transactions`) resolve against a real MongoDB. Market data moved to
-    # PostgreSQL in Phase 3B2 and is covered by the PostgreSQL suite.
+    # Transactions still come from a real MongoDB. Portfolio history reads the
+    # PostgreSQL snapshot table (Phase 3C1) while the live point still uses the
+    # real MongoDB holdings.
     monkeypatch.setenv("JWT_SECRET", "test-secret-not-a-real-key")
 
     user_id = ObjectId()
     created = datetime(2026, 9, 1, 4, 15, 30, 123456, tzinfo=timezone.utc)
+    _insert_postgres_user(postgres_session_factory, created, str(user_id))
+    with postgres_session_factory() as session:
+        session.add(
+            PortfolioSnapshot(
+                id=secrets.token_hex(12),
+                user_id=str(user_id),
+                snapshot_date=datetime(2026, 9, 1, tzinfo=timezone.utc).date(),
+                value=Decimal("200"),
+                invested=Decimal("180"),
+                mis_value=Decimal("0"),
+                mis_invested=Decimal("0"),
+                created_at=created,
+                updated_at=created,
+                version=0,
+            )
+        )
+        session.commit()
 
     scratch_database["holdings"].insert_one(
         {"_id": ObjectId(), "user": user_id, "symbol": "INFY", "name": "Infosys",
          "exchange": "NSE", "qty": 2, "avgPrice": 100.0, "ltp": 110.0,
          "dayChangePct": 0.0, "sector": "", "createdAt": created, "updatedAt": created, "__v": 0}
-    )
-    scratch_database["portfoliosnapshots"].insert_one(
-        {"_id": ObjectId(), "user": user_id, "date": datetime(2026, 9, 1, tzinfo=timezone.utc),
-         "value": 200.0, "invested": 180.0, "misInvested": 0.0, "misValue": 0.0,
-         "createdAt": created, "updatedAt": created, "__v": 0}
     )
     scratch_database["transactions"].insert_one(
         {"_id": ObjectId(), "user": user_id, "kind": "DEPOSIT", "method": "UPI",
@@ -233,6 +247,12 @@ def test_portfolio_and_transactions_read_real_mongo_documents(
 
     token = jwt.encode({"id": str(user_id)}, "test-secret-not-a-real-key", algorithm="HS256")
     app = create_app(database=scratch_database)
+
+    def override_get_session():
+        with postgres_session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_get_session
 
     with TestClient(app) as client:
         transactions = client.get("/api/funds/transactions", cookies={"token": token})
@@ -368,16 +388,23 @@ def test_scheduled_jobs_against_real_mongo(
 
     record_daily_snapshot(scratch_database, postgres_session_factory)
 
-    snapshot = scratch_database["portfoliosnapshots"].find_one({"user": user_id})
-    assert snapshot["value"] == 16000.0
-    assert snapshot["invested"] == 15000.0
-    assert snapshot["misValue"] == 0.0
-    assert snapshot["misInvested"] == 0.0
-    assert snapshot["__v"] == 0
-    assert snapshot["date"].replace(tzinfo=timezone.utc) == snapshot_date()
+    with postgres_session_factory() as session:
+        snapshot = session.scalar(
+            select(PortfolioSnapshot).where(PortfolioSnapshot.user_id == str(user_id))
+        )
+    assert snapshot.value == Decimal("16000")
+    assert snapshot.invested == Decimal("15000")
+    assert snapshot.mis_value == Decimal("0")
+    assert snapshot.mis_invested == Decimal("0")
+    assert snapshot.version == 0
+    assert snapshot.snapshot_date == snapshot_date().date()
     # Idempotent per IST day: a second run updates the same row.
     record_daily_snapshot(scratch_database, postgres_session_factory)
-    assert scratch_database["portfoliosnapshots"].count_documents({"user": user_id}) == 1
+    with postgres_session_factory() as session:
+        rows = session.scalars(
+            select(PortfolioSnapshot).where(PortfolioSnapshot.user_id == str(user_id))
+        ).all()
+    assert len(rows) == 1
 
 
 def test_auth_uses_postgres_while_mongo_routes_stay_real(

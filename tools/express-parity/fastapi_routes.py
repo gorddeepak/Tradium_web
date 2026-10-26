@@ -34,7 +34,6 @@ ROUTES = [
     ("positions", "/api/positions"),
     ("funds", "/api/funds"),
     ("fundsTransactions", "/api/funds/transactions"),
-    ("portfolioHistory1Y", "/api/portfolio/history?range=1Y"),
     ("marketOverview", "/api/market/overview"),
     ("instrumentsSearchIN", "/api/instruments/search?q=IN"),
     ("instrumentsSearchBlank", "/api/instruments/search?q="),

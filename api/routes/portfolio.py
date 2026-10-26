@@ -3,11 +3,12 @@
 The Express route is:
     router.get("/history", protect, async (req, res) => { ... });
 
-Snapshots store the IST calendar day at UTC midnight (see
-server/jobs/portfolioSnapshot.js), and API_CONTRACTS §0.5 says business-day
-logic uses IST. The Express code formatted labels with the server's local
-zone; IST is used here so the labels are deterministic and match the intended
-environment.
+The daily snapshots are canonical in PostgreSQL (Phase 3C1) and store the IST
+calendar day. The live "today" point still comes from the MongoDB holdings and
+positions, because the trading book has not moved yet.
+
+The Express code formatted labels with the server's local zone; IST is used
+here so the labels are deterministic and match the intended environment.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -15,10 +16,14 @@ from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from fastapi import APIRouter, Depends
 from pymongo.database import Database
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ..auth import require_user
 from ..db import get_database
 from ..portfolio_math import mis_components
+from ..postgres.models import PortfolioSnapshot
+from ..postgres.session import get_session
 
 router = APIRouter()
 
@@ -28,34 +33,38 @@ IST = timezone(timedelta(hours=5, minutes=30))
 RANGE_DAYS = {"1D": 1, "1W": 7, "1M": 30, "1Y": 365, "ALL": 100000}
 
 
-def _local_date(value: datetime) -> str:
-    # PyMongo returns naive UTC datetimes; `en-CA` formatting is YYYY-MM-DD.
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(IST).strftime("%Y-%m-%d")
-
-
 @router.get("/api/portfolio/history")
 def portfolio_history(
     range: str = "1M",
     user_id: str = Depends(require_user),
     db: Database = Depends(get_database),
+    session: Session = Depends(get_session),
 ):
     user = ObjectId(user_id)
     days = RANGE_DAYS.get(range, 30)
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    today = datetime.now(timezone.utc).astimezone(IST).date()
+    # Include today: `days` calendar points end at today, as the Express
+    # instant-based cutoff did for a request made after the 05:30 UTC snapshot.
+    since = today - timedelta(days=days - 1)
 
-    snapshots = list(
-        db["portfoliosnapshots"].find({"user": user, "date": {"$gte": since}}).sort("date", 1)
-    )
+    snapshots = session.scalars(
+        select(PortfolioSnapshot)
+        .where(
+            PortfolioSnapshot.user_id == user_id,
+            PortfolioSnapshot.snapshot_date >= since,
+        )
+        .order_by(PortfolioSnapshot.snapshot_date.asc())
+    ).all()
 
     series = [
         {
-            "label": _local_date(snapshot["date"]),
-            "value": snapshot["value"] + (snapshot.get("misValue") or 0),
+            "label": snapshot.snapshot_date.isoformat(),
+            "value": float(snapshot.value) + float(snapshot.mis_value or 0),
             # null keeps the chart's gap for pre-`invested` snapshots.
-            "invested": (snapshot["invested"] + (snapshot.get("misInvested") or 0))
-            if snapshot.get("invested")
+            "invested": (
+                float(snapshot.invested) + float(snapshot.mis_invested or 0)
+            )
+            if snapshot.invested
             else None,
         }
         for snapshot in snapshots
@@ -69,7 +78,7 @@ def portfolio_history(
     positions = list(db["positions"].find({"user": user, "product": "MIS"}))
     mis_value, mis_invested = mis_components(positions)
 
-    today_label = datetime.now(timezone.utc).astimezone(IST).strftime("%Y-%m-%d")
+    today_label = today.isoformat()
     if not series or series[-1]["label"] != today_label:
         series.append(
             {

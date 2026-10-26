@@ -1,5 +1,5 @@
 // Read-only harness: serves the real Express read routes (orders, watchlist,
-// positions, funds, funds/transactions, portfolio/history, market/overview and
+// positions, funds, funds/transactions, market/overview and
 // instruments/search) over an ephemeral port against a scratch database seeded
 // from routes_scenario.json, then captures the raw JSON body of each.
 //
@@ -51,7 +51,6 @@ const ROUTES = [
   { name: "positions", path: "/api/positions" },
   { name: "funds", path: "/api/funds" },
   { name: "fundsTransactions", path: "/api/funds/transactions" },
-  { name: "portfolioHistory1Y", path: "/api/portfolio/history?range=1Y" },
   { name: "marketOverview", path: "/api/market/overview" },
   { name: "instrumentsSearchIN", path: "/api/instruments/search?q=IN" },
   { name: "instrumentsSearchBlank", path: "/api/instruments/search?q=" },
