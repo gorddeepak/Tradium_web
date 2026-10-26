@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
 
+from api import assistant
 from api.main import create_app
 from api.postgres.models import User, Watchlist
 from api.postgres.session import get_session
@@ -415,3 +416,42 @@ def test_watchlist_routes_require_authentication(client):
     assert (
         client.delete("/api/watchlist/0123456789abcdef01234567").status_code == 401
     )
+
+
+# --------------------------------------------------------------------------
+# Nova's getWatchlist tool reads the same PostgreSQL table
+# --------------------------------------------------------------------------
+
+
+def test_nova_watchlist_reads_the_users_rows_in_order(
+    database, session_factory, market_instrument_factory
+):
+    user = insert_user(session_factory)
+    other = insert_user(session_factory, username="other", email="other@example.com")
+
+    market_instrument_factory(symbol="INFY", ltp=1500.25, day_change_pct=0.5)
+    # TCS has an instrument but no quote yet.
+    market_instrument_factory(symbol="TCS", quote=False)
+
+    insert_watchlist(session_factory, user.id, symbol="INFY", created_at=NOW)
+    insert_watchlist(
+        session_factory, user.id, symbol="TCS", name="Tata Consultancy", created_at=LATER
+    )
+    insert_watchlist(session_factory, other.id, symbol="RELIANCE")
+
+    snapshot = assistant.watchlist_snapshot(user.id, session_factory)
+
+    assert snapshot["data"] == [
+        {"symbol": "INFY", "ltp": 1500.25, "dayChangePct": 0.5},
+        {"symbol": "TCS", "ltp": 0, "dayChangePct": 0},
+    ]
+    assert snapshot["summary"].startswith("Watchlist 2 symbols")
+    assert "INFY" in snapshot["summary"]
+
+
+def test_nova_watchlist_reports_an_empty_list(database, session_factory):
+    user = insert_user(session_factory)
+
+    snapshot = assistant.watchlist_snapshot(user.id, session_factory)
+
+    assert snapshot == {"data": [], "summary": "Watchlist 0 symbols"}

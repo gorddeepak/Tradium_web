@@ -6,20 +6,21 @@ wall clock or on a real trading session. mongomock can run every write this job
 uses (``update_one``, ``find_one_and_update`` with ``$inc``, upserts).
 """
 
-from datetime import timezone
+import secrets
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
 from bson import ObjectId
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from api import scheduler
 from api.jobs import price_sync
 from api.main import create_app
 from api.market_data import MarketDataError
 from api.order_engine import apply_fill, settle_mis_exit
-from api.postgres.models import Instrument, LatestQuote
+from api.postgres.models import Instrument, LatestQuote, User, Watchlist
 
 
 def _open_market(monkeypatch):
@@ -750,3 +751,146 @@ def test_an_empty_instrument_sector_is_left_for_a_later_run(
     instrument, _quote = _pg_quote(postgres_session_factory, "RELIANCE")
     assert instrument.sector == ""
     assert database["holdings"].find_one({"user": user})["sector"] == ""
+
+
+# --------------------------------------------------------------------------
+# Watchlist symbols: PostgreSQL is the source when a factory is supplied
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def postgres_watchlist(postgres_session_factory):
+    """Seed PostgreSQL watchlist rows and leave the table empty afterwards."""
+    created = datetime(2026, 9, 1, 4, 15, 30, tzinfo=timezone.utc)
+
+    def _insert(symbol, user_id=None):
+        if user_id is None:
+            user_id = secrets.token_hex(12)
+            with postgres_session_factory() as session:
+                session.add(
+                    User(
+                        id=user_id,
+                        username=f"user-{user_id}",
+                        email=f"{user_id}@example.com",
+                        password_hash="not-used-in-price-sync-tests",
+                        created_at=created,
+                        updated_at=created,
+                        version=0,
+                    )
+                )
+                session.commit()
+        with postgres_session_factory() as session:
+            session.add(
+                Watchlist(
+                    id=secrets.token_hex(12),
+                    user_id=user_id,
+                    symbol=symbol,
+                    name=symbol,
+                    exchange="NSE",
+                    created_at=created,
+                    updated_at=created,
+                    version=0,
+                )
+            )
+            session.commit()
+        return user_id
+
+    # Other modules seed users and watchlists against the same database.
+    with postgres_session_factory.begin() as connection:
+        connection.execute(text("TRUNCATE TABLE watchlists"))
+    yield _insert
+    with postgres_session_factory.begin() as connection:
+        connection.execute(text("TRUNCATE TABLE watchlists"))
+
+
+def test_postgres_watchlist_symbols_are_quoted_and_the_mongo_row_is_gone(
+    database, postgres_session_factory, postgres_watchlist, monkeypatch
+):
+    postgres_watchlist("INFY")
+    _open_market(monkeypatch)
+    calls = _quotes(monkeypatch, {"INFY.NS": _row(1500.25, 0.5)})
+
+    price_sync.run_sync(database, postgres_session_factory)
+
+    assert calls == [["INFY.NS"]]
+    _instrument, quote = _pg_quote(postgres_session_factory, "INFY")
+    assert quote.ltp == Decimal("1500.2500")
+    assert quote.day_change_pct == Decimal("0.500000")
+    # There is no MongoDB watchlist row any more, so nothing is mirrored.
+    assert database["watchlists"].count_documents({}) == 0
+
+
+def test_book_refresh_is_unchanged_and_mongo_watchlists_are_not_read(
+    database,
+    holdings_factory,
+    positions_factory,
+    watchlist_factory,
+    postgres_session_factory,
+    postgres_watchlist,
+    monkeypatch,
+):
+    user = ObjectId()
+    database["holdings"].insert_one(holdings_factory(user, symbol="RELIANCE", sector="Energy"))
+    database["positions"].insert_one(positions_factory(user, symbol="INFY"))
+    # A leftover Mongo watchlist row must not be treated as a source.
+    database["watchlists"].insert_one(watchlist_factory(user, symbol="TCS"))
+
+    postgres_watchlist("INFY")
+    postgres_watchlist("WIPRO")
+    _open_market(monkeypatch)
+    calls = _quotes(
+        monkeypatch,
+        {
+            "RELIANCE.NS": _row(1600.0, 0.5),
+            "INFY.NS": _row(1500.0, -0.5),
+            "WIPRO.NS": _row(400.0, 0.25),
+        },
+    )
+
+    price_sync.run_sync(database, postgres_session_factory)
+
+    # Holdings, positions, then the PostgreSQL watchlist; TCS is not quoted.
+    assert calls == [["RELIANCE.NS", "INFY.NS", "WIPRO.NS"]]
+    assert database["holdings"].find_one({"user": user})["ltp"] == 1600.0
+    assert database["positions"].find_one({"user": user})["ltp"] == 1500.0
+    assert database["watchlists"].find_one({"user": user})["ltp"] == 1500.0
+
+
+def test_a_watchlist_read_failure_still_refreshes_the_book(
+    database, holdings_factory, postgres_session_factory, monkeypatch
+):
+    user = ObjectId()
+    database["holdings"].insert_one(holdings_factory(user, symbol="RELIANCE", sector="Energy"))
+    _open_market(monkeypatch)
+    _quotes(monkeypatch, {"RELIANCE.NS": _row(1600.0, 0.5)})
+
+    def broken(session_factory):
+        raise RuntimeError("watchlists unavailable")
+
+    monkeypatch.setattr(price_sync, "_postgres_watchlist", broken)
+
+    price_sync.run_sync(database, postgres_session_factory)
+
+    assert database["holdings"].find_one({"user": user})["ltp"] == 1600.0
+
+
+def test_open_limit_orders_still_fill_with_postgres_watchlists(
+    database,
+    user_id,
+    orders_factory,
+    postgres_session_factory,
+    postgres_watchlist,
+    monkeypatch,
+):
+    order = orders_factory(user_id, side="BUY", type="LIMIT", product="CNC", qty=5, price=100.0)
+    database["orders"].insert_one(order)
+    postgres_watchlist("INFY")
+    _open_market(monkeypatch)
+    _quotes(monkeypatch, {"INFY.NS": _row(99.5, -1.0)})
+
+    price_sync.run_sync(database, postgres_session_factory)
+
+    claimed = database["orders"].find_one({"_id": order["_id"]})
+    assert claimed["status"] == "EXECUTED"
+    assert claimed["price"] == 100.0
+    assert database["holdings"].find_one({"user": user_id})["qty"] == 5

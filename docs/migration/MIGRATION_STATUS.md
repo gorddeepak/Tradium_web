@@ -1,12 +1,13 @@
 # Migration Status
 
-**Last updated:** 2026-10-26 (Phase 3B3)
-**Current phase:** **Phase 3B3 — PostgreSQL snapshot identity and watchlists**
+**Last updated:** 2026-10-26 (Phase 3B3.1)
+**Current phase:** **Phase 3B3.1 — PostgreSQL watchlist consumers**
 **Application code modified:** **Yes.** Phase 3B1 moved authentication to PostgreSQL; Phase 3B2 moved
 the market cache there and made `price_sync` a dual writer; Phase 3B3 moved watchlists there and made
-the daily snapshot enumerate users from PostgreSQL. `server/` and the original repository remain
-untouched. Holdings, positions, orders, funds, transactions, the snapshot documents themselves, and
-Nova's tools are still MongoDB-backed.
+the daily snapshot enumerate users from PostgreSQL; Phase 3B3.1 moved price sync and Nova's watchlist
+tool onto the same table. `server/` and the original repository remain untouched. Holdings, positions,
+orders, funds, transactions, the snapshot documents themselves, and Nova's other tools are still
+MongoDB-backed.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -16,14 +17,14 @@ Nova's tools are still MongoDB-backed.
 
 | Item | Value |
 |---|---|
-| Phase | 3B3 — PostgreSQL snapshot identity and watchlists |
+| Phase | 3B3.1 — PostgreSQL watchlist consumers |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
 | PostgreSQL schema | **created by Alembic** — `api/migrations/versions/0001_initial_schema.py` creates all 10 tables (`users`, `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists`, `instruments`, `latest_quotes`, `portfolio_snapshots`) plus `alembic_version`; verified by `alembic upgrade head` on a disposable PostgreSQL 17.6 cluster |
-| PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3) and the **snapshot user list** (Phase 3B3) |
-| MongoDB-backed surfaces | **book data, snapshot documents and AI tools** — holdings, positions, orders, funds, transactions, `portfoliosnapshots`, and everything Nova reads |
+| PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3), the **snapshot user list** (Phase 3B3), **price sync's watchlist symbols** (Phase 3B3.1) and **Nova's `getWatchlist`** (Phase 3B3.1) |
+| MongoDB-backed surfaces | **book data, snapshot documents and the other AI tools** — holdings, positions, orders, funds, transactions, `portfoliosnapshots`, and Nova's other reads |
 | Market cache | `instruments` + `latest_quotes` in PostgreSQL; market sync seeds the **53-symbol universe**; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
-| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices and upserts the canonical PostgreSQL quote) and the daily 18:00 IST snapshot, which enumerates users from PostgreSQL; **off unless `TRADING_JOBS_ENABLED` is set** |
-| Known transition gaps | `price_sync` still gathers watchlist symbols from MongoDB; Nova's `getWatchlist` still reads the singular MongoDB `watchlist` collection; there is no automatic MongoDB → PostgreSQL loader for users or watchlists |
+| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices, upserts the canonical PostgreSQL quote and reads watchlist symbols from PostgreSQL) and the daily 18:00 IST snapshot, which enumerates users from PostgreSQL; **off unless `TRADING_JOBS_ENABLED` is set** |
+| Known transition gaps | there is no automatic MongoDB → PostgreSQL loader for users or watchlists, so pre-migration rows stay invisible |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | **switched** to FastAPI on `localhost:8000`; a production build is now **served by FastAPI** (SPA fallback) when `SERVE_STATIC`/`NODE_ENV=production`; `VITE_API_URL` still overrides |
 | CORS | Vite dev origins (5173-5177) with credentials; `CORS_ORIGINS` overrides for deployed origins; a same-origin production build needs neither |
@@ -40,7 +41,7 @@ Nova's tools are still MongoDB-backed.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **367 passed, 7 skipped** with only `TEST_DATABASE_URL`; **374 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3B3) — see §5 |
+| Tests executed | **373 passed, 7 skipped** with only `TEST_DATABASE_URL`; **380 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3B3.1) — see §5 |
 | PostgreSQL test instance | PostgreSQL 17.6, disposable local cluster on a temporary path, database `tradium_phase3b_wrapup_test`; scoped to this run and outside the repository |
 | Express parity check | **run (Phase 2e)** — cookies, numeric rendering and job side effects; **no functional difference** (§3K) |
 | Read-route parity check | **run (Phase 4b)** — byte-identical for the Mongo-backed read routes at the time; **not rerun after the Phase 3B2 backend move** (§3Q) |
@@ -1410,8 +1411,31 @@ MongoDB, without touching holdings, positions, orders, funds, transactions or fi
 - The existing Mongo holdings, positions, orders, funds, transactions, snapshot-persistence,
   market-cache and price-sync suites passed unchanged.
 - No loader was added, so existing MongoDB users and watchlists do not appear in PostgreSQL.
-- Two transition gaps remain and are recorded in §4: `price_sync` still sources watchlist symbols
-  from MongoDB, and Nova's watchlist tool still reads the singular MongoDB collection.
+
+---
+
+## 3S. Phase 3B3.1 — the remaining watchlist consumers
+
+**Goal:** make the two code paths that still read MongoDB watchlists use the same PostgreSQL table.
+No other collection or tool moved.
+
+- `run_sync` reads watchlist symbols from `watchlists` whenever it receives a session factory, and no
+  longer writes the mirrored `ltp`/`dayChangePct` onto MongoDB rows. Holdings, positions, open orders,
+  quote batching, fills and MIS settlement are untouched. The MongoDB read/write remains only when no
+  factory is supplied, which is the Express-parity harness path.
+- A failed PostgreSQL watchlist read is logged and the run continues with holdings, positions and
+  orders, so an unreadable watchlist cannot block a fill.
+- Nova's `watchlist_snapshot` queries `watchlists` scoped to the token user, joins `instruments` and
+  `latest_quotes`, orders by `created_at ASC, id ASC`, and reports `0` for a missing quote. Its output
+  (`symbol`, `ltp`, `dayChangePct`) and summary are unchanged.
+- Focused tests cover the PostgreSQL source, the untouched book path, a watchlist read failure, Nova
+  ordering/isolation and empty or quote-less watchlists.
+
+### Verification and limits
+
+- Full suite: **373 passed, 7 skipped** with `TEST_DATABASE_URL`; **380 passed, 0 skipped** with
+  `TEST_MONGO_URL` as well (6 new tests).
+- There is still no automatic MongoDB → PostgreSQL loader for users or watchlists.
 
 ---
 
@@ -1450,15 +1474,13 @@ Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
     `marketquotes`; the FastAPI jobs write `instruments`/`latest_quotes`. They are independent. The
     single-scheduler-owner rule keeps both from refreshing at once, but a dormant cache will go stale and
     must not be read by anything.
-13. **Nova's watchlist tool still reads the wrong collection** (`db["watchlist"]`,
-    `api/assistant.py:227`; the real one is `watchlists`). Phase 3B3 moved the watchlist API to
-    PostgreSQL but did not touch the assistant. The tool therefore returns no rows for a user whose
-    watchlist exists only in PostgreSQL. It is recorded in `POSTGRES_AUDIT.md` §5 issue 5.
-14. **`price_sync` still sources watchlist symbols from MongoDB.** It reads `db["watchlists"]` to decide
-    which book rows to refresh and to update the mirrored watchlist `ltp`, while the watchlist API now
-    writes the PostgreSQL `watchlists` table. A symbol added through the API has no Mongo row, so it is
-    not refreshed in the Mongo book; the PostgreSQL quote is still updated because the sync universe
-    covers all instruments.
+13. ~~Nova's watchlist tool read the wrong collection (`db["watchlist"]`; the real one is
+    `watchlists`).~~ **Fixed in Phase 3B3.1.** The tool now reads PostgreSQL `watchlists` joined to
+    `instruments`/`latest_quotes`, scoped to the token user. It is recorded in `POSTGRES_AUDIT.md`
+    §5 issue 5.
+14. ~~`price_sync` sourced watchlist symbols from MongoDB.~~ **Fixed in Phase 3B3.1.** With a session
+    factory it reads the PostgreSQL `watchlists` table and leaves the MongoDB mirror alone; the MongoDB
+    read/write remains only for the Express-parity harness path, which has no session factory.
 15. **`DEPLOYMENT.md` is stale.** Its environment table does not list `DATABASE_URL`, does not mention
     `DIRECT_DATABASE_URL`/`alembic upgrade head`, and still implies MongoDB alone is sufficient. The code
     is correct; the deployment guide was outside this slice.
@@ -1569,6 +1591,10 @@ Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
 | Watchlist contracts (Phase 3B3) | **verified** — `201` on create, `409` on duplicate, `400` on invalid body, always-`204` delete, `name` falls back to `symbol`, per-user isolation |
 | Application tests (Phase 3B3) | **run:** 367 passed, 7 skipped with `TEST_DATABASE_URL` only (the 7 are the optional real-MongoDB tests); 374 passed, 0 skipped with `TEST_MONGO_URL` too |
 | Test PostgreSQL instance (Phase 3B3) | disposable local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_phase3b_wrapup_test`; `initdb` trust auth; outside the repository |
+| Price-sync watchlist source (Phase 3B3.1) | **verified** — with a session factory the job quotes PostgreSQL `watchlists` symbols, leaves the MongoDB mirror untouched, and still fills open limit orders; holdings and positions are unchanged |
+| Watchlist read failure (Phase 3B3.1) | **verified** — a failing PostgreSQL watchlist query is logged and the book refresh still runs |
+| Nova watchlist tool (Phase 3B3.1) | **verified** — reads the token user's PostgreSQL rows in `created_at`/`id` order, joins quotes, reports `0` for missing quotes, and returns an empty list for a user with none |
+| Application tests (Phase 3B3.1) | **run:** 373 passed, 7 skipped with `TEST_DATABASE_URL` only; 380 passed, 0 skipped with `TEST_MONGO_URL` too (6 new tests) |
 
 ---
 

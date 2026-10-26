@@ -27,6 +27,7 @@ import math
 import threading
 
 from pymongo import ReturnDocument
+from sqlalchemy import select
 
 from ..documents import inc_funds, utcnow
 from ..market_data import MarketDataError, fetch_quotes, fetch_sector, ticker_for
@@ -37,6 +38,7 @@ from ..market_store import (
     persist_price_quotes,
 )
 from ..order_engine import apply_fill, cancel_sibling_exits, settle_mis_exit
+from ..postgres.models import Watchlist
 
 logger = logging.getLogger(__name__)
 
@@ -87,16 +89,44 @@ def sync_prices(db, session_factory=None):
         _sync_lock.release()
 
 
+def _postgres_watchlist(session_factory):
+    """Watchlist symbols to quote, read from the canonical PostgreSQL table."""
+    with session_factory() as session:
+        rows = session.execute(
+            select(Watchlist.symbol, Watchlist.exchange, Watchlist.name).order_by(
+                Watchlist.created_at.asc(), Watchlist.id.asc()
+            )
+        ).all()
+    return [
+        {"symbol": symbol, "exchange": exchange, "name": name}
+        for symbol, exchange, name in rows
+    ]
+
+
 def run_sync(db, session_factory=None):
     """One full price/fill cycle. Exposed separately so tests can skip the gate.
 
     When a PostgreSQL session factory is supplied, the canonical quote state is
-    refreshed too. The book/order path stays MongoDB-backed and keeps using the
-    in-memory provider batch, so fills do not depend on that write succeeding.
+    refreshed too and watchlist symbols come from the ``watchlists`` table. The
+    book/order path stays MongoDB-backed and keeps using the in-memory provider
+    batch, so fills do not depend on that write succeeding.
+
+    Without a factory the job keeps its old MongoDB watchlist source. That path
+    is what the Express-parity harness compares against.
     """
     holdings = list(db["holdings"].find({}))
     positions = list(db["positions"].find({}))
-    watchlist = list(db["watchlists"].find({}))
+
+    update_mongo_watchlist = session_factory is None
+    if update_mongo_watchlist:
+        watchlist = list(db["watchlists"].find({}))
+    else:
+        try:
+            watchlist = _postgres_watchlist(session_factory)
+        except Exception:  # noqa: BLE001 - book prices and fills still proceed
+            logger.exception("PostgreSQL watchlist read failed; skipping it")
+            watchlist = []
+
     # Open limit orders need quotes so they can fill.
     open_orders = list(db["orders"].find({"status": "OPEN"}))
 
@@ -179,20 +209,23 @@ def run_sync(db, session_factory=None):
             {"$set": {"ltp": quote["ltp"], "updatedAt": utcnow()}},
         )
 
-    for item in watchlist:
-        quote = quotes.get(f"{item['symbol']}-{item['exchange']}")
-        if not quote:
-            continue
-        db["watchlists"].update_one(
-            {"_id": item["_id"]},
-            {
-                "$set": {
-                    "ltp": quote["ltp"],
-                    "dayChangePct": quote["dayChangePct"],
-                    "updatedAt": utcnow(),
-                }
-            },
-        )
+    # The canonical watchlist quote lives in PostgreSQL `latest_quotes`, so
+    # there is no MongoDB row to mirror. Only the parity path still has one.
+    if update_mongo_watchlist:
+        for item in watchlist:
+            quote = quotes.get(f"{item['symbol']}-{item['exchange']}")
+            if not quote:
+                continue
+            db["watchlists"].update_one(
+                {"_id": item["_id"]},
+                {
+                    "$set": {
+                        "ltp": quote["ltp"],
+                        "dayChangePct": quote["dayChangePct"],
+                        "updatedAt": utcnow(),
+                    }
+                },
+            )
 
     # Sectors live on PostgreSQL instruments now. This call is slow and only
     # runs for stocks without one. Holdings still display a stored Mongo

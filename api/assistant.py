@@ -16,10 +16,13 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 from pymongo.database import Database
+from sqlalchemy import func, select
 
 from .config import get_ai_settings
 from .js_compat import format_inr
 from .portfolio_math import calculate_portfolio_summary
+from .postgres.models import Instrument, LatestQuote, Watchlist
+from .postgres.session import get_session_factory
 from .serialization import to_json_value
 
 CHAT_SYSTEM_PROMPT = """You are Nova, the portfolio assistant built into Tradium — a sharp, sharp-eyed trading-desk analyst the user can talk to about their account.
@@ -222,16 +225,34 @@ def positions_snapshot(db, user_id):
     return {"data": items, "summary": summary}
 
 
-def watchlist_snapshot(db, user_id):
-    """Data and summary for the getWatchlist tool."""
-    watchlist = list(db["watchlist"].find({"user": _user_object_id(user_id)}))
+def watchlist_snapshot(user_id, session_factory=None):
+    """Data and summary for the getWatchlist tool.
+
+    Watchlists live in PostgreSQL (Phase 3B3). The table stores no prices, so
+    this joins the instrument and quote cache and reports 0 for a symbol whose
+    quote is missing, exactly like the watchlist route.
+    """
+    factory = session_factory or get_session_factory()
+    with factory() as session:
+        rows = session.execute(
+            select(
+                Watchlist.symbol,
+                func.coalesce(LatestQuote.ltp, 0),
+                func.coalesce(LatestQuote.day_change_pct, 0),
+            )
+            .outerjoin(Instrument, Instrument.symbol == Watchlist.symbol)
+            .outerjoin(LatestQuote, LatestQuote.instrument_id == Instrument.id)
+            .where(Watchlist.user_id == user_id)
+            .order_by(Watchlist.created_at.asc(), Watchlist.id.asc())
+        ).all()
+
     items = [
         {
-            "symbol": stock.get("symbol"),
-            "ltp": stock.get("ltp"),
-            "dayChangePct": stock.get("dayChangePct"),
+            "symbol": symbol,
+            "ltp": to_json_value(ltp),
+            "dayChangePct": to_json_value(day_change_pct),
         }
-        for stock in watchlist
+        for symbol, ltp, day_change_pct in rows
     ]
 
     top_mover = (
@@ -366,7 +387,7 @@ def get_positions(ctx: RunContext[NovaDeps]) -> dict:
 @chat_agent.tool(name="getWatchlist")
 def get_watchlist(ctx: RunContext[NovaDeps]) -> dict:
     """Get the user's tracked watchlist symbols with current price and today's change."""
-    return watchlist_snapshot(ctx.deps.db, ctx.deps.user_id)
+    return watchlist_snapshot(ctx.deps.user_id)
 
 
 @chat_agent.tool(name="getFunds")
