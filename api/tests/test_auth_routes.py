@@ -5,9 +5,8 @@ mongomock assertions. Like test_postgres_migration.py they run only when
 TEST_DATABASE_URL points at a disposable PostgreSQL database whose name ends
 in "_test"; there is no SQLite fallback.
 
-The rest of the API still reads MongoDB, so the client fixture pairs the real
-PostgreSQL session with an in-memory mongomock database. That mixed state is
-intentional for this phase.
+The app needs no MongoDB, so the client fixture overrides only the PostgreSQL
+session dependency.
 """
 
 import os
@@ -17,7 +16,6 @@ from datetime import datetime, timezone
 
 import bcrypt
 import jwt
-import mongomock
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -110,8 +108,8 @@ def clean_users(migrated_database):
 
 @pytest.fixture
 def client(session_factory):
-    """The API with PostgreSQL auth and mongomock for the remaining routes."""
-    app = create_app(database=mongomock.MongoClient()["tradium_test"])
+    """The API with the real PostgreSQL auth dependency overridden."""
+    app = create_app()
 
     def override_get_session():
         with session_factory() as session:

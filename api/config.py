@@ -1,7 +1,8 @@
 """Configuration read from the environment.
 
-Mirrors the Express server, which reads MONGO_URL and JWT_SECRET through
-dotenv and exits when MONGO_URL is missing.
+The FastAPI runtime is PostgreSQL-only: it needs ``DATABASE_URL`` and
+``JWT_SECRET``. The Express reference under ``server/`` still reads
+``MONGO_URL`` for its own process.
 """
 
 import os
@@ -55,7 +56,6 @@ def serve_static_enabled() -> bool:
 
 @dataclass(frozen=True)
 class Settings:
-    mongo_url: str
     jwt_secret: str
     host: str
     port: int
@@ -70,7 +70,6 @@ class Settings:
 def get_settings() -> Settings:
     """Read settings at call time so tests can patch the environment."""
     return Settings(
-        mongo_url=os.getenv("MONGO_URL", ""),
         jwt_secret=os.getenv("JWT_SECRET", ""),
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),

@@ -388,13 +388,13 @@ def test_scheduled_fill_and_snapshot_against_real_databases(
 def test_auth_uses_postgres_while_mongo_stays_real(
     scratch_database, book_session_factory, monkeypatch
 ):
-    # Authentication is canonical in PostgreSQL; the surviving Mongo reads are
-    # untouched, and auth must never write a MongoDB `users` document.
+    # Authentication is canonical in PostgreSQL; the retired Mongo collections
+    # stay untouched, and auth must never write a MongoDB `users` document.
     suffix = str(ObjectId())
     email = f"deepak-{suffix}@example.com"
     username = f"deepak{suffix}"
 
-    app = create_app(database=scratch_database)
+    app = create_app()
 
     def override_get_session():
         with book_session_factory() as session:

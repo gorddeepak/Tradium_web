@@ -14,7 +14,6 @@ import json
 import os
 from datetime import datetime, timezone
 
-import mongomock
 import pytest
 from fastapi.testclient import TestClient
 from pydantic_ai.messages import ToolReturnPart
@@ -37,8 +36,8 @@ OLDER = datetime(2026, 9, 1, 4, 15, 30, 123000, tzinfo=timezone.utc)
 
 @pytest.fixture
 def client():
-    """The API with mongomock for the app's remaining MongoDB wiring."""
-    app = create_app(database=mongomock.MongoClient()["tradium_test"])
+    """The API with PostgreSQL sessions. The app needs no MongoDB."""
+    app = create_app()
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 

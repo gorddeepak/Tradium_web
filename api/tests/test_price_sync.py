@@ -11,7 +11,6 @@ import secrets
 from datetime import datetime, timezone
 from decimal import Decimal
 
-import mongomock
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -529,9 +528,7 @@ def test_price_scheduler_runs_once_immediately_then_stops(monkeypatch):
     sentinel = object()
     monkeypatch.setattr(scheduler, "sync_prices", lambda factory: ticks.append(factory))
 
-    instance = scheduler.PriceSyncScheduler(
-        None, interval_seconds=60, session_factory=sentinel
-    )
+    instance = scheduler.PriceSyncScheduler(interval_seconds=60, session_factory=sentinel)
     instance.start()
     instance.stop()
 
@@ -546,9 +543,7 @@ def test_price_scheduler_does_not_start_twice(monkeypatch):
     sentinel = object()
     monkeypatch.setattr(scheduler, "sync_prices", lambda factory: ticks.append(factory))
 
-    instance = scheduler.PriceSyncScheduler(
-        None, interval_seconds=60, session_factory=sentinel
-    )
+    instance = scheduler.PriceSyncScheduler(interval_seconds=60, session_factory=sentinel)
     instance.start()
     instance.start()
     instance.stop()
@@ -566,9 +561,7 @@ def test_price_scheduler_survives_a_failing_tick(monkeypatch):
 
     monkeypatch.setattr(scheduler, "sync_prices", flaky)
 
-    instance = scheduler.PriceSyncScheduler(
-        None, interval_seconds=60, session_factory=sentinel
-    )
+    instance = scheduler.PriceSyncScheduler(interval_seconds=60, session_factory=sentinel)
     instance.start()
     instance.stop()
 
@@ -576,9 +569,11 @@ def test_price_scheduler_survives_a_failing_tick(monkeypatch):
     assert instance._thread is None
 
 
-def test_injected_test_database_never_starts_trading_jobs(monkeypatch):
+def test_enabling_trading_jobs_starts_and_stops_both_schedulers(monkeypatch):
+    """Startup wiring: one switch owns price sync and the daily snapshot."""
     monkeypatch.setenv("TRADING_JOBS_ENABLED", "true")
     started = []
+    stopped = []
     monkeypatch.setattr(
         scheduler.PriceSyncScheduler, "start", lambda self: started.append("price")
     )
@@ -587,9 +582,17 @@ def test_injected_test_database_never_starts_trading_jobs(monkeypatch):
         "start",
         lambda self: started.append("snapshot"),
     )
-    database = mongomock.MongoClient()["tradium_price_sync_test"]
+    monkeypatch.setattr(
+        scheduler.PriceSyncScheduler, "stop", lambda self: stopped.append("price")
+    )
+    monkeypatch.setattr(
+        scheduler.PortfolioSnapshotScheduler,
+        "stop",
+        lambda self: stopped.append("snapshot"),
+    )
 
-    with TestClient(create_app(database=database)) as client:
+    with TestClient(create_app()) as client:
         assert client.get("/api/health").status_code == 200
 
-    assert started == []
+    assert started == ["price", "snapshot"]
+    assert stopped == ["price", "snapshot"]

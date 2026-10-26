@@ -6,15 +6,14 @@ a disposable PostgreSQL database whose name ends in "_test"; there is no
 SQLite fallback. The read joins `instruments` / `latest_quotes`, so the tests
 seed those rows explicitly.
 
-The rest of the API still reads MongoDB, so the client fixture pairs the real
-PostgreSQL session with an in-memory mongomock database.
+The app needs no MongoDB, so the client fixture overrides only the PostgreSQL
+session dependency.
 """
 
 import os
 import secrets
 from datetime import datetime, timezone
 
-import mongomock
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
@@ -52,8 +51,8 @@ def empty_users(postgres_schema):
 
 @pytest.fixture
 def client(postgres_session_factory):
-    """The API with PostgreSQL sessions and mongomock for the remaining routes."""
-    app = create_app(database=mongomock.MongoClient()["tradium_test"])
+    """The API with PostgreSQL sessions."""
+    app = create_app()
 
     def override_get_session():
         with postgres_session_factory() as session:
@@ -424,7 +423,7 @@ def test_watchlist_routes_require_authentication(client):
 
 
 def test_nova_watchlist_reads_the_users_rows_in_order(
-    database, session_factory, market_instrument_factory
+    session_factory, market_instrument_factory
 ):
     user = insert_user(session_factory)
     other = insert_user(session_factory, username="other", email="other@example.com")
@@ -449,7 +448,7 @@ def test_nova_watchlist_reads_the_users_rows_in_order(
     assert "INFY" in snapshot["summary"]
 
 
-def test_nova_watchlist_reports_an_empty_list(database, session_factory):
+def test_nova_watchlist_reports_an_empty_list(session_factory):
     user = insert_user(session_factory)
 
     snapshot = assistant.watchlist_snapshot(user.id, session_factory)

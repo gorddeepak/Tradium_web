@@ -9,7 +9,6 @@ shared with the holdings suite and not repeated.
 import os
 from datetime import datetime, timezone
 
-import mongomock
 import pytest
 from fastapi.testclient import TestClient
 
@@ -27,7 +26,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def client(postgres_session_factory):
-    app = create_app(database=mongomock.MongoClient()["tradium_test"])
+    app = create_app()
 
     def override_get_session():
         with postgres_session_factory() as session:

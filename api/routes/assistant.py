@@ -13,7 +13,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.ui.vercel_ai import VercelAIAdapter
 from pydantic_ai.usage import UsageLimits
-from pymongo.database import Database
 
 from ..assistant import (
     AINotConfigured,
@@ -27,7 +26,6 @@ from ..assistant import (
     plain_agent,
 )
 from ..auth import require_user
-from ..db import get_database
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +78,6 @@ async def assistant_chat(
 async def assistant_insight(
     request: Request,
     user_id: str = Depends(require_user),
-    db: Database = Depends(get_database),
 ):
     payload = await _json_body(request)
     if not isinstance(payload, dict):
@@ -105,7 +102,6 @@ async def assistant_insight(
 async def assistant_briefing(
     request: Request,
     user_id: str = Depends(require_user),
-    db: Database = Depends(get_database),
 ):
     payload = await _json_body(request)
     if not isinstance(payload, dict):

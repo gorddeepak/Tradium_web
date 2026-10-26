@@ -641,14 +641,12 @@ def test_scheduler_switch_defaults_to_off(monkeypatch):
     assert scheduler.market_sync_enabled() is False
 
 
-def test_scheduler_runs_once_immediately_then_stops(database, monkeypatch):
+def test_scheduler_runs_once_immediately_then_stops(monkeypatch):
     ticks = []
     sentinel = object()
     monkeypatch.setattr(scheduler, "market_sync", lambda factory: ticks.append(factory))
 
-    instance = scheduler.MarketSyncScheduler(
-        database, interval_seconds=60, session_factory=sentinel
-    )
+    instance = scheduler.MarketSyncScheduler(interval_seconds=60, session_factory=sentinel)
     instance.start()
     instance.stop()
 
@@ -656,14 +654,12 @@ def test_scheduler_runs_once_immediately_then_stops(database, monkeypatch):
     assert ticks == [sentinel]
 
 
-def test_scheduler_does_not_start_twice(database, monkeypatch):
+def test_scheduler_does_not_start_twice(monkeypatch):
     ticks = []
     sentinel = object()
     monkeypatch.setattr(scheduler, "market_sync", lambda factory: ticks.append(factory))
 
-    instance = scheduler.MarketSyncScheduler(
-        database, interval_seconds=60, session_factory=sentinel
-    )
+    instance = scheduler.MarketSyncScheduler(interval_seconds=60, session_factory=sentinel)
     instance.start()
     instance.start()  # a second start must not spawn another thread
     instance.stop()
@@ -671,7 +667,7 @@ def test_scheduler_does_not_start_twice(database, monkeypatch):
     assert len(ticks) == 1
 
 
-def test_scheduler_survives_a_failing_tick(database, monkeypatch):
+def test_scheduler_survives_a_failing_tick(monkeypatch):
     calls = []
     sentinel = object()
 
@@ -681,9 +677,7 @@ def test_scheduler_survives_a_failing_tick(database, monkeypatch):
 
     monkeypatch.setattr(scheduler, "market_sync", flaky)
 
-    instance = scheduler.MarketSyncScheduler(
-        database, interval_seconds=60, session_factory=sentinel
-    )
+    instance = scheduler.MarketSyncScheduler(interval_seconds=60, session_factory=sentinel)
     instance.start()
     instance.stop()
 
@@ -692,17 +686,22 @@ def test_scheduler_survives_a_failing_tick(database, monkeypatch):
     assert instance._thread is None
 
 
-def test_injected_test_database_never_starts_the_scheduler(database, monkeypatch):
-    """Even with the switch on, a test app must not touch the network."""
+def test_enabling_the_switch_starts_and_stops_the_scheduler(monkeypatch):
+    """Startup wiring: the scheduler runs only when the switch is on."""
     from api.main import create_app
 
     monkeypatch.setenv("MARKET_SYNC_ENABLED", "true")
     started = []
+    stopped = []
     monkeypatch.setattr(
-        scheduler.MarketSyncScheduler, "start", lambda self: started.append(self.db)
+        scheduler.MarketSyncScheduler, "start", lambda self: started.append("market")
+    )
+    monkeypatch.setattr(
+        scheduler.MarketSyncScheduler, "stop", lambda self: stopped.append("market")
     )
 
-    with TestClient(create_app(database=database)) as client:
+    with TestClient(create_app()) as client:
         assert client.get("/api/health").status_code == 200
 
-    assert started == []
+    assert started == ["market"]
+    assert stopped == ["market"]

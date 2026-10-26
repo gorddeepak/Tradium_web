@@ -27,10 +27,10 @@ def _build_dist(root: Path) -> Path:
 
 
 @pytest.fixture
-def static_client(tmp_path, monkeypatch, database):
+def static_client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DIST_DIR", _build_dist(tmp_path))
     monkeypatch.setenv("SERVE_STATIC", "true")
-    with TestClient(main.create_app(database=database), raise_server_exceptions=False) as client:
+    with TestClient(main.create_app(), raise_server_exceptions=False) as client:
         yield client
 
 
@@ -92,10 +92,10 @@ def test_static_serving_is_off_by_default(client, monkeypatch):
     assert response.json() == {"message": "Route not found"}
 
 
-def test_missing_build_does_not_break_the_api(tmp_path, monkeypatch, database):
+def test_missing_build_does_not_break_the_api(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DIST_DIR", tmp_path / "absent")
     monkeypatch.setenv("SERVE_STATIC", "true")
-    with TestClient(main.create_app(database=database), raise_server_exceptions=False) as client:
+    with TestClient(main.create_app(), raise_server_exceptions=False) as client:
         assert client.get("/api/health").json() == {"ok": True}
         # No build means no fallback: the path stays a JSON 404.
         response = client.get("/dashboard")
@@ -103,13 +103,13 @@ def test_missing_build_does_not_break_the_api(tmp_path, monkeypatch, database):
         assert response.json() == {"message": "Route not found"}
 
 
-def test_production_mode_serves_static_without_override(tmp_path, monkeypatch, database):
+def test_production_mode_serves_static_without_override(tmp_path, monkeypatch):
     # The real production configuration: only NODE_ENV=production is set, so the
     # NODE_ENV default (not SERVE_STATIC) is what enables the fallback.
     monkeypatch.setattr(main, "DIST_DIR", _build_dist(tmp_path))
     monkeypatch.delenv("SERVE_STATIC", raising=False)
     monkeypatch.setenv("NODE_ENV", "production")
-    with TestClient(main.create_app(database=database), raise_server_exceptions=False) as client:
+    with TestClient(main.create_app(), raise_server_exceptions=False) as client:
         assert client.get("/dashboard").status_code == 200
         assert "tradium-shell" in client.get("/dashboard/holdings").text
         assert client.get("/api/health").json() == {"ok": True}

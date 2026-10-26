@@ -5,8 +5,8 @@ from fastapi.testclient import TestClient
 from api.main import create_app
 
 
-def test_vite_dev_origin_is_allowed_with_credentials(database):
-    with TestClient(create_app(database=database)) as client:
+def test_vite_dev_origin_is_allowed_with_credentials():
+    with TestClient(create_app()) as client:
         response = client.options(
             "/api/auth/login",
             headers={
@@ -21,25 +21,25 @@ def test_vite_dev_origin_is_allowed_with_credentials(database):
     assert response.headers["access-control-allow-credentials"] == "true"
 
 
-def test_every_vite_dev_port_is_allowed(database):
-    with TestClient(create_app(database=database)) as client:
+def test_every_vite_dev_port_is_allowed():
+    with TestClient(create_app()) as client:
         for port in range(5173, 5178):
             origin = f"http://localhost:{port}"
             response = client.get("/api/health", headers={"Origin": origin})
             assert response.headers["access-control-allow-origin"] == origin
 
 
-def test_unknown_origin_is_not_allowed(database):
-    with TestClient(create_app(database=database)) as client:
+def test_unknown_origin_is_not_allowed():
+    with TestClient(create_app()) as client:
         response = client.get("/api/health", headers={"Origin": "https://example.com"})
 
     assert "access-control-allow-origin" not in response.headers
 
 
-def test_cors_origins_environment_overrides_the_default(database, monkeypatch):
+def test_cors_origins_environment_overrides_the_default(monkeypatch):
     monkeypatch.setenv("CORS_ORIGINS", "https://app.example.com, https://admin.example.com")
 
-    with TestClient(create_app(database=database)) as client:
+    with TestClient(create_app()) as client:
         response = client.get(
             "/api/health", headers={"Origin": "https://admin.example.com"}
         )

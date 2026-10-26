@@ -1,9 +1,9 @@
 """Shared test fixtures.
 
-Mongo-backed tests use mongomock (in memory), so they never contact a real
-MongoDB. PostgreSQL tests use TEST_DATABASE_URL and are skipped when it is not
-set; a separate optional suite can also run against a scratch MongoDB when
-TEST_MONGO_URL is set (see test_mongo_integration.py).
+PostgreSQL tests use TEST_DATABASE_URL and are skipped when it is not set. The
+FastAPI app needs no MongoDB; the optional suite in test_mongo_integration.py
+uses a scratch real MongoDB only to prove the runtime leaves it untouched
+(see TEST_MONGO_URL), and every test there skips when it is unset.
 """
 
 import os
@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-import mongomock
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -53,14 +52,9 @@ def jwt_secret(monkeypatch):
 
 
 @pytest.fixture
-def database():
-    return mongomock.MongoClient()["tradium_test"]
-
-
-@pytest.fixture
-def client(database):
+def client():
     # raise_server_exceptions=False lets the 500 handler run like production.
-    with TestClient(create_app(database=database), raise_server_exceptions=False) as test_client:
+    with TestClient(create_app(), raise_server_exceptions=False) as test_client:
         yield test_client
 
 
@@ -364,8 +358,8 @@ def book_session_factory(postgres_session_factory, postgres_schema):
 
 @pytest.fixture
 def book_client(book_session_factory):
-    """The API with PostgreSQL sessions and mongomock for the remaining reads."""
-    app = create_app(database=mongomock.MongoClient()["tradium_test"])
+    """The API with PostgreSQL sessions; no MongoDB is involved."""
+    app = create_app()
 
     def override_get_session():
         with book_session_factory() as session:

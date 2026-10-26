@@ -12,7 +12,6 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-import mongomock
 import pytest
 from fastapi.testclient import TestClient
 
@@ -41,7 +40,7 @@ def client(book_session_factory):
         with book_session_factory() as session:
             yield session
 
-    app = create_app(database=mongomock.MongoClient()["tradium_test"])
+    app = create_app()
     app.dependency_overrides[get_session] = override_get_session
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client

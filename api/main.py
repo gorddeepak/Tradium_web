@@ -16,7 +16,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import db
 from .config import get_cors_origins, serve_static_enabled
 from .rate_limit import AuthRateLimitMiddleware
 from .routes import (
@@ -80,32 +79,31 @@ def _serve_frontend(app: FastAPI) -> None:
         return FileResponse(index_file)
 
 
-def create_app(database=None) -> FastAPI:
-    """Build the app. Tests pass a fake database to skip the real connection."""
+def create_app() -> FastAPI:
+    """Build the app.
+
+    The runtime is PostgreSQL-only: startup opens no MongoDB connection and
+    needs no ``MONGO_URL``, and the background schedulers take only a
+    PostgreSQL session factory.
+    """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if database is not None:
-            app.state.db = database
-        else:
-            app.state.db = db.connect()
-
         # Off unless the matching switch is set: only one process may own each
         # job. See api/scheduler.py.
         app.state.market_sync = None
         app.state.price_sync = None
         app.state.portfolio_snapshot = None
-        if database is None:
-            if market_sync_enabled():
-                app.state.market_sync = MarketSyncScheduler(app.state.db)
-                app.state.market_sync.start()
-            if trading_jobs_enabled():
-                # Price sync fills orders and moves funds, so it shares one
-                # owner switch with the daily snapshot.
-                app.state.price_sync = PriceSyncScheduler(app.state.db)
-                app.state.price_sync.start()
-                app.state.portfolio_snapshot = PortfolioSnapshotScheduler()
-                app.state.portfolio_snapshot.start()
+        if market_sync_enabled():
+            app.state.market_sync = MarketSyncScheduler()
+            app.state.market_sync.start()
+        if trading_jobs_enabled():
+            # Price sync fills orders and moves funds, so it shares one
+            # owner switch with the daily snapshot.
+            app.state.price_sync = PriceSyncScheduler()
+            app.state.price_sync.start()
+            app.state.portfolio_snapshot = PortfolioSnapshotScheduler()
+            app.state.portfolio_snapshot.start()
 
         yield
 
@@ -113,8 +111,6 @@ def create_app(database=None) -> FastAPI:
             job = getattr(app.state, name)
             if job is not None:
                 job.stop()
-        if database is None:
-            db.close()
 
     app = FastAPI(lifespan=lifespan)
 

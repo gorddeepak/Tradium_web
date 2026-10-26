@@ -76,8 +76,7 @@ def seconds_until_snapshot(hour=SNAPSHOT_HOUR_IST, now=None):
 class MarketSyncScheduler:
     """Runs ``market_sync`` every five minutes until stopped."""
 
-    def __init__(self, db, interval_seconds=SYNC_INTERVAL_SECONDS, session_factory=None):
-        self.db = db
+    def __init__(self, interval_seconds=SYNC_INTERVAL_SECONDS, session_factory=None):
         self.interval_seconds = interval_seconds
         self.session_factory = session_factory
         self._stop = threading.Event()
@@ -119,8 +118,7 @@ class PriceSyncScheduler:
     IST costs nothing and no order is filled.
     """
 
-    def __init__(self, db, interval_seconds=PRICE_SYNC_INTERVAL_SECONDS, session_factory=None):
-        self.db = db
+    def __init__(self, interval_seconds=PRICE_SYNC_INTERVAL_SECONDS, session_factory=None):
         self.interval_seconds = interval_seconds
         self.session_factory = session_factory
         self._stop = threading.Event()
