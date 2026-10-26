@@ -5,6 +5,14 @@
 > **Method:** read-only inspection of the copied repository. Nothing in this document was inferred from memory of a
 > different project; where a behaviour could not be confirmed from source, it is marked **UNRESOLVED** or
 > **ASSUMPTION**.
+>
+> **Current state (2026-10-26, Phase 3B3).** This document describes the Express reference in `server/`
+> (the source snapshot) and remains accurate for it. The active FastAPI service in `api/` now splits the
+> data layer: PostgreSQL owns `users` (authentication, snapshot user list), `instruments`,
+> `latest_quotes` (market cache) and `watchlists`; MongoDB still owns `holdings`, `positions`, `orders`,
+> `funds`, `transactions`, the `portfoliosnapshots` documents, and every Nova tool. Two known transition
+> gaps: `price_sync` still gathers watchlist symbols from the MongoDB collection, and Nova's
+> `getWatchlist` still reads the singular MongoDB `watchlist`. See `MIGRATION_STATUS.md` §4.
 
 This document describes the application **as it exists today**. The target design is in
 [ARCHITECTURE_DECISIONS.md](./ARCHITECTURE_DECISIONS.md) and [MIGRATION_PLAN.md](./MIGRATION_PLAN.md).

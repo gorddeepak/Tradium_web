@@ -1,11 +1,12 @@
 # Migration Status
 
-**Last updated:** 2026-10-26 (Phase 3B2)
-**Current phase:** **Phase 3B2 — PostgreSQL market cache (`instruments` and `latest_quotes`)**
+**Last updated:** 2026-10-26 (Phase 3B3)
+**Current phase:** **Phase 3B3 — PostgreSQL snapshot identity and watchlists**
 **Application code modified:** **Yes.** Phase 3B1 moved authentication to PostgreSQL; Phase 3B2 moved
-the market cache there and made `price_sync` a dual writer. `server/` and the original repository remain
-untouched. The book collections (`holdings`, `positions`, `orders`, `funds`, `transactions`,
-`watchlists`, `portfoliosnapshots`) and Nova's tools are still MongoDB-backed.
+the market cache there and made `price_sync` a dual writer; Phase 3B3 moved watchlists there and made
+the daily snapshot enumerate users from PostgreSQL. `server/` and the original repository remain
+untouched. Holdings, positions, orders, funds, transactions, the snapshot documents themselves, and
+Nova's tools are still MongoDB-backed.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -15,13 +16,14 @@ untouched. The book collections (`holdings`, `positions`, `orders`, `funds`, `tr
 
 | Item | Value |
 |---|---|
-| Phase | 3B2 — PostgreSQL market cache |
+| Phase | 3B3 — PostgreSQL snapshot identity and watchlists |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
 | PostgreSQL schema | **created by Alembic** — `api/migrations/versions/0001_initial_schema.py` creates all 10 tables (`users`, `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists`, `instruments`, `latest_quotes`, `portfolio_snapshots`) plus `alembic_version`; verified by `alembic upgrade head` on a disposable PostgreSQL 17.6 cluster |
-| PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1) and the **market cache** (`instruments`/`latest_quotes`, Phase 3B2) |
-| MongoDB-backed surfaces | **still all book data and AI tools** — holdings, positions, orders, funds, transactions, watchlists, portfolio snapshots, and everything Nova reads |
+| PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3) and the **snapshot user list** (Phase 3B3) |
+| MongoDB-backed surfaces | **book data, snapshot documents and AI tools** — holdings, positions, orders, funds, transactions, `portfoliosnapshots`, and everything Nova reads |
 | Market cache | `instruments` + `latest_quotes` in PostgreSQL; market sync seeds the **53-symbol universe**; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
-| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices and upserts the canonical PostgreSQL quote) and the daily 18:00 IST snapshot; **off unless `TRADING_JOBS_ENABLED` is set** |
+| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices and upserts the canonical PostgreSQL quote) and the daily 18:00 IST snapshot, which enumerates users from PostgreSQL; **off unless `TRADING_JOBS_ENABLED` is set** |
+| Known transition gaps | `price_sync` still gathers watchlist symbols from MongoDB; Nova's `getWatchlist` still reads the singular MongoDB `watchlist` collection; there is no automatic MongoDB → PostgreSQL loader for users or watchlists |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | **switched** to FastAPI on `localhost:8000`; a production build is now **served by FastAPI** (SPA fallback) when `SERVE_STATIC`/`NODE_ENV=production`; `VITE_API_URL` still overrides |
 | CORS | Vite dev origins (5173-5177) with credentials; `CORS_ORIGINS` overrides for deployed origins; a same-origin production build needs neither |
@@ -38,7 +40,7 @@ untouched. The book collections (`holdings`, `positions`, `orders`, `funds`, `tr
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **358 passed, 7 skipped** with only `TEST_DATABASE_URL`; **365 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26) — see §5 |
+| Tests executed | **367 passed, 7 skipped** with only `TEST_DATABASE_URL`; **374 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3B3) — see §5 |
 | PostgreSQL test instance | PostgreSQL 17.6, disposable local cluster on a temporary path, database `tradium_phase3b_wrapup_test`; scoped to this run and outside the repository |
 | Express parity check | **run (Phase 2e)** — cookies, numeric rendering and job side effects; **no functional difference** (§3K) |
 | Read-route parity check | **run (Phase 4b)** — byte-identical for the Mongo-backed read routes at the time; **not rerun after the Phase 3B2 backend move** (§3Q) |
@@ -1376,6 +1378,43 @@ legacy `updatedAt`, and the source of `asOf`); `source_time` is the provider's `
 
 ---
 
+## 3R. Phase 3B3 — PostgreSQL snapshot identity and watchlists
+
+**Goal:** give the daily snapshot the canonical PostgreSQL user list and move the watchlist API off
+MongoDB, without touching holdings, positions, orders, funds, transactions or financial workflows.
+
+### Snapshot identity
+
+- `record_daily_snapshot(db, session_factory=None)` enumerates ids from the PostgreSQL `users` table.
+  The snapshot rows themselves are still MongoDB `portfoliosnapshots` documents, keyed by
+  `ObjectId(user_id)` like every other Mongo book row.
+- `PortfolioSnapshotScheduler` passes its session factory; tests can inject one. If PostgreSQL is
+  unavailable, the tick logs and writes nothing.
+- A user that exists only in MongoDB is no longer snapshotted. A PostgreSQL user with no holdings or
+  positions still gets a zero-valued row.
+
+### Watchlists
+
+- `GET`, `POST` and `DELETE /api/watchlist` now use the `watchlists` table through `get_session`.
+- The read keeps the ten-key document shape and orders by `created_at ASC, id ASC`. `ltp` and
+  `dayChangePct` come from `latest_quotes` through `instruments`, with `0` when either is missing.
+- `POST` keeps the `201` / `409` / `400` contracts, falls back `name` to `symbol`, and accepts only
+  `exchange: "NSE"` (design D21/F13). The unique `(user_id, symbol)` key closes the duplicate race.
+- `DELETE` stays always-`204`, including missing, non-owned and malformed ids.
+- Every query is scoped to the token user; the same symbol may be watched by different users.
+
+### Verification and limits
+
+- Full suite: **367 passed, 7 skipped** with `TEST_DATABASE_URL`; **374 passed, 0 skipped** with
+  `TEST_MONGO_URL` as well.
+- The existing Mongo holdings, positions, orders, funds, transactions, snapshot-persistence,
+  market-cache and price-sync suites passed unchanged.
+- No loader was added, so existing MongoDB users and watchlists do not appear in PostgreSQL.
+- Two transition gaps remain and are recorded in §4: `price_sync` still sources watchlist symbols
+  from MongoDB, and Nova's watchlist tool still reads the singular MongoDB collection.
+
+---
+
 ## 4. Known issues recorded
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and
@@ -1401,20 +1440,26 @@ Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
 
 ### Introduced or exposed by the move to PostgreSQL
 
-11. **Identity is split across two databases.** `record_daily_snapshot` still enumerates
-    `db["users"]`, so a user created after Phase 3B1 never receives a daily portfolio snapshot, and a
-    user that exists only in MongoDB cannot log in because authentication reads PostgreSQL. There is no
-    loader in either direction. This must be closed before the snapshot job is trusted, and before any
-    deployment that expects existing accounts to keep working.
+11. **Identity is split across two databases.** `record_daily_snapshot` now enumerates the PostgreSQL
+    `users` table (Phase 3B3), so a user created after Phase 3B1 does receive snapshots. The remaining
+    gap is data: a user that exists only in MongoDB cannot log in (authentication reads PostgreSQL), and
+    a MongoDB-only watchlist is invisible to `GET /api/watchlist`. There is no loader in either
+    direction. This must be closed before any deployment that expects existing accounts and watchlists
+    to keep working.
 12. **Two market caches exist while Express is runnable.** `server/jobs/marketSync.js` still writes
     `marketquotes`; the FastAPI jobs write `instruments`/`latest_quotes`. They are independent. The
     single-scheduler-owner rule keeps both from refreshing at once, but a dormant cache will go stale and
     must not be read by anything.
 13. **Nova's watchlist tool still reads the wrong collection** (`db["watchlist"]`,
-    `api/assistant.py:227`; the real one is `watchlists`). Phase 3B2 did not touch it. It is recorded in
-    `POSTGRES_AUDIT.md` §5 issue 5 and must be fixed when watchlists migrate, or a table-for-collection
-    mapping would create a phantom table.
-14. **`DEPLOYMENT.md` is stale.** Its environment table does not list `DATABASE_URL`, does not mention
+    `api/assistant.py:227`; the real one is `watchlists`). Phase 3B3 moved the watchlist API to
+    PostgreSQL but did not touch the assistant. The tool therefore returns no rows for a user whose
+    watchlist exists only in PostgreSQL. It is recorded in `POSTGRES_AUDIT.md` §5 issue 5.
+14. **`price_sync` still sources watchlist symbols from MongoDB.** It reads `db["watchlists"]` to decide
+    which book rows to refresh and to update the mirrored watchlist `ltp`, while the watchlist API now
+    writes the PostgreSQL `watchlists` table. A symbol added through the API has no Mongo row, so it is
+    not refreshed in the Mongo book; the PostgreSQL quote is still updated because the sync universe
+    covers all instruments.
+15. **`DEPLOYMENT.md` is stale.** Its environment table does not list `DATABASE_URL`, does not mention
     `DIRECT_DATABASE_URL`/`alembic upgrade head`, and still implies MongoDB alone is sufficient. The code
     is correct; the deployment guide was outside this slice.
 
@@ -1519,6 +1564,11 @@ Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
 | Application tests (Phase 3B1/3B2) | **run:** 358 passed, 7 skipped with `TEST_DATABASE_URL` only (the 7 are the optional real-MongoDB tests); 365 passed, 0 skipped with `TEST_MONGO_URL` too |
 | Test PostgreSQL instance (Phase 3B1/3B2) | disposable local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_phase3b_wrapup_test`; `initdb` trust auth; outside the repository |
 | Scratch databases after Phase 3B2 | **dropped** — `tradium_fastapi_phase3b_test` absent from MongoDB; `tradium_fastapi_dev` and `zerodha` untouched |
+| Snapshot user enumeration (Phase 3B3) | **verified** — `record_daily_snapshot` reads ids from the PostgreSQL `users` table; a PostgreSQL-only user gets a zero-valued row; a MongoDB-only user is not snapshotted |
+| Watchlist API on PostgreSQL (Phase 3B3) | **verified** — GET/POST/DELETE use the `watchlists` table; ten-key document shape, `created_at ASC, id ASC` ordering, `ltp`/`dayChangePct` from `latest_quotes`, `0` when missing |
+| Watchlist contracts (Phase 3B3) | **verified** — `201` on create, `409` on duplicate, `400` on invalid body, always-`204` delete, `name` falls back to `symbol`, per-user isolation |
+| Application tests (Phase 3B3) | **run:** 367 passed, 7 skipped with `TEST_DATABASE_URL` only (the 7 are the optional real-MongoDB tests); 374 passed, 0 skipped with `TEST_MONGO_URL` too |
+| Test PostgreSQL instance (Phase 3B3) | disposable local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_phase3b_wrapup_test`; `initdb` trust auth; outside the repository |
 
 ---
 
