@@ -37,6 +37,7 @@ from ..postgres.models import (
     Watchlist,
 )
 from ..trading_book import lock_user, quote_is_fresh, utcnow
+from ..watchlist_stream import publish_persisted_quotes
 
 logger = logging.getLogger(__name__)
 
@@ -161,9 +162,18 @@ def run_sync(session_factory, *, now=None):
             if key in quotes
         ]
         try:
-            persist_price_quotes(session_factory, entries, now=clock())
+            persisted = persist_price_quotes(session_factory, entries, now=clock())
         except Exception:  # noqa: BLE001 - fills still use the existing cache
+            persisted = 0
             logger.exception("PostgreSQL quote persistence failed")
+        if persisted:
+            # Push only after the commit, so a subscriber never sees a price
+            # that is not in latest_quotes. Best-effort: the job continues even
+            # if no socket or no database read is available.
+            publish_persisted_quotes(
+                session_factory,
+                [entry["symbol"] for entry in entries],
+            )
 
     # Sectors live on PostgreSQL instruments now; holdings/positions read them
     # through the join, so there is no book row to mirror.

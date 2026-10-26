@@ -61,8 +61,12 @@ def verify_password(candidate: str, stored: str) -> bool:
         return False
 
 
-def require_user(request: Request) -> str:
-    token = request.cookies.get("token")
+def user_from_token(token: str | None) -> str:
+    """Return the user id in a cookie token, or raise 401.
+
+    Shared by the HTTP guard and the WebSocket handshake, which reads the same
+    ``token`` cookie but cannot use a ``Request`` dependency.
+    """
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -80,3 +84,7 @@ def require_user(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     return str(user_id)
+
+
+def require_user(request: Request) -> str:
+    return user_from_token(request.cookies.get("token"))
