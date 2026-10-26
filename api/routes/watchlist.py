@@ -15,15 +15,24 @@ import re
 import secrets
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Response
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    HTTPException,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth import require_user
+from ..auth import require_user, user_from_token
 from ..postgres.models import Instrument, LatestQuote, Watchlist
 from ..postgres.session import get_session
 from ..serialization import to_json_value
+from ..watchlist_stream import hub
 
 router = APIRouter()
 
@@ -159,3 +168,30 @@ def delete_watchlist(
     )
     session.commit()
     return Response(status_code=204)
+
+
+@router.websocket("/api/watchlist/stream")
+async def stream_watchlist(websocket: WebSocket):
+    """Push persisted quote changes for the authenticated user's watchlist.
+
+    The handshake reuses the HTTP ``token`` cookie. An invalid token is closed
+    with 1008 (policy violation) after accepting, because a browser cannot read
+    a close code from a rejected handshake and would retry forever.
+    """
+    try:
+        user_id = user_from_token(websocket.cookies.get("token"))
+    except HTTPException:
+        await websocket.accept()
+        await websocket.close(code=1008, reason="Not authenticated")
+        return
+
+    await hub.connect(websocket, user_id)
+    try:
+        await websocket.accept()
+        # The client has nothing to send; this waits for its disconnect frame.
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        hub.disconnect(websocket, user_id)
