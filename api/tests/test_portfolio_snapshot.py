@@ -1,22 +1,89 @@
 """Focused tests for the daily portfolio snapshot.
 
+User identity is canonical in PostgreSQL, so the job is given a session
+factory that returns the ``users`` table ids. The snapshot rows themselves
+still use mongomock. One test runs against a real PostgreSQL database when
+TEST_DATABASE_URL is set; the rest use a small session double so the
+calculation and failure branches stay testable without a database.
+
 The job is called directly with synthetic users and holdings — no scheduler and
-no wall clock — plus one scheduler test that proves the 18:00 IST delay and the
+no wall clock — plus scheduler tests that prove the 18:00 IST delay and the
 tick. mongomock runs the ``find_one_and_update`` upsert.
 """
 
+import os
+import secrets
 import time
 from datetime import datetime, timezone
 
+import pytest
 from bson import ObjectId
 
 from api import scheduler
 from api.jobs import portfolio_snapshot
 from api.market_hours import IST
+from api.postgres.models import User
+
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "").strip()
+
+NOW = datetime(2026, 10, 25, 12, 0, 0, 123000, tzinfo=timezone.utc)
 
 
 def _ist(year, month, day, hour, minute, second=0):
     return datetime(year, month, day, hour, minute, second, tzinfo=IST)
+
+
+# --------------------------------------------------------------------------
+# A session double that returns the PostgreSQL user ids
+# --------------------------------------------------------------------------
+
+
+class _FakeScalars:
+    def __init__(self, user_ids):
+        self.user_ids = user_ids
+
+    def all(self):
+        return list(self.user_ids)
+
+
+class _FakeSession:
+    def __init__(self, user_ids):
+        self.user_ids = user_ids
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def scalars(self, statement):
+        return _FakeScalars(self.user_ids)
+
+
+def _session_factory(user_ids):
+    def factory():
+        return _FakeSession(user_ids)
+
+    return factory
+
+
+def _insert_postgres_user(session_factory):
+    """Insert one user row the way the signup route stores it."""
+    user_id = secrets.token_hex(12)
+    with session_factory() as session:
+        session.add(
+            User(
+                id=user_id,
+                username=f"snapshot-{user_id}",
+                email=f"{user_id}@example.com",
+                password_hash="unused-in-snapshot-tests",
+                created_at=NOW,
+                updated_at=NOW,
+                version=0,
+            )
+        )
+        session.commit()
+    return ObjectId(user_id)
 
 
 # --------------------------------------------------------------------------
@@ -52,11 +119,13 @@ def test_every_user_gets_one_row_even_with_no_holdings(
 ):
     holder = ObjectId()
     empty = ObjectId()
-    database["users"].insert_many([{"_id": holder}, {"_id": empty}])
     database["holdings"].insert_one(holdings_factory(holder))
     database["positions"].insert_one(positions_factory(holder))
 
-    portfolio_snapshot.record_daily_snapshot(database)
+    # The job receives PostgreSQL's text ids and casts them for MongoDB.
+    portfolio_snapshot.record_daily_snapshot(
+        database, _session_factory([str(holder), str(empty)])
+    )
 
     assert database["portfoliosnapshots"].count_documents({}) == 2
 
@@ -78,16 +147,54 @@ def test_every_user_gets_one_row_even_with_no_holdings(
     assert blank["misInvested"] == 0.0
 
 
+def test_zero_postgres_users_writes_no_snapshots(database):
+    # A user that only exists in the legacy MongoDB collection is not part of
+    # the canonical identity population any more.
+    database["users"].insert_one({"_id": ObjectId()})
+
+    portfolio_snapshot.record_daily_snapshot(database, _session_factory([]))
+
+    assert database["portfoliosnapshots"].count_documents({}) == 0
+
+
+@pytest.mark.skipif(
+    not TEST_DATABASE_URL,
+    reason="TEST_DATABASE_URL is not set; PostgreSQL snapshot test skipped",
+)
+def test_postgres_users_are_the_snapshot_population(
+    database, holdings_factory, postgres_session_factory
+):
+    holder = _insert_postgres_user(postgres_session_factory)
+    empty = _insert_postgres_user(postgres_session_factory)
+    mongo_only = ObjectId()
+
+    database["users"].insert_one({"_id": mongo_only})
+    database["holdings"].insert_one(holdings_factory(holder))
+    database["holdings"].insert_one(holdings_factory(mongo_only, symbol="TCS"))
+
+    portfolio_snapshot.record_daily_snapshot(database, postgres_session_factory)
+
+    snapshot = database["portfoliosnapshots"].find_one({"user": holder})
+    assert snapshot["value"] == 25000.0
+    assert snapshot["invested"] == 24005.0
+
+    blank = database["portfoliosnapshots"].find_one({"user": empty})
+    assert blank["value"] == 0.0
+    assert blank["invested"] == 0.0
+
+    # The MongoDB `users` collection is no longer the population source.
+    assert database["portfoliosnapshots"].count_documents({"user": mongo_only}) == 0
+
+
 def test_short_legs_reduce_the_mis_value(database, holdings_factory, positions_factory):
     user = ObjectId()
-    database["users"].insert_one({"_id": user})
     database["holdings"].insert_one(holdings_factory(user))
     # Short 5 at 1500, now 1520 -> a 100 loss.
     database["positions"].insert_one(
         positions_factory(user, side="SHORT", qty=5, entry=1500.0, ltp=1520.0)
     )
 
-    portfolio_snapshot.record_daily_snapshot(database)
+    portfolio_snapshot.record_daily_snapshot(database, _session_factory([str(user)]))
 
     snapshot = database["portfoliosnapshots"].find_one({"user": user})
     assert snapshot["misInvested"] == 7500.0
@@ -98,16 +205,16 @@ def test_a_second_run_on_the_same_day_overwrites_in_place(
     database, holdings_factory, positions_factory
 ):
     user = ObjectId()
-    database["users"].insert_one({"_id": user})
     holding = holdings_factory(user)
     database["holdings"].insert_one(holding)
 
-    portfolio_snapshot.record_daily_snapshot(database)
+    factory = _session_factory([str(user)])
+    portfolio_snapshot.record_daily_snapshot(database, factory)
     first = database["portfoliosnapshots"].find_one({"user": user})
 
     database["holdings"].update_one({"_id": holding["_id"]}, {"$set": {"ltp": 2600.0}})
     time.sleep(0.02)  # MongoDB dates have millisecond resolution
-    portfolio_snapshot.record_daily_snapshot(database)
+    portfolio_snapshot.record_daily_snapshot(database, factory)
 
     assert database["portfoliosnapshots"].count_documents({"user": user}) == 1
     second = database["portfoliosnapshots"].find_one({"user": user})
@@ -122,17 +229,29 @@ def test_a_failure_does_not_raise_and_stops_the_rest(
 ):
     first = ObjectId()
     broken = ObjectId()
-    database["users"].insert_many([{"_id": first}, {"_id": broken}])
     database["holdings"].insert_one(holdings_factory(first))
     # No `ltp`, so the value sum raises for the second user.
     database["holdings"].insert_one(
         {"_id": ObjectId(), "user": broken, "symbol": "TCS", "qty": 1, "avgPrice": 1.0}
     )
 
-    portfolio_snapshot.record_daily_snapshot(database)  # must not raise
+    # must not raise
+    portfolio_snapshot.record_daily_snapshot(
+        database, _session_factory([str(first), str(broken)])
+    )
 
     assert database["portfoliosnapshots"].count_documents({"user": first}) == 1
     assert database["portfoliosnapshots"].count_documents({"user": broken}) == 0
+
+
+def test_a_postgres_enumeration_failure_is_logged_and_writes_nothing(database, caplog):
+    def broken_factory():
+        raise RuntimeError("postgres unavailable")
+
+    portfolio_snapshot.record_daily_snapshot(database, broken_factory)
+
+    assert database["portfoliosnapshots"].count_documents({}) == 0
+    assert "Portfolio snapshot failed" in caplog.text
 
 
 # --------------------------------------------------------------------------
@@ -156,29 +275,40 @@ def test_seconds_until_snapshot_exactly_at_the_hour_is_due_now():
 
 def test_snapshot_scheduler_ticks_when_due_and_stops(database, monkeypatch):
     ticks = []
-    monkeypatch.setattr(scheduler, "record_daily_snapshot", lambda db: ticks.append(db))
+    session_factory = object()
+    monkeypatch.setattr(
+        scheduler,
+        "record_daily_snapshot",
+        lambda db, factory: ticks.append((db, factory)),
+    )
     monkeypatch.setattr(scheduler, "seconds_until_snapshot", lambda hour: 0.01)
 
-    instance = scheduler.PortfolioSnapshotScheduler(database)
+    instance = scheduler.PortfolioSnapshotScheduler(
+        database, session_factory=session_factory
+    )
     instance.start()
     time.sleep(0.2)
     instance.stop()
 
     assert ticks  # at least one tick ran
+    assert ticks[0][0] is database
+    assert ticks[0][1] is session_factory
     assert instance._thread is None
 
 
 def test_snapshot_scheduler_survives_a_failing_tick(database, monkeypatch):
     calls = []
 
-    def flaky(db):
-        calls.append(db)
+    def flaky(db, factory):
+        calls.append((db, factory))
         raise RuntimeError("boom")
 
     monkeypatch.setattr(scheduler, "record_daily_snapshot", flaky)
     monkeypatch.setattr(scheduler, "seconds_until_snapshot", lambda hour: 0.01)
 
-    instance = scheduler.PortfolioSnapshotScheduler(database)
+    instance = scheduler.PortfolioSnapshotScheduler(
+        database, session_factory=object()
+    )
     instance.start()
     time.sleep(0.1)
     instance.stop()

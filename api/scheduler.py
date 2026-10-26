@@ -169,9 +169,10 @@ class PortfolioSnapshotScheduler:
     the cron entry, so a process that starts at 20:00 waits until tomorrow.
     """
 
-    def __init__(self, db, hour=SNAPSHOT_HOUR_IST):
+    def __init__(self, db, hour=SNAPSHOT_HOUR_IST, session_factory=None):
         self.db = db
         self.hour = hour
+        self.session_factory = session_factory
         self._stop = threading.Event()
         self._thread = None
 
@@ -197,6 +198,7 @@ class PortfolioSnapshotScheduler:
 
     def _tick(self):
         try:
-            record_daily_snapshot(self.db)
+            factory = self.session_factory or get_session_factory()
+            record_daily_snapshot(self.db, factory)
         except Exception:  # noqa: BLE001 - keep the thread alive
             logger.exception("Portfolio snapshot tick failed")
