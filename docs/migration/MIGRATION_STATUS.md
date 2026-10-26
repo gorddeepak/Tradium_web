@@ -1542,9 +1542,92 @@ is a separate decision. The MongoDB collection is left in place so a rollback ca
 
 ### Next
 
-**Phase 3C2 — the whole trading book in one cutover**, as recommended in §3T. The five book
-collections still form one write graph, so they must move together behind shared transaction
-boundaries.
+**Phase 3C2 — the whole trading book in one cutover**, as recommended in §3T. It is recorded in
+§3V below; the five book collections form one write graph, so they moved together behind shared
+transaction boundaries.
+
+---
+
+## 3V. Phase 3C2 — trading book on PostgreSQL
+
+**The `funds`, `holdings`, `positions`, `orders` and `transactions` write paths now run on
+PostgreSQL.** This is a write cutover plus the reads those routes own. The remaining portfolio
+read consumers and Nova's other tools still read MongoDB and are the next stage.
+
+### What moved
+
+- **New shared module `api/trading_book.py`.** One place for the documented quantizers (`CASH` 2 dp,
+  `PRICE` 4 dp, `AVERAGE` 6 dp, `ROUND_HALF_UP`, no intermediate per-share rounding), 24-hex ids,
+  millisecond timestamps, the per-user advisory lock, the single cash-block predicate, guarded fund
+  helpers and the Mongoose-shaped response serializers.
+- **`api/order_engine.py`** ports `server/utils/executeOrder.js`: validation before mutation,
+  weighted holdings/position merges, bracket spawning, MIS settlement, SL-M cash adjustment, status
+  transitions, sibling cancellation and refunds. Business rejections raise `FillRejected`, so the
+  order's stored `filled`/`price` stay untouched and the caller books `REJECTED` plus one refund.
+- **`api/routes/orders.py`, `funds.py`, `holdings.py`, `positions.py`** read and write PostgreSQL.
+  `holdings`/`positions` join `instruments`/`latest_quotes` for `ltp`, `dayChangePct` and `sector`
+  instead of storing a second copy of the price.
+- **`api/jobs/price_sync.py`** refreshes the canonical quote cache and fills OPEN orders from it.
+  `api/scheduler.py` now passes only the session factory to `sync_prices`.
+- **`api/market_data.fetch_quote`** carries the provider `regularMarketTime` as `sourceTime`.
+- **`api/documents.py`** keeps only `utcnow()`; `new_document`/`inc_funds` had no remaining callers.
+
+### Transaction and money rules
+
+- Every financial flow is one database transaction: `get_session`, then
+  `pg_advisory_xact_lock(hashtextextended(user_id, 0))`, then `SELECT ... FOR UPDATE` on the rows it
+  moves. A failed fill cannot leave a partial debit, position, order status or ledger row.
+- Status changes are conditional (`UPDATE ... WHERE status = 'OPEN' RETURNING`). A fill or cancel
+  that loses the race matches no row, so proceeds and refunds are booked at most once. The second
+  scheduled tick sees no OPEN order for an executed one.
+- Placement validates before debit. Orders that block cash are debited once; cancellation refunds
+  exactly `(qty - filled) * price`; a rejected fill is refunded once. A rejected order is adjusted
+  for SL-M only after it settles, never before.
+- MIS exits release the entry notional for the exited quantity plus/minus realised P&L. A full exit
+  deletes the position row because the `qty > 0` check constraint forbids writing zero; a partial
+  exit keeps the remaining quantity.
+- OCO sibling cancellation runs only when an **exit** fills. A bracket entry anchors its group and
+  spawns exits, which must stay OPEN.
+
+### API-visible changes (intentional)
+
+1. **The book is NSE-only**, matching the PostgreSQL check constraints. An order or exit request with
+   any other `exchange` is rejected with **400 `"Unsupported exchange"`**; omitting it defaults to
+   `NSE`.
+2. **A MARKET order needs a fresh provider time.** If the quote is missing, has no
+   `regularMarketTime`, is older than 10 minutes, or is more than 2 minutes in the future, placement
+   returns **503** rather than filling from a stale price. Scheduled fills likewise leave the order
+   OPEN until a trustworthy quote arrives.
+3. **An oversized MIS exit is rejected, not capped.** The position, funds and ledger are left
+   untouched. Legacy Express released `min(position.qty, order.qty)` and then deleted the whole
+   position; both behaviours are fixed (known issues 4 and 9).
+4. **A repeated or raced square-off returns 404 `"Position not found"`** once the first call has
+   deleted the row, instead of a race-specific 409. The delete and its cash/settlement/order writes
+   are one transaction.
+5. **`fetch_quote` now includes `sourceTime`.** Callers that compared the exact dict shape were
+   updated; the legacy keys are unchanged.
+6. **The response envelopes and field names are unchanged** (`{message}` errors, Mongoose-shaped
+   `_id`/`user`/`__v`, camelCase book fields), so the frontend needs no change.
+
+### Verification and limits
+
+- Focused trading-book suites: **108 passed** (`test_holdings.py`, `test_positions.py`,
+  `test_orders.py`, `test_funds.py`, `test_order_fills.py`, `test_price_sync.py`) against a
+  disposable PostgreSQL database.
+- Full suite: **401 passed, 7 skipped** with `TEST_DATABASE_URL` only (the 7 are the optional
+  real-MongoDB tests); **408 passed, 0 skipped** with `TEST_MONGO_URL` as well.
+- No Express `server/` change, no MongoDB loader, no dual write, no Redis/WebSockets, and no new
+  schema migration: the existing book tables and constraints were sufficient.
+- Still on MongoDB by design: the live portfolio point and daily snapshot book read, Nova's
+  holdings/positions/orders/funds tools, and any other portfolio-history consumer. Search/watchlist
+  and market data remain on their Phase 3B PostgreSQL paths.
+- The optional Express parity harness is not a PostgreSQL harness, so these flows are covered by
+  pytest until a PostgreSQL-aware harness exists.
+
+### Next
+
+Migrate the remaining portfolio read consumers and Nova's book-backed tools, then retire the
+MongoDB book collections once no reader remains.
 
 ---
 
@@ -1560,16 +1643,18 @@ unchanged.
 2. ~~Nova `getOrders` filters lowercase statuses while stored values are uppercase.~~ **Fixed in FastAPI.**
 3. ~~Nova `getFunds` reads a non-existent `used` field.~~ **Fixed in FastAPI** (derived
    `usedMargin = blockedInOrders + misMargin`).
-4. `POST /api/orders` debits funds before the CNC holdings check and does not refund on rejection.
+4. ~~`POST /api/orders` debits funds before the CNC holdings check and does not refund on rejection.~~
+   **Fixed in Phase 3C2** (validation before debit; a rejected fill refunds once).
 5. Price sync runs every minute; project documentation says every 5 minutes.
 6. `npm start` uses `node`, not nodemon, contrary to project documentation.
 7. `DELETE /api/watchlist/:id` returns 204 even when nothing matched.
 8. Market-hours logic has no exchange holiday calendar.
-9. `settleMisExit` deletes an MIS position unconditionally after a partial fill, so an exit larger than
-   the remaining quantity still removes the whole position.
+9. ~~`settleMisExit` deletes an MIS position unconditionally after a partial fill, so an exit larger
+   than the remaining quantity still removes the whole position.~~ **Fixed in Phase 3C2** (oversized
+   exits are rejected; partial exits keep the remainder).
 10. ~~Nova `getPositions` reported SHORT P&L with the long-side sign.~~ **Fixed in FastAPI.**
 
-Items 4–9 are still reproduced as-is; fix separately with approval (AD-9).
+Items 5–8 are still reproduced as-is; fix separately with approval (AD-9).
 
 ### Introduced or exposed by the move to PostgreSQL
 
