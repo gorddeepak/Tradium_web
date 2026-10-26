@@ -18,20 +18,20 @@ snapshot archive, and Nova's other tools are still MongoDB-backed.
 
 | Item | Value |
 |---|---|
-| Phase | 3C2-B — the remaining trading-book readers on PostgreSQL |
+| Phase | 3C2-C — WebSocket integration and the PostgreSQL-only FastAPI runtime |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
 | PostgreSQL schema | **created by Alembic** — `api/migrations/versions/0001_initial_schema.py` creates all 10 tables (`users`, `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists`, `instruments`, `latest_quotes`, `portfolio_snapshots`) plus `alembic_version`; verified by `alembic upgrade head` on a disposable PostgreSQL 17.6 cluster |
 | PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3), **price sync's watchlist symbols** (Phase 3B3.1), **Nova's `getWatchlist`** (Phase 3B3.1), **portfolio snapshots** (`portfolio_snapshots`, Phase 3C1), the **whole trading book** (`funds`, `holdings`, `positions`, `orders`, `transactions`, Phase 3C2) and its **remaining readers** — the live portfolio point, the daily snapshot's book read and Nova's five book tools (Phase 3C2-B) |
-| MongoDB-backed surfaces | **none in either FastAPI app** — only the `db.connect()` startup wiring, unused `db` parameters on the market/price schedulers and the insight/briefing routes, and the Express reference in `server/` remain |
+| MongoDB-backed surfaces | **none — the FastAPI runtime no longer touches MongoDB at all.** Phase 3C2-C removed `api/db.py`, the `db.connect()`/`db.close()` startup wiring, `app.state.db`, the unused scheduler `db` parameters and the insight/briefing `db` dependencies; `MONGO_URL` is no longer a setting. Only the Express reference in `server/` still uses MongoDB |
 | Market cache | `instruments` + `latest_quotes` in PostgreSQL; market sync seeds the **53-symbol universe**; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
 | Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices, upserts the canonical PostgreSQL quote and reads watchlist symbols from PostgreSQL) and the daily 18:00 IST snapshot, which enumerates users from PostgreSQL, reads holdings/positions from PostgreSQL and upserts `portfolio_snapshots` in PostgreSQL; **off unless `TRADING_JOBS_ENABLED` is set** |
 | Known transition gaps | there is no automatic MongoDB → PostgreSQL loader for users, watchlists or snapshots, so pre-migration rows stay invisible and portfolio history only shows snapshots written after Phase 3C1 |
 | Express backend | unchanged, retained in-tree as reference |
 | Frontend | **switched** to FastAPI on `localhost:8000`; a production build is now **served by FastAPI** (SPA fallback) when `SERVE_STATIC`/`NODE_ENV=production`; `VITE_API_URL` still overrides |
 | CORS | Vite dev origins (5173-5177) with credentials; `CORS_ORIGINS` overrides for deployed origins; a same-origin production build needs neither |
-| Development MongoDB | **local** `mongodb://127.0.0.1:27017/tradium_fastapi_dev` via gitignored `api/.env` |
+| Development MongoDB | **not used by FastAPI.** The gitignored `api/.env` needs no `MONGO_URL`; the Express reference keeps its own `server/.env` |
 | Development PostgreSQL | whatever `DATABASE_URL` names — a local database such as `tradium`; `DIRECT_DATABASE_URL` is read only by Alembic |
-| Test MongoDB | in-memory `mongomock` plus the guarded `*_test` scratch DB; `MONGO_URL` is never used |
+| Test MongoDB | the guarded `*_test` scratch real MongoDB only; `mongomock` is no longer a dev dependency and `MONGO_URL` is never read |
 | Test PostgreSQL | a guarded disposable `*_test` database named by `TEST_DATABASE_URL`; the suite runs `alembic upgrade head` and skips when it is unset |
 | Production MongoDB | never contacted; no data copied |
 | Production PostgreSQL | never contacted; no data copied, no data loader written |
@@ -42,8 +42,8 @@ snapshot archive, and Nova's other tools are still MongoDB-backed.
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; no service, branch, or env changes |
-| Tests executed | **405 passed, 7 skipped** with only `TEST_DATABASE_URL`; **412 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3C2-B) — see §5 |
-| PostgreSQL test instance | PostgreSQL 17.6, local cluster on `127.0.0.1:5433`, database `tradium_phase3c2b_test`; scoped to this run and outside the repository |
+| Tests executed | **414 passed, 7 skipped** with only `TEST_DATABASE_URL`; **421 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3C2-C) — see §5 |
+| PostgreSQL test instance | PostgreSQL 17.6, local cluster on `127.0.0.1:5433`, database `tradium_final_cutover_test`; scoped to this run and outside the repository |
 | Express parity check | **run (Phase 2e)** — cookies, numeric rendering and the non-snapshot job side effects; **no functional difference** (§3K). The snapshot job and portfolio history were removed from the harness in Phase 3C1 because they no longer share a database |
 | Read-route parity check | **run (Phase 4b)** — byte-identical for the Mongo-backed read routes at the time; **not rerun since the PostgreSQL moves** (§3Q), and `portfolio/history` is no longer in the harness |
 | Repository secret scan | **clean (Phase 4b/3B2)** — no credentials, API keys, private keys or `.env` files in tracked files; the PostgreSQL docs contain placeholders only |
@@ -1671,8 +1671,11 @@ PostgreSQL. They were the last FastAPI readers of the MongoDB book collections.
 
 ### Next
 
-Nothing in FastAPI still reads the MongoDB book. Retiring the collection and the `db` plumbing
-needs a loader decision for data that exists only in MongoDB (§4, item 11) and is a separate phase.
+Nothing in FastAPI still reads the MongoDB book. Retiring the collection itself still needs a loader
+decision for data that exists only in MongoDB (§4, item 11) and is a separate phase; the now-unused
+`db` plumbing was removed in Phase 3C2-C (§3Y).
+
+---
 
 ## 3X. Phase 3C2 — live watchlist quotes over WebSockets
 
@@ -1701,6 +1704,38 @@ Focused tests: **59 passed** (`test_watchlist_stream.py`, `test_watchlist.py`,
 7 skipped** with `TEST_DATABASE_URL` only and **417 passed, 0 skipped** with `TEST_MONGO_URL` too;
 `python -m compileall -q api`, `npm run lint` and `npm run build` pass (the build keeps its
 pre-existing >500 kB chunk warning). Details: `docs/migration/WATCHLIST_WEBSOCKETS.md`.
+
+---
+
+## 3Y. Phase 3C2-C — the WebSocket branch merged, and a PostgreSQL-only runtime
+
+Phase 3C2-B and `phase3c2-ws-watchlist` were merged on `phase3c2-final-cutover`. The only conflict was
+this file, where §3W and §3X were both kept. The merge changed no runtime behaviour: WebSocket
+authentication still uses the `token` cookie, each socket still sees only its own user's watchlist rows,
+and frames are still published only after `price_sync`'s PostgreSQL commit.
+
+MongoDB is no longer part of the FastAPI runtime. `api/db.py` is deleted, `create_app()` takes no
+`database` argument, startup opens no MongoDB connection, shutdown closes none, and `app.state.db` is
+gone. `Settings` no longer reads `MONGO_URL`; `MarketSyncScheduler` and `PriceSyncScheduler` take only a
+PostgreSQL session factory; and the insight/briefing routes no longer declare an unused `Database`
+dependency. `test_health.py` now proves startup with `MONGO_URL` unset, and the two "injected database"
+tests became real startup-wiring tests that assert each scheduler starts and stops under its switch.
+`mongomock` left `api/requirements-dev.txt`; `pymongo` stays because `api/serialization.py` serialises
+with `bson.ObjectId`, and the `TEST_MONGO_URL` integration suite stays as the compatibility check that
+the retired collections are untouched.
+
+The app was run twice against one disposable PostgreSQL database — once with `MONGO_URL` unset and once
+pointing at an unreachable port (`mongodb://127.0.0.1:1/...`). Both runs served `/api/health`, signup,
+`/api/auth/me`, funds, holdings, positions, orders, portfolio history, watchlist, `/api/market/overview`
+and an authenticated `/api/watchlist/stream` handshake with `2xx` responses and a clean shutdown;
+`app.state` had no `db` and `pymongo` was never imported.
+
+Focused integration: **192 passed** (watchlist stream, watchlist, price sync, auth, auth routes,
+portfolio, portfolio snapshot, assistant, Nova trading book, market sync). Focused MongoDB-removal run:
+**222 passed** (the same set plus health, CORS, static, database errors, market, instruments). Full suite
+**414 passed, 7 skipped** with `TEST_DATABASE_URL` only and **421 passed, 0 skipped** with `TEST_MONGO_URL`
+too; `python -m compileall -q api` passes. No frontend file changed in this phase, so lint/build were not
+rerun. `server/` (Express) is untouched. Nothing was pushed or deployed.
 
 ---
 
@@ -1875,6 +1910,9 @@ Items 5–8 are still reproduced as-is; fix separately with approval (AD-9).
 | Application tests (Phase 3C2-B) | **run:** 405 passed, 7 skipped with `TEST_DATABASE_URL` only; 412 passed, 0 skipped with `TEST_MONGO_URL` too; focused runs **18 passed** (portfolio + snapshot) and **17 passed** (assistant + Nova book tools) |
 | MongoDB book readers after Phase 3C2-B | **none** — searching `api/` outside tests and migrations for `get_collection`, `db[` and `portfoliosnapshots` returns nothing; the live portfolio point, snapshot job and Nova's five tools all read PostgreSQL |
 | Test PostgreSQL instance (Phase 3C2-B) | local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_phase3c2b_test`; `initdb` trust auth; outside the repository |
+| Application tests (Phase 3C2-C) | **run:** 414 passed, 7 skipped with `TEST_DATABASE_URL` only; 421 passed, 0 skipped with `TEST_MONGO_URL` too; focused **192 passed** (integration) and **222 passed** (MongoDB removal); `python -m compileall -q api` passes; frontend untouched |
+| FastAPI MongoDB runtime after Phase 3C2-C | **none** — `api/db.py` deleted, no `MONGO_URL` setting, no `app.state.db`, no scheduler or route `db` parameter; `python` runs with `MONGO_URL` unset and with it pointed at a dead port, and `pymongo` is not imported at runtime |
+| Test PostgreSQL instance (Phase 3C2-C) | local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_final_cutover_test`; outside the repository |
 
 ---
 
@@ -2006,20 +2044,20 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phases 3B1–3C2-B are complete and awaiting review.** Authentication, the market cache, watchlists,
-price-sync watchlist symbols, Nova's `getWatchlist`, portfolio snapshots and the whole trading book —
-including its last readers — are PostgreSQL-backed. The suite reports **405 passed, 7 skipped**
-(`TEST_DATABASE_URL` alone) and **412 passed, 0 skipped** with `TEST_MONGO_URL` too. The branch is
+**Phases 3B1–3C2-C are complete and awaiting review.** Authentication, the market cache, watchlists
+(including the live WebSocket stream), price-sync watchlist symbols, Nova's `getWatchlist`, portfolio
+snapshots and the whole trading book — including its last readers — are PostgreSQL-backed, and the
+FastAPI runtime no longer needs MongoDB at all. The suite reports **414 passed, 7 skipped**
+(`TEST_DATABASE_URL` alone) and **421 passed, 0 skipped** with `TEST_MONGO_URL` too. The branch is
 still local-only; nothing was deployed.
 
-Recommended next: **retire the MongoDB `db` plumbing** (startup connection, `app.state.db`, the unused
-scheduler and insight/briefing parameters) together with a decision on moving data that exists only in
-MongoDB (§4, item 11). Keep the MongoDB `portfoliosnapshots` collection as the rollback copy until
-acceptance; PostgreSQL history intentionally starts from the first post-3C1 snapshot (§3U).
+Recommended next: **decide what to do with the MongoDB book collections themselves** (move the data that
+exists only there, or drop it) — the `db` plumbing is already gone (§3Y). Keep the MongoDB
+`portfoliosnapshots` collection as the rollback copy until acceptance; PostgreSQL history intentionally
+starts from the first post-3C1 snapshot (§3U).
 
 Still required before any cutover that includes existing data: the MongoDB → PostgreSQL loader for users
 and watchlists (§4 item 11), and the reconciliation gates in `POSTGRES_SCHEMA_DESIGN.md` §9.6.
 
-Deferred, unchanged: WebSockets/streaming, an exchange holiday calendar, a quote-age cutoff, the
-remaining Express-defect fixes (orders debit/refund, `settleMisExit` partial fill), and publication to a
-remote (§6.1).
+Deferred, unchanged: an exchange holiday calendar, a quote-age cutoff, the remaining Express-defect
+fixes (orders debit/refund, `settleMisExit` partial fill), and publication to a remote (§6.1).
