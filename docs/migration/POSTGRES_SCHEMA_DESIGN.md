@@ -8,6 +8,14 @@
 > `api/migrations/versions/0001_initial_schema.py`; authentication and the market cache use
 > it. See `MIGRATION_STATUS.md` §3P and §3Q. The design rationale below is unchanged.
 >
+> **Migration decision (Phase 3C-D): clean start, no loader.** The FastAPI deployment begins on an
+> empty PostgreSQL database. Existing MongoDB users, watchlists, snapshots and trading-book rows are
+> **not** carried over — users sign up fresh, portfolio history starts from the live "today" point — and
+> the MongoDB data stays in place, untouched, as an archive rather than a runtime dependency. No loader,
+> dual write or reconciliation is built. Sections 8 and 9 below therefore remain the *design record* for
+> a future decision to preserve legacy data; their profiling, quarantine and reconciliation gates are
+> **not** prerequisites for this deployment. See `MIGRATION_STATUS.md` §3Z.
+>
 > **Scope:** the active FastAPI backend in `api/`, using the legacy Express/Mongoose code
 > in `server/` as schema evidence. The external HTTP contract is held constant except
 > where a change is explicitly labelled **Intentional change** below.
@@ -2602,6 +2610,11 @@ fine.
 
 ## 9. Migration mapping and cutover
 
+> **Not part of the current deployment (Phase 3C-D).** The approved cutover is a clean start on an empty
+> PostgreSQL database: no loader, no dual write, no reconciliation, and the MongoDB data stays untouched
+> as an archive. Everything in §9 is retained as the design for a *future* decision to preserve legacy
+> data, and none of its gates block the clean-start deployment. See `MIGRATION_STATUS.md` §3Z.
+
 ### 9.1 Strategy
 
 **Offline, one-way, single source of truth.**
@@ -2748,6 +2761,9 @@ model and no route reads them. Report the row.
 mixed formats. If a group ID is an ObjectId hex, it still matches the order ID.
 
 ### 9.6 Validation and reconciliation
+
+> Applies only if legacy data is migrated (§9 intro). A clean-start deployment has no source rows to
+> reconcile; its equivalent gates are `alembic upgrade head` and the smoke checks in `DEPLOYMENT.md`.
 
 **Data checks:**
 
