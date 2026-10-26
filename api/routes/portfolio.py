@@ -4,8 +4,9 @@ The Express route is:
     router.get("/history", protect, async (req, res) => { ... });
 
 The daily snapshots are canonical in PostgreSQL (Phase 3C1) and store the IST
-calendar day. The live "today" point still comes from the MongoDB holdings and
-positions, because the trading book has not moved yet.
+calendar day. Since Phase 3C2B the live "today" point comes from the same
+PostgreSQL book as the snapshot job, so the chart and the stored row share one
+calculation (``trading_book.portfolio_totals``).
 
 The Express code formatted labels with the server's local zone; IST is used
 here so the labels are deterministic and match the intended environment.
@@ -13,17 +14,14 @@ here so the labels are deterministic and match the intended environment.
 
 from datetime import datetime, timedelta, timezone
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends
-from pymongo.database import Database
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import require_user
-from ..db import get_database
-from ..portfolio_math import mis_components
 from ..postgres.models import PortfolioSnapshot
 from ..postgres.session import get_session
+from ..trading_book import portfolio_totals
 
 router = APIRouter()
 
@@ -37,10 +35,8 @@ RANGE_DAYS = {"1D": 1, "1W": 7, "1M": 30, "1Y": 365, "ALL": 100000}
 def portfolio_history(
     range: str = "1M",
     user_id: str = Depends(require_user),
-    db: Database = Depends(get_database),
     session: Session = Depends(get_session),
 ):
-    user = ObjectId(user_id)
     days = RANGE_DAYS.get(range, 30)
     today = datetime.now(timezone.utc).astimezone(IST).date()
     # Include today: `days` calendar points end at today, as the Express
@@ -71,25 +67,24 @@ def portfolio_history(
     ]
 
     # Today's live point: holdings plus open MIS legs, always shown.
-    holdings = list(db["holdings"].find({"user": user}))
-    current_value = sum(holding["qty"] * holding["ltp"] for holding in holdings)
-    current_invested = sum(holding["qty"] * holding["avgPrice"] for holding in holdings)
-
-    positions = list(db["positions"].find({"user": user, "product": "MIS"}))
-    mis_value, mis_invested = mis_components(positions)
+    holdings_value, holdings_invested, mis_value, mis_invested = portfolio_totals(
+        session, user_id
+    )
+    live_value = float(holdings_value + mis_value)
+    live_invested = float(holdings_invested + mis_invested)
 
     today_label = today.isoformat()
     if not series or series[-1]["label"] != today_label:
         series.append(
             {
                 "label": today_label,
-                "value": current_value + mis_value,
-                "invested": current_invested + mis_invested,
+                "value": live_value,
+                "invested": live_invested,
             }
         )
     else:
         # Today's snapshot already exists — overwrite it with the freshest live value.
-        series[-1]["value"] = current_value + mis_value
-        series[-1]["invested"] = current_invested + mis_invested
+        series[-1]["value"] = live_value
+        series[-1]["invested"] = live_invested
 
     return series

@@ -104,7 +104,7 @@ def create_app(database=None) -> FastAPI:
                 # owner switch with the daily snapshot.
                 app.state.price_sync = PriceSyncScheduler(app.state.db)
                 app.state.price_sync.start()
-                app.state.portfolio_snapshot = PortfolioSnapshotScheduler(app.state.db)
+                app.state.portfolio_snapshot = PortfolioSnapshotScheduler()
                 app.state.portfolio_snapshot.start()
 
         yield

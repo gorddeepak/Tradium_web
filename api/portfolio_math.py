@@ -3,7 +3,12 @@
 The snapshot job needs ``misComponents``. The portfolio-history route used to
 keep a private copy; both now import this one, so the open-MIS value can never
 drift between the live chart and the stored snapshot.
+
+The readers pass PostgreSQL ``Decimal`` values since Phase 3C2B, so the money
+helpers below stay generic: they keep whatever numeric type they are given.
 """
+
+from decimal import Decimal
 
 
 def day_change_rupees(holding):
@@ -42,17 +47,24 @@ def calculate_portfolio_summary(holdings):
 
 
 def mis_components(positions):
-    """Value of open MIS legs; an ``ltp`` of 0 falls back to the entry price."""
-    mis_value = 0.0
-    mis_invested = 0.0
+    """Value of open MIS legs; an ``ltp`` of 0 falls back to the entry price.
+
+    The terms are ``Decimal`` because the PostgreSQL book is: a float
+    accumulator added to a numeric column would raise, and both callers now
+    price the legs from ``Decimal`` rows.
+    """
+    mis_value = Decimal(0)
+    mis_invested = Decimal(0)
 
     for position in positions:
         if position.get("product") != "MIS":
             continue
+        qty = Decimal(str(position["qty"]))
+        entry = Decimal(str(position["entry"]))
         direction = -1 if position.get("side") == "SHORT" else 1
-        price = position.get("ltp") or position["entry"]
-        pnl = (price - position["entry"]) * position["qty"] * direction
-        mis_invested += position["qty"] * position["entry"]
-        mis_value += position["qty"] * position["entry"] + pnl
+        price = position.get("ltp") or entry
+        pnl = (price - entry) * qty * direction
+        mis_invested += qty * entry
+        mis_value += qty * entry + pnl
 
     return mis_value, mis_invested

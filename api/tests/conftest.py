@@ -381,14 +381,14 @@ def book_client(book_session_factory):
 def book_user_factory(book_session_factory):
     """Insert a 24-hex PostgreSQL user the book rows can reference."""
 
-    def _make(user_id=None):
+    def _make(user_id=None, created_at=BOOK_CREATED):
         user = User(
             id=user_id or secrets.token_hex(12),
             username=f"book-{secrets.token_hex(6)}",
             email=f"{secrets.token_hex(8)}@example.com",
             password_hash="not-used-in-book-tests",
-            created_at=BOOK_CREATED,
-            updated_at=BOOK_CREATED,
+            created_at=created_at,
+            updated_at=created_at,
             version=0,
         )
         with book_session_factory() as session:

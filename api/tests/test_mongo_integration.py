@@ -10,10 +10,11 @@ The MongoDB database name must end with "_test" so this can never touch the
 live database. It is dropped afterwards.
 
 Phase 3C2 moved the trading book (holdings, positions, orders, funds,
-transactions) to PostgreSQL, so those routes are exercised through real
-PostgreSQL sessions here. MongoDB remains the source for the live portfolio
-point, the daily snapshot's book read, and the remaining Nova tools; those
-tests still need the scratch MongoDB.
+transactions) to PostgreSQL, and Phase 3C2B moved the last readers —
+``/api/portfolio/history``'s live point, the daily snapshot and Nova's
+trading-book tools — with it. No FastAPI route or job reads a MongoDB
+trading-book collection any more; the scratch MongoDB is still created so the
+real-database run proves the retired collections are left untouched.
 """
 
 import os
@@ -303,8 +304,8 @@ def test_scheduled_fill_and_snapshot_against_real_databases(
     book_order_factory,
     monkeypatch,
 ):
-    # The per-minute fill path now runs entirely in PostgreSQL; the daily
-    # snapshot still reads the book from MongoDB.
+    # The per-minute fill path and the daily snapshot both run entirely in
+    # PostgreSQL now; only the provider call is stubbed.
     monkeypatch.setattr(
         "api.jobs.price_sync.fetch_quotes",
         lambda tickers: {
@@ -318,7 +319,6 @@ def test_scheduled_fill_and_snapshot_against_real_databases(
     )
     monkeypatch.setattr("api.jobs.price_sync.fetch_sector", lambda symbol: "")
 
-    created = datetime(2026, 9, 1, 4, 15, 30, tzinfo=timezone.utc)
     book_holding_factory(
         book_user, symbol="INFY", qty=10, avg_price=Decimal("1500")
     )
@@ -359,25 +359,7 @@ def test_scheduled_fill_and_snapshot_against_real_databases(
     assert settlement.method == "INFY MIS exit"
     assert settlement.amount == Decimal("500.00")
 
-    scratch_database["holdings"].insert_one(
-        {
-            "_id": ObjectId(),
-            "user": ObjectId(book_user),
-            "symbol": "INFY",
-            "name": "Infosys",
-            "exchange": "NSE",
-            "qty": 10,
-            "avgPrice": 1500.0,
-            "ltp": 1600.0,
-            "dayChangePct": 0.5,
-            "sector": "",
-            "createdAt": created,
-            "updatedAt": created,
-            "__v": 0,
-        }
-    )
-
-    record_daily_snapshot(scratch_database, book_session_factory)
+    record_daily_snapshot(book_session_factory)
 
     with book_session_factory() as session:
         snapshot = session.scalar(
@@ -390,7 +372,7 @@ def test_scheduled_fill_and_snapshot_against_real_databases(
     assert snapshot.version == 0
     assert snapshot.snapshot_date == snapshot_date().date()
     # Idempotent per IST day: a second run updates the same row.
-    record_daily_snapshot(scratch_database, book_session_factory)
+    record_daily_snapshot(book_session_factory)
     with book_session_factory() as session:
         rows = session.scalars(
             select(PortfolioSnapshot).where(PortfolioSnapshot.user_id == book_user)

@@ -14,11 +14,19 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from .postgres.models import Fund, Order, Position
+from .portfolio_math import mis_components
+from .postgres.models import (
+    Fund,
+    Holding,
+    Instrument,
+    LatestQuote,
+    Order,
+    Position,
+)
 
 getcontext().prec = 28
 
@@ -134,6 +142,103 @@ def funds_available(session: Session, user_id: str):
         select(Fund.available).where(Fund.user_id == user_id)
     )
     return available if available is not None else Decimal("0.00")
+
+
+def holding_rows(session: Session, user_id: str):
+    """The user's holdings with the cached quote, as legacy-shaped dicts.
+
+    The book stores quantity and cost basis only; ``ltp`` and ``dayChangePct``
+    come from ``latest_quotes``, so the reading code keeps the Mongoose field
+    names without a second copy of the price. Values stay ``Decimal``; rows are
+    in creation order, which is the order the Express ``find()`` returned.
+    """
+    rows = session.execute(
+        select(
+            Holding.symbol,
+            Holding.name,
+            Holding.exchange,
+            Holding.qty,
+            Holding.avg_price,
+            func.coalesce(LatestQuote.ltp, 0),
+            func.coalesce(LatestQuote.day_change_pct, 0),
+        )
+        .outerjoin(Instrument, Instrument.symbol == Holding.symbol)
+        .outerjoin(LatestQuote, LatestQuote.instrument_id == Instrument.id)
+        .where(Holding.user_id == user_id)
+        .order_by(Holding.created_at.asc(), Holding.id.asc())
+    )
+
+    return [
+        {
+            "symbol": symbol,
+            "name": name,
+            "exchange": exchange,
+            "qty": qty,
+            "avgPrice": avg_price,
+            "ltp": ltp,
+            "dayChangePct": day_change_pct,
+        }
+        for symbol, name, exchange, qty, avg_price, ltp, day_change_pct in rows
+    ]
+
+
+def position_rows(session: Session, user_id: str, product=None):
+    """The user's positions with the cached quote, as legacy-shaped dicts.
+
+    ``product`` narrows the read to one product (``MIS`` for the margin and
+    portfolio-value readers). A position stores no price, so ``ltp`` is joined
+    from ``latest_quotes`` and is 0 when the symbol has no quote yet.
+    """
+    statement = (
+        select(
+            Position.symbol,
+            Position.side,
+            Position.product,
+            Position.qty,
+            Position.entry,
+            func.coalesce(LatestQuote.ltp, 0),
+        )
+        .outerjoin(Instrument, Instrument.symbol == Position.symbol)
+        .outerjoin(LatestQuote, LatestQuote.instrument_id == Instrument.id)
+        .where(Position.user_id == user_id)
+        .order_by(Position.created_at.asc(), Position.id.asc())
+    )
+    if product is not None:
+        statement = statement.where(Position.product == product)
+
+    return [
+        {
+            "symbol": symbol,
+            "side": side,
+            "product": row_product,
+            "qty": qty,
+            "entry": entry,
+            "ltp": ltp,
+        }
+        for symbol, side, row_product, qty, entry, ltp in session.execute(statement)
+    ]
+
+
+def portfolio_totals(session: Session, user_id: str):
+    """Portfolio value and cost basis from PostgreSQL, as ``Decimal``.
+
+    Returns ``(value, invested, mis_value, mis_invested)``: holdings plus the
+    open MIS legs, which is the whole-account view the portfolio chart and the
+    daily snapshot both show. ``/api/portfolio/history``'s live point and
+    ``api/jobs/portfolio_snapshot.py`` call this, so the chart and the stored
+    row can never disagree.
+    """
+    holdings = holding_rows(session, user_id)
+    value = sum(
+        (holding["qty"] * holding["ltp"] for holding in holdings), Decimal(0)
+    )
+    invested = sum(
+        (holding["qty"] * holding["avgPrice"] for holding in holdings), Decimal(0)
+    )
+
+    mis_positions = position_rows(session, user_id, "MIS")
+    mis_value, mis_invested = mis_components(mis_positions)
+    return value, invested, mis_value, mis_invested
 
 
 def refund_blocked_cash(session: Session, order: Order, now):
