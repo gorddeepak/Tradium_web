@@ -4,26 +4,37 @@ This is the FastAPI port of server/controllers/assistantController.js and
 server/controllers/insightController.js. The prompts and tool descriptions are
 kept verbatim because they are behaviour. The tools only read data for the user
 resolved from the JWT; a user id is never accepted as a tool argument.
+
+Since Phase 3C2B every trading-book tool reads PostgreSQL; only the response
+field names and numbers stay Mongoose-shaped, because the model and the client
+already speak that shape.
 """
 
 import json
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Literal
 
-from bson import ObjectId
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
-from pymongo.database import Database
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from .config import get_ai_settings
 from .js_compat import format_inr
 from .portfolio_math import calculate_portfolio_summary
-from .postgres.models import Instrument, LatestQuote, Watchlist
+from .postgres.models import (
+    Fund,
+    Instrument,
+    LatestQuote,
+    Order,
+    Transaction,
+    Watchlist,
+)
 from .postgres.session import get_session_factory
 from .serialization import to_json_value
+from .trading_book import holding_rows, position_rows
 
 CHAT_SYSTEM_PROMPT = """You are Nova, the portfolio assistant built into Tradium — a sharp, sharp-eyed trading-desk analyst the user can talk to about their account.
 
@@ -82,7 +93,6 @@ class AINotConfigured(RuntimeError):
 
 @dataclass
 class NovaDeps:
-    db: Database
     user_id: str
 
 
@@ -104,10 +114,6 @@ def _json_text(value):
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
-def _user_object_id(user_id):
-    return ObjectId(user_id)
-
-
 def insight_system_prompt(page):
     return f"""You write a single short insight sentence (max 25 words) for a trading dashboard.
 Be specific with numbers and symbol names when available in the data. No greetings, no fluff, just the insight.
@@ -125,10 +131,21 @@ def briefing_user_prompt(data):
     return f"Data: {_json_text(data)}\n\nWrite the briefing."
 
 
-def portfolio_snapshot(db, user_id):
-    """Data and summary for the getPortfolioSummary tool."""
-    holdings = list(db["holdings"].find({"user": _user_object_id(user_id)}))
-    numbers = calculate_portfolio_summary(holdings)
+def portfolio_snapshot(user_id, session_factory=None):
+    """Data and summary for the getPortfolioSummary tool.
+
+    Holdings and their cached prices come from the PostgreSQL book
+    (Phase 3C2B); the summary keeps the Mongoose field names and JS numbers the
+    model has always seen.
+    """
+    factory = session_factory or get_session_factory()
+    with factory() as session:
+        holdings = holding_rows(session, user_id)
+
+    numbers = {
+        key: float(value)
+        for key, value in calculate_portfolio_summary(holdings).items()
+    }
 
     invested = _js_round(numbers["invested"] or 0)
     value = _js_round(numbers["value"] or 0)
@@ -153,18 +170,21 @@ def portfolio_snapshot(db, user_id):
     return {"data": numbers, "summary": summary, "holdingsCount": len(holdings)}
 
 
-def holdings_snapshot(db, user_id):
+def holdings_snapshot(user_id, session_factory=None):
     """Data and summary for the getHoldings tool."""
-    holdings = list(db["holdings"].find({"user": _user_object_id(user_id)}))
+    factory = session_factory or get_session_factory()
+    with factory() as session:
+        holdings = holding_rows(session, user_id)
+
     items = [
         {
             "symbol": holding.get("symbol"),
             "name": holding.get("name"),
             "exchange": holding.get("exchange"),
             "quantity": holding.get("qty"),
-            "avgPrice": holding.get("avgPrice"),
-            "ltp": holding.get("ltp"),
-            "dayChangePct": holding.get("dayChangePct"),
+            "avgPrice": float(holding.get("avgPrice") or 0),
+            "ltp": float(holding.get("ltp") or 0),
+            "dayChangePct": float(holding.get("dayChangePct") or 0),
         }
         for holding in holdings
     ]
@@ -188,15 +208,18 @@ def holdings_snapshot(db, user_id):
     return {"data": items, "summary": summary}
 
 
-def positions_snapshot(db, user_id):
+def positions_snapshot(user_id, session_factory=None):
     """Data and summary for the getPositions tool."""
-    positions = list(db["positions"].find({"user": _user_object_id(user_id)}))
+    factory = session_factory or get_session_factory()
+    with factory() as session:
+        positions = position_rows(session, user_id)
+
     items = []
     for position in positions:
         direction = -1 if position.get("side") == "SHORT" else 1
         quantity = position.get("qty") or 0
-        entry = position.get("entry") or 0
-        current = position.get("ltp") or 0
+        entry = float(position.get("entry") or 0)
+        current = float(position.get("ltp") or 0)
         items.append(
             {
                 "symbol": position.get("symbol"),
@@ -274,33 +297,53 @@ def watchlist_snapshot(user_id, session_factory=None):
     return {"data": items, "summary": summary}
 
 
-def funds_snapshot(db, user_id):
+def funds_snapshot(user_id, session_factory=None):
     """Data and summary for the getFunds tool.
 
-    ``usedMargin`` is derived exactly as server/routes/fundsRoutes.js does; it
-    is not a stored field.
+    ``usedMargin`` is derived exactly as server/routes/fundsRoutes.js and
+    ``api/routes/funds.py`` derive it; it is not a stored field.
     """
-    user = _user_object_id(user_id)
-    funds = db["funds"].find_one({"user": user})
-    available = (funds or {}).get("available") or 0
+    factory = session_factory or get_session_factory()
+    with factory() as session:
+        available = session.scalar(
+            select(Fund.available).where(Fund.user_id == user_id)
+        )
 
-    open_orders = list(db["orders"].find({"user": user, "status": "OPEN"}))
-    blocked_in_orders = sum(
-        ((order.get("qty") or 0) - (order.get("filled") or 0)) * (order.get("price") or 0)
-        for order in open_orders
-        if not order.get("isExit")
-        and (order.get("side") == "BUY" or order.get("product") == "MIS")
-    )
+        # Only entry orders block cash: not exits, and BUY or MIS.
+        blocked_in_orders = session.scalar(
+            select(
+                func.coalesce(
+                    func.sum((Order.qty - Order.filled) * Order.price), 0
+                )
+            ).where(
+                Order.user_id == user_id,
+                Order.status == "OPEN",
+                Order.is_exit.is_(False),
+                or_(Order.side == "BUY", Order.product == "MIS"),
+            )
+        )
 
-    positions = list(db["positions"].find({"user": user, "product": "MIS"}))
-    mis_margin = sum(
-        (position.get("entry") or 0) * (position.get("qty") or 0) for position in positions
-    )
+        mis_margin = sum(
+            (
+                position["entry"] * Decimal(position["qty"])
+                for position in position_rows(session, user_id, "MIS")
+            ),
+            Decimal(0),
+        )
 
-    settlements = list(db["transactions"].find({"user": user, "kind": "SETTLEMENT"}))
-    realized_pnl = sum((settlement.get("amount") or 0) for settlement in settlements)
+        realized_pnl = session.scalar(
+            select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+                Transaction.user_id == user_id,
+                Transaction.kind == "SETTLEMENT",
+            )
+        )
 
+    available = float(available or 0)
+    blocked_in_orders = float(blocked_in_orders or 0)
+    mis_margin = float(mis_margin)
+    realized_pnl = float(realized_pnl or 0)
     used_margin = blocked_in_orders + mis_margin
+
     data = {
         "available": available,
         "usedMargin": used_margin,
@@ -318,35 +361,43 @@ def funds_snapshot(db, user_id):
     return {"data": data, "summary": summary}
 
 
-def orders_snapshot(db, user_id, status="all", limit=10):
+def orders_snapshot(user_id, status="all", limit=10, session_factory=None):
     """Data and summary for the getOrders tool.
 
     Stored statuses are uppercase, while the tool's public filter is lowercase.
     The schema field is ``qty``, not ``quantity``.
     """
-    query = {"user": _user_object_id(user_id)}
+    statement = select(Order).where(Order.user_id == user_id)
     if status != "all":
-        query["status"] = {
-            "pending": "OPEN",
-            "executed": "EXECUTED",
-            "cancelled": "CANCELLED",
-        }[status]
+        statement = statement.where(
+            Order.status
+            == {
+                "pending": "OPEN",
+                "executed": "EXECUTED",
+                "cancelled": "CANCELLED",
+            }[status]
+        )
 
     safe_limit = max(1, min(int(limit), 50))
-    orders = list(
-        db["orders"].find(query).sort("createdAt", -1).limit(safe_limit)
-    )
+    statement = statement.order_by(
+        Order.created_at.desc(), Order.id.desc()
+    ).limit(safe_limit)
+
+    factory = session_factory or get_session_factory()
+    with factory() as session:
+        orders = session.scalars(statement).all()
+
     items = []
     for order in orders:
         item = {
-            "symbol": order.get("symbol"),
-            "type": order.get("type"),
-            "quantity": order.get("qty"),
-            "price": order.get("price"),
-            "status": order.get("status"),
+            "symbol": order.symbol,
+            "type": order.type,
+            "quantity": order.qty,
+            "price": float(order.price),
+            "status": order.status,
         }
-        if order.get("createdAt") is not None:
-            item["createdAt"] = to_json_value(order["createdAt"])
+        if order.created_at is not None:
+            item["createdAt"] = to_json_value(order.created_at)
         items.append(item)
 
     latest = items[0] if items else None
@@ -369,19 +420,19 @@ plain_agent = Agent(None)
 @chat_agent.tool(name="getPortfolioSummary")
 def get_portfolio_summary(ctx: RunContext[NovaDeps]) -> dict:
     """Get the user's current portfolio summary: total value, day's P&L, overall P&L, and top movers."""
-    return portfolio_snapshot(ctx.deps.db, ctx.deps.user_id)
+    return portfolio_snapshot(ctx.deps.user_id)
 
 
 @chat_agent.tool(name="getHoldings")
 def get_holdings(ctx: RunContext[NovaDeps]) -> dict:
     """Get the user's current holdings with symbol, name, exchange, quantity, average price, last traded price, and today's change."""
-    return holdings_snapshot(ctx.deps.db, ctx.deps.user_id)
+    return holdings_snapshot(ctx.deps.user_id)
 
 
 @chat_agent.tool(name="getPositions")
 def get_positions(ctx: RunContext[NovaDeps]) -> dict:
     """Get the user's open positions (intraday/derivatives), with product type (CNC/MIS), quantity, entry price, current price, and current P&L."""
-    return positions_snapshot(ctx.deps.db, ctx.deps.user_id)
+    return positions_snapshot(ctx.deps.user_id)
 
 
 @chat_agent.tool(name="getWatchlist")
@@ -393,7 +444,7 @@ def get_watchlist(ctx: RunContext[NovaDeps]) -> dict:
 @chat_agent.tool(name="getFunds")
 def get_funds(ctx: RunContext[NovaDeps]) -> dict:
     """Get the user's available margin, used margin, and total balance."""
-    return funds_snapshot(ctx.deps.db, ctx.deps.user_id)
+    return funds_snapshot(ctx.deps.user_id)
 
 
 @chat_agent.tool(name="getOrders")
@@ -408,4 +459,4 @@ def get_orders(
         status: Filter orders by status; use 'all' if the user didn't specify.
         limit: How many recent orders to return.
     """
-    return orders_snapshot(ctx.deps.db, ctx.deps.user_id, status=status, limit=limit)
+    return orders_snapshot(ctx.deps.user_id, status=status, limit=limit)

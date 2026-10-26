@@ -48,7 +48,6 @@ async def _json_body(request: Request):
 async def assistant_chat(
     request: Request,
     user_id: str = Depends(require_user),
-    db: Database = Depends(get_database),
 ):
     payload = await _json_body(request)
     messages = payload.get("messages") if isinstance(payload, dict) else None
@@ -65,7 +64,7 @@ async def assistant_chat(
             request,
             agent=chat_agent,
             model=model,
-            deps=NovaDeps(db=db, user_id=user_id),
+            deps=NovaDeps(user_id=user_id),
             sdk_version=7,
             usage_limits=CHAT_USAGE_LIMITS,
         )
