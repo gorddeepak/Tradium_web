@@ -1631,6 +1631,36 @@ MongoDB book collections once no reader remains.
 
 ---
 
+## 3X. Phase 3C2 — live watchlist quotes over WebSockets
+
+A push channel beside the existing watchlist REST API, so the page can show a price change
+without waiting for the 30-second poll.
+
+`GET /api/watchlist/stream` upgrades to a WebSocket. The handshake reuses the `token` cookie
+through `user_from_token`, which is the body of the existing HTTP guard; a missing or invalid
+token is accepted and then closed with `1008`, because a browser cannot read a close code from
+a rejected handshake and would otherwise retry forever.
+
+Each socket is registered against the JWT's user id, and every publish rebuilds its frames from
+that user's `watchlists` rows joined to `instruments`/`latest_quotes`. Add and remove therefore
+apply while a socket is open, and one user's symbols never reach another user's socket.
+`price_sync` calls `publish_persisted_quotes` only after its quote transaction commits, so a
+frame never carries a price that is not in `latest_quotes`; a failed read is logged and dropped
+so live delivery cannot fail the job that also fills orders.
+
+The frontend keeps `GET /api/watchlist` for the first paint and the existing poll as a fallback.
+`useWatchlistStream` opens after the first load, merges frames by watchlist row id, reuses the
+existing flash animation, retries with a 5–30 s backoff and treats `1008` as terminal; unmount
+closes the socket and clears the retry timer.
+
+Focused tests: **59 passed** (`test_watchlist_stream.py`, `test_watchlist.py`,
+`test_price_sync.py`) against a disposable PostgreSQL database. The full suite is **410 passed,
+7 skipped** with `TEST_DATABASE_URL` only and **417 passed, 0 skipped** with `TEST_MONGO_URL` too;
+`python -m compileall -q api`, `npm run lint` and `npm run build` pass (the build keeps its
+pre-existing >500 kB chunk warning). Details: `docs/migration/WATCHLIST_WEBSOCKETS.md`.
+
+---
+
 ## 4. Known issues recorded
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and

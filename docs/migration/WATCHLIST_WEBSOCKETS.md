@@ -60,7 +60,8 @@ fallback.
 - a watchlist row with no quote being omitted;
 - a failed quote read being swallowed while the socket survives;
 - disconnect removing the hub subscription;
-- `price_sync.run_sync` persisting then publishing end to end.
+- `price_sync.run_sync` persisting then publishing end to end;
+- `price_sync.run_sync` publishing nothing when quote persistence fails.
 
 Run focused:
 
@@ -75,8 +76,9 @@ database; they skip when it is unset.
 ## Coordination with `phase3c2b-postgres-readers`
 
 This branch does not change that branch's portfolio, snapshot or Nova reader
-files, nor `api/main.py`, `api/scheduler.py`, `api/tests/conftest.py`,
-`AGENTS.md` or `MIGRATION_STATUS.md`. The shared touch points are:
+files, nor `api/main.py`, `api/scheduler.py`, `api/tests/conftest.py` or
+`AGENTS.md`. The only shared document is `docs/migration/MIGRATION_STATUS.md`,
+where this branch adds §3X. The shared touch points are:
 
 - `api/jobs/price_sync.py` — one additive call after quote persistence;
 - `api/routes/watchlist.py` — the WebSocket route;
