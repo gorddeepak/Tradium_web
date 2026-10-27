@@ -1,8 +1,7 @@
 """Configuration read from the environment.
 
 The FastAPI runtime is PostgreSQL-only: it needs ``DATABASE_URL`` and
-``JWT_SECRET``. The Express reference under ``server/`` still reads
-``MONGO_URL`` for its own process.
+``JWT_SECRET``.
 """
 
 import os
@@ -17,7 +16,7 @@ from dotenv import load_dotenv
 # real environment variables (e.g. a deployment's) ahead of this file.
 load_dotenv(Path(__file__).with_name(".env"))
 
-# The Vite dev server's origins, matching server/index.js. In production the
+# The Vite dev server's origins. In production the
 # frontend is served by the API itself, so CORS_ORIGINS only needs to list
 # additional origins when the two are deployed separately.
 VITE_DEV_ORIGINS = (

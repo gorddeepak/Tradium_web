@@ -127,8 +127,8 @@ development only and is never committed.
 | `MARKET_SYNC_ENABLED` | optional | Market-cache refresh owner. **Off by default**; at most one process (§5) |
 | `TRADING_JOBS_ENABLED` | optional | Price sync (fills orders, moves funds) + daily snapshot owner. **Off by default**; exactly one process (§5) |
 
-`MONGO_URL` is **not** read by this service. `TEST_MONGO_URL` is a test-only variable for the optional
-real-MongoDB suite and has no place in a deployment.
+`MONGO_URL` is **not** read by this service, and MongoDB is not a runtime dependency. Backend tests
+need only `TEST_DATABASE_URL`; there is no MongoDB test suite any more.
 
 ### Market data provider
 

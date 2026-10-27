@@ -1,8 +1,8 @@
 """SQLAlchemy models for the approved PostgreSQL schema.
 
-Source of truth: docs/migration/POSTGRES_SCHEMA_DESIGN.md. Authentication uses
-these models from Phase 3B1; instruments/latest_quotes use them from Phase 3B2.
-The remaining MongoDB path is intentionally still active until it migrates.
+Source of truth: docs/migration/POSTGRES_SCHEMA_DESIGN.md. Every runtime
+feature — authentication, the market cache, watchlists, the trading book and
+snapshots — reads and writes these tables.
 """
 
 from datetime import date, datetime

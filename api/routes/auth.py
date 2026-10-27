@@ -9,8 +9,8 @@ The Express routes are:
 The controller catches its own errors and answers with a `error` field, which
 the central handler does not, so these handlers reproduce that envelope.
 
-Phase 3B1 moves only the user identity to PostgreSQL. The other routes still
-read MongoDB; their `require_user` dependency and 24-hex user ids are unchanged.
+User identity lives in PostgreSQL. The `require_user` dependency and 24-hex
+user ids keep the shape the frontend already expects.
 """
 
 import secrets

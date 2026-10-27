@@ -1,16 +1,9 @@
-"""Unit tests for the document-to-JSON conversion."""
+"""Unit tests for the row-to-JSON conversion."""
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from bson import ObjectId
-
 from api.serialization import to_json_value
-
-
-def test_object_id_becomes_hex_string():
-    value = ObjectId("64b7f1c2a1b2c3d4e5f60718")
-    assert to_json_value(value) == "64b7f1c2a1b2c3d4e5f60718"
 
 
 def test_datetime_becomes_iso_string_with_three_decimals():
@@ -36,14 +29,16 @@ def test_aware_datetime_is_converted_to_utc():
 
 def test_nested_documents_and_lists_are_converted():
     document = {
-        "_id": ObjectId(),
-        "items": [{"_id": ObjectId(), "when": datetime(2026, 1, 1, tzinfo=timezone.utc)}],
+        "_id": "64b7f1c2a1b2c3d4e5f60718",
+        "items": [
+            {"_id": "64b7f1c2a1b2c3d4e5f60719", "when": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+        ],
         "count": 2,
         "label": "x",
     }
     converted = to_json_value(document)
-    assert isinstance(converted["_id"], str)
-    assert isinstance(converted["items"][0]["_id"], str)
+    assert converted["_id"] == "64b7f1c2a1b2c3d4e5f60718"
+    assert converted["items"][0]["_id"] == "64b7f1c2a1b2c3d4e5f60719"
     assert converted["items"][0]["when"] == "2026-01-01T00:00:00.000Z"
     assert converted["count"] == 2
 

@@ -19,7 +19,6 @@ import jwt
 import pytest
 from alembic import command
 from alembic.config import Config
-from bson import ObjectId
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.engine import make_url
@@ -197,20 +196,18 @@ def test_signup_generates_object_id_compatible_hex_ids(client):
     )
 
     user_id = response.json()["user"]["id"]
+    # The frontend and the JWT claim still expect the Mongoose-era 24-hex shape.
     assert re.fullmatch(r"[0-9a-f]{24}", user_id)
-    # Mongo-backed routes still cast the token claim with ObjectId(). The new
-    # PostgreSQL id shape must keep working there.
-    assert str(ObjectId(user_id)) == user_id
 
 
-def test_signup_token_opens_mongo_backed_protected_routes(client):
+def test_signup_token_opens_protected_routes(client):
     client.post(
         "/api/auth/signup",
         json={"username": "deepak", "email": "deepak@example.com", "password": PASSWORD},
     )
 
     # TestClient keeps the cookie, so this is a real cookie round-trip through
-    # require_user and then the still-Mongo-backed holdings route.
+    # require_user and then the PostgreSQL-backed holdings route.
     assert client.get("/api/holdings").status_code == 200
 
 
@@ -316,7 +313,7 @@ def test_login_sets_cookie_and_returns_user(client, session_factory):
     assert "Max-Age=604800" in cookie
 
 
-def test_login_token_opens_mongo_backed_protected_routes(client, session_factory):
+def test_login_token_opens_protected_routes(client, session_factory):
     insert_user(session_factory)
 
     client.post("/api/auth/login", json={"email": "deepak@example.com", "password": PASSWORD})

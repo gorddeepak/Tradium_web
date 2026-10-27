@@ -34,7 +34,7 @@ NOW = datetime(2026, 9, 1, 4, 15, 30, 123000, tzinfo=timezone.utc)
 
 @pytest.fixture
 def client(book_session_factory):
-    """The API with PostgreSQL sessions and mongomock for the remaining reads."""
+    """The API with PostgreSQL sessions."""
 
     def override_get_session():
         with book_session_factory() as session:

@@ -1,33 +1,25 @@
-"""Optional integration tests against real PostgreSQL and MongoDB.
+"""Integration tests against a real PostgreSQL database.
 
-Skipped unless TEST_MONGO_URL is set. Example:
+Skipped unless TEST_DATABASE_URL points at a disposable database whose name
+ends in "_test". Example:
 
-    TEST_MONGO_URL=mongodb://127.0.0.1:27017/tradium_fastapi_phase1_test \
     TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:5433/tradium_phase3c2_test \
-        python -m pytest api/tests/test_mongo_integration.py
-
-The MongoDB database name must end with "_test" so this can never touch the
-live database. It is dropped afterwards.
+        python -m pytest api/tests/test_postgres_integration.py
 
 Phase 3C2 moved the trading book (holdings, positions, orders, funds,
 transactions) to PostgreSQL, and Phase 3C2B moved the last readers —
 ``/api/portfolio/history``'s live point, the daily snapshot and Nova's
-trading-book tools — with it. No FastAPI route or job reads a MongoDB
-trading-book collection any more; the scratch MongoDB is still created so the
-real-database run proves the retired collections are left untouched.
+trading-book tools — with it. These tests exercise those paths against the
+real database instead of mocks.
 """
 
-import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import bcrypt
 import jwt
-import pytest
-from bson import ObjectId
 from fastapi.testclient import TestClient
-from pymongo import MongoClient
 from sqlalchemy import select
 
 from api.jobs.portfolio_snapshot import record_daily_snapshot, snapshot_date
@@ -45,30 +37,7 @@ from api.postgres.models import (
 from api.postgres.session import get_session
 from api.tests.conftest import TEST_SECRET
 
-TEST_MONGO_URL = os.getenv("TEST_MONGO_URL")
 NOW = datetime(2026, 10, 25, 10, 0, 0, tzinfo=timezone.utc)
-
-pytestmark = pytest.mark.skipif(
-    not TEST_MONGO_URL, reason="set TEST_MONGO_URL to run the real-database tests"
-)
-
-
-@pytest.fixture
-def scratch_database():
-    if not TEST_MONGO_URL:
-        pytest.skip("TEST_MONGO_URL is not set")
-
-    client = MongoClient(TEST_MONGO_URL, serverSelectionTimeoutMS=5000)
-    database = client.get_default_database()
-    if not database.name.endswith("_test"):
-        pytest.fail(f"refusing to run against database {database.name!r}")
-
-    client.drop_database(database.name)
-    try:
-        yield database
-    finally:
-        client.drop_database(database.name)
-        client.close()
 
 
 def _token(user_id):
@@ -294,8 +263,7 @@ def test_write_routes_against_real_postgres(
         assert session.get(Order, limit.json()["_id"]).status == "CANCELLED"
 
 
-def test_scheduled_fill_and_snapshot_against_real_databases(
-    scratch_database,
+def test_scheduled_fill_and_snapshot_against_real_database(
     book_session_factory,
     book_user,
     book_holding_factory,
@@ -385,12 +353,10 @@ def test_scheduled_fill_and_snapshot_against_real_databases(
 # --------------------------------------------------------------------------
 
 
-def test_auth_uses_postgres_while_mongo_stays_real(
-    scratch_database, book_session_factory, monkeypatch
-):
-    # Authentication is canonical in PostgreSQL; the retired Mongo collections
-    # stay untouched, and auth must never write a MongoDB `users` document.
-    suffix = str(ObjectId())
+def test_auth_against_real_postgres(book_session_factory):
+    # Authentication is canonical in PostgreSQL: the cookie a signup sets is
+    # enough for a book route on the next request.
+    suffix = secrets.token_hex(12)
     email = f"deepak-{suffix}@example.com"
     username = f"deepak{suffix}"
 
@@ -445,9 +411,6 @@ def test_auth_uses_postgres_while_mongo_stays_real(
     returned = me.json()["user"]
     assert set(returned) == {"_id", "username", "email", "createdAt", "updatedAt", "__v"}
     assert returned["createdAt"].endswith("Z")
-
-    # Auth must not write users to MongoDB.
-    assert scratch_database["users"].count_documents({}) == 0
 
     with book_session_factory() as session:
         stored = session.scalar(select(User).where(User.email == email))
