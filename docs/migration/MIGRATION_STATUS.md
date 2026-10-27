@@ -1,9 +1,10 @@
 # Migration Status
 
-**Last updated:** 2026-10-27 (Phase 3C-E)
-**Current phase:** **Phase 3C2-E — Render deployment configuration**
-**Application code modified:** **Yes, up to Phase 3C2-C** (3C2-D changed documentation only; 3C-E adds
-deployment configuration, `.python-version` and documentation, with no application code change).
+**Last updated:** 2026-10-27 (Phase 3C-F)
+**Current phase:** **Phase 3C-F — legacy Express/MongoDB cleanup**
+**Application code modified:** **Yes, up to Phase 3C-F** (3C2-D changed documentation only; 3C-E added
+deployment configuration, `.python-version` and documentation; 3C-F removed the unused Express backend,
+its parity harness, the `pymongo` dependency and other verified-unused code).
 Phase 3B1 moved authentication to PostgreSQL; Phase 3B2 moved the market cache there and made
 `price_sync` a dual writer; Phase 3B3 moved watchlists there and made the daily snapshot enumerate users
 from PostgreSQL; Phase 3B3.1 moved price sync and Nova's watchlist tool onto the same table; Phase 3C1
@@ -12,8 +13,9 @@ whole trading book (funds, holdings, positions, orders, transactions) and tied t
 Phase 3C2-B moved the last book readers (the live history point, the snapshot job, Nova's five book tools);
 Phase 3C2-C merged the watchlist WebSocket branch and deleted the MongoDB runtime. Every FastAPI surface
 is now PostgreSQL-backed, the runtime needs no MongoDB, the 3C2-D decision is a clean start on
-an empty database (§3Z), and 3C-E adds the Render Blueprint that deploys it (§3AA). `server/` and the
-original repository remain untouched.
+an empty database (§3Z), 3C-E adds the Render Blueprint that deploys it (§3AA), and 3C-F removes the
+unused Express reference and MongoDB dependency from the active repository (§3AB). The original
+repository remains untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -23,20 +25,20 @@ original repository remain untouched.
 
 | Item | Value |
 |---|---|
-| Phase | 3C2-E — Render deployment configuration: Blueprint, environment mapping and local verification |
+| Phase | 3C-F — legacy cleanup: Express backend and parity harness removed, MongoDB dependency dropped |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
 | PostgreSQL schema | **created by Alembic** — `api/migrations/versions/0001_initial_schema.py` creates all 10 tables (`users`, `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists`, `instruments`, `latest_quotes`, `portfolio_snapshots`) plus `alembic_version`; verified by `alembic upgrade head` on a disposable PostgreSQL 17.6 cluster |
 | PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3), **price sync's watchlist symbols** (Phase 3B3.1), **Nova's `getWatchlist`** (Phase 3B3.1), **portfolio snapshots** (`portfolio_snapshots`, Phase 3C1), the **whole trading book** (`funds`, `holdings`, `positions`, `orders`, `transactions`, Phase 3C2) and its **remaining readers** — the live portfolio point, the daily snapshot's book read and Nova's five book tools (Phase 3C2-B) |
-| MongoDB-backed surfaces | **none — the FastAPI runtime no longer touches MongoDB at all.** Phase 3C2-C removed `api/db.py`, the `db.connect()`/`db.close()` startup wiring, `app.state.db`, the unused scheduler `db` parameters and the insight/briefing `db` dependencies; `MONGO_URL` is no longer a setting. Only the Express reference in `server/` still uses MongoDB |
+| MongoDB-backed surfaces | **none — the FastAPI runtime no longer touches MongoDB at all.** Phase 3C2-C removed `api/db.py`, the `db.connect()`/`db.close()` startup wiring, `app.state.db`, the unused scheduler `db` parameters and the insight/briefing `db` dependencies; `MONGO_URL` is no longer a setting. Phase 3C-F removed the Express reference (`server/`), the parity harness and the `pymongo` dependency, so no tracked code uses MongoDB |
 | Market cache | `instruments` + `latest_quotes` in PostgreSQL; market sync seeds the **53-symbol universe**; scheduler **off unless `MARKET_SYNC_ENABLED` is set** |
-| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, mirrors Mongo prices, upserts the canonical PostgreSQL quote and reads watchlist symbols from PostgreSQL) and the daily 18:00 IST snapshot, which enumerates users from PostgreSQL, reads holdings/positions from PostgreSQL and upserts `portfolio_snapshots` in PostgreSQL; **off unless `TRADING_JOBS_ENABLED` is set** |
+| Trading jobs | per-minute `price_sync` (fills orders, settles MIS exits, upserts the canonical PostgreSQL quote and reads watchlist symbols from PostgreSQL) and the daily 18:00 IST snapshot, which enumerates users from PostgreSQL, reads holdings/positions from PostgreSQL and upserts `portfolio_snapshots` in PostgreSQL; **off unless `TRADING_JOBS_ENABLED` is set** |
 | Legacy data decision | **clean start (Phase 3C-D).** PostgreSQL begins empty: existing MongoDB users, watchlists, snapshots and trading-book records do **not** carry over, users create fresh accounts, and the MongoDB data stays in place as an untouched archive. No loader, dual write or reconciliation is planned; preserving legacy data would be separate, later migration work. Portfolio history therefore shows the live "today" point from day one and gains stored points only after cutover |
-| Express backend | unchanged, retained in-tree as reference |
+| Express backend | **removed from the active tree (Phase 3C-F)** — `server/` and `tools/express-parity/` deleted; Git history keeps the reference. The deployed Express/Render service is untouched |
 | Frontend | **switched** to FastAPI on `localhost:8000`; a production build is now **served by FastAPI** (SPA fallback) when `SERVE_STATIC`/`NODE_ENV=production`; `VITE_API_URL` still overrides |
 | CORS | Vite dev origins (5173-5177) with credentials; `CORS_ORIGINS` overrides for deployed origins; a same-origin production build needs neither |
-| Development MongoDB | **not used by FastAPI.** The gitignored `api/.env` needs no `MONGO_URL`; the Express reference keeps its own `server/.env` |
+| Development MongoDB | **not used.** The gitignored `api/.env` has no `MONGO_URL` setting, and Phase 3C-F removed the last code that read one |
 | Development PostgreSQL | whatever `DATABASE_URL` names — a local database such as `tradium`; `DIRECT_DATABASE_URL` is read only by Alembic |
-| Test MongoDB | the guarded `*_test` scratch real MongoDB only; `mongomock` is no longer a dev dependency and `MONGO_URL` is never read |
+| Test MongoDB | **none.** Phase 3C-F removed `test_mongo_integration.py`'s MongoDB half (the PostgreSQL tests live on as `test_postgres_integration.py`) and the `pymongo` dependency |
 | Test PostgreSQL | a guarded disposable `*_test` database named by `TEST_DATABASE_URL`; the suite runs `alembic upgrade head` and skips when it is unset |
 | Production MongoDB | never contacted; no data copied |
 | Production PostgreSQL | never contacted; no data copied, no data loader written |
@@ -48,10 +50,10 @@ original repository remain untouched.
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
 | Production (Render) | untouched; the Blueprint is prepared but **not applied**, and no service, branch or environment variable was changed |
 | Render deployment config | `render.yaml` (one Python web service + one PostgreSQL database, same region) and `.python-version`; pre-deploy `alembic upgrade head`, same-origin static serving, schedulers off, secrets generated or entered in the dashboard (§3AA) |
-| Tests executed | **414 passed, 7 skipped** with only `TEST_DATABASE_URL`; **421 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3C2-C) — see §5 |
+| Tests executed | **403 passed, 0 skipped** with only `TEST_DATABASE_URL` (2026-10-27, Phase 3C-F). The MongoDB-only tests and the unused stream decoder's 17 tests were removed with their code; `test_postgres_integration.py` now runs in the normal suite — see §5 |
 | PostgreSQL test instance | PostgreSQL 17.6, local cluster on `127.0.0.1:5433`, database `tradium_final_cutover_test`; scoped to this run and outside the repository |
-| Express parity check | **run (Phase 2e)** — cookies, numeric rendering and the non-snapshot job side effects; **no functional difference** (§3K). The snapshot job and portfolio history were removed from the harness in Phase 3C1 because they no longer share a database |
-| Read-route parity check | **run (Phase 4b)** — byte-identical for the Mongo-backed read routes at the time; **not rerun since the PostgreSQL moves** (§3Q), and `portfolio/history` is no longer in the harness |
+| Express parity check | **run (Phase 2e)** — cookies, numeric rendering and the non-snapshot job side effects; **no functional difference** (§3K). The harness itself was removed in Phase 3C-F |
+| Read-route parity check | **run (Phase 4b)** — byte-identical for the Mongo-backed read routes at the time; **not rerun since the PostgreSQL moves** (§3Q). The harness itself was removed in Phase 3C-F |
 | Repository secret scan | **clean (Phase 4b/3B2)** — no credentials, API keys, private keys or `.env` files in tracked files; the PostgreSQL docs contain placeholders only |
 | Browser cutover check | **run** — signup, login, reload, logout and all six dashboard pages against a live FastAPI server (§3L) |
 | Nova browser check | **run** — dashboard briefing, a page insight, and chat with one- and two-tool turns against live Gemini (§3M) |
@@ -1834,12 +1836,43 @@ The Render CLI is not installed, so `render blueprints validate` was not run, an
 
 ---
 
+## 3AB. Phase 3C-F — legacy Express/MongoDB cleanup
+
+**The active tree now matches the intended architecture.** With every FastAPI surface on PostgreSQL, the
+unused Express reference and the MongoDB dependency were removed rather than kept for history.
+
+- **Removed `server/`** (38 files): the Express app, routers, controllers, Mongoose models, jobs, seed and
+  backfill scripts, and its `package.json`/lockfile. Nothing imported it: the React build, `scripts/`,
+  `render.yaml` and the FastAPI runtime all use `api/`. Its cron jobs were never started by the parity
+  harness, and the deployed Express service is a separate Render resource that this repository does not
+  manage.
+- **Removed `tools/express-parity/`** (14 files): the Phase 2e/4b harness loaded the Express modules and
+  `pymongo` directly, so it could not run after the Express removal. Its results stay recorded in §3K and
+  `TEST_PLAN.md`.
+- **Removed the MongoDB Python dependency:** `pymongo==4.19.0` left `api/requirements.txt`,
+  `api/serialization.py` lost its `bson.ObjectId` branch (PostgreSQL ids are already 24-hex strings), and
+  the test suite lost its `bson` imports and unused Mongoose-shaped fixtures.
+- **`test_mongo_integration.py` became `test_postgres_integration.py`:** the real-PostgreSQL book reads,
+  write routes, scheduled fill/snapshot and auth round-trip tests are preserved; the scratch MongoDB
+  fixture and the "Mongo stays untouched" assertions were removed with the dependency.
+- **Removed `api/yahoo_stream.py`, its 17 tests and the captured-frame fixture:** a Phase 2b decoder proof
+  of concept with no runtime consumer; the REST quote path is the shipped implementation.
+- **Documentation:** `README.md`, `AGENTS.md`, `api/.env.example` and `DEPLOYMENT.md` now describe only the
+  FastAPI/PostgreSQL setup. The MongoDB archive itself, the clean-start decision (§3Z) and the historical
+  phase records are unchanged; the deployed Express service was not touched.
+
+Verification: the full backend suite with only `TEST_DATABASE_URL`, `python -m compileall -q api`,
+`npm run lint`, `npm run build`, and a FastAPI start with no `MONGO_URL` and no MongoDB client installed.
+
+---
+
 ## 4. Known issues recorded
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and
 the SHORT P&L sign were fixed in the FastAPI Nova port during Phase 3b (see §3M), because the tools
 were being written from scratch and reproducing known-broken output would bake the defects into the
-new backend. The Express reference in `server/` still has the original behaviour. Everything else is
+new backend. The Express reference (removed in Phase 3C-F; Git history keeps it) still had the original
+behaviour. Everything else is
 unchanged.
 
 1. ~~Nova `getOrders` returns `quantity` where the schema field is `qty`.~~ **Fixed in FastAPI.**
@@ -2142,12 +2175,12 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phases 3B1–3C2-E are complete and awaiting review.** Authentication, the market cache, watchlists
+**Phases 3B1-3C-F are complete and awaiting review.** Authentication, the market cache, watchlists
 (including the live WebSocket stream), price-sync watchlist symbols, Nova's `getWatchlist`, portfolio
 snapshots and the whole trading book — including its last readers — are PostgreSQL-backed, and the
-FastAPI runtime no longer needs MongoDB at all. The suite reports **414 passed, 7 skipped**
-(`TEST_DATABASE_URL` alone) and **421 passed, 0 skipped** with `TEST_MONGO_URL` too. The branch is
-still local-only; nothing was deployed.
+FastAPI runtime no longer needs MongoDB at all, and Phase 3C-F removed the Express reference, the parity
+harness and the last MongoDB dependency. The suite reports **403 passed, 0 skipped** with
+`TEST_DATABASE_URL` alone. The branch is still local-only; nothing was deployed.
 
 **The deployment is described in the repository; applying it is a dashboard step.** `render.yaml` (§3AA)
 provisions one Python web service and one PostgreSQL database in the same region, and runs

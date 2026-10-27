@@ -3,63 +3,53 @@
 A mock Indian-stock-trading dashboard in the style of Zerodha's Kite — paper
 trading on NSE-listed equities, with live prices, an intraday/delivery order
 ticket, and a Gemini-powered portfolio assistant ("Nova"). No real money, no
-real orders: a full-stack playground for MERN + AI tool-calling.
-
-> **Migration branch:** the frontend now targets the FastAPI backend in `api/`.
-> For local development, copy `api/.env.example` to `api/.env`, point
-> `DATABASE_URL`/`DIRECT_DATABASE_URL` at a local PostgreSQL database, run
-> `alembic upgrade head`, then
-> `.venv/Scripts/python.exe -m uvicorn api.main:app --reload --port 8000` and
-> `npm run dev` here. Set `MARKET_SYNC_ENABLED=true` in `api/.env` for local
-> FastAPI-only development: the scheduler runs `market_sync` once at startup,
-> which seeds the 53-symbol NIFTY universe and its quotes. Without it the
-> Markets page and instrument search stay empty until that job runs. The
-> Express quick start below is retained as the original reference. See
-> [docs/migration/MIGRATION_STATUS.md](docs/migration/MIGRATION_STATUS.md).
-> A production build (`npm run build`) is served by FastAPI itself when
-> `NODE_ENV=production` or `SERVE_STATIC=true`; see
-> [docs/migration/DEPLOYMENT.md](docs/migration/DEPLOYMENT.md).
+real orders: a full-stack playground for trading UIs and AI tool-calling.
 
 ## Stack
 
 - **Frontend** — React 19, Vite, Tailwind CSS v4, a hand-rolled SVG chart
   library (`src/components/charts/`)
-- **Backend** — Express 5, MongoDB (Mongoose), JWT auth in httpOnly cookies
-- **AI** — Google Gemini via the Vercel AI SDK, used for Nova (chat + tools)
+- **Backend** — FastAPI, SQLAlchemy and PostgreSQL, JWT auth in httpOnly cookies
+- **AI** — Google Gemini via pydantic-ai, used for Nova (chat + tools)
   and per-page insight cards
-- **Live data** — yahoo-finance2 for quotes and candles; prices sync to the DB
-  every 5 minutes
+- **Live data** — Yahoo Finance quotes and candles; prices sync to PostgreSQL
+  every minute
 
 ## Getting started
 
-Requires Node.js >= 18 and a running MongoDB instance.
+Requires Node.js >= 18, Python 3.12+ and a running PostgreSQL database.
 
 ```bash
-# 1. Backend
-cd server
-npm install
-cp .env.example .env    # then fill in MONGO_URL, JWT_SECRET, GOOGLE_GENERATIVE_AI_API_KEY
-npm run seed            # optional: demo account (demo@tradium.local) with sample data
-npm start               # API on http://localhost:3002
+# 1. Backend (from the repo root)
+cp api/.env.example api/.env   # then fill in DATABASE_URL, DIRECT_DATABASE_URL, JWT_SECRET
+alembic upgrade head
+.venv/Scripts/python.exe -m uvicorn api.main:app --reload --port 8000
 
-# 2. Frontend (in a second terminal, from the repo root)
+# 2. Frontend (in a second terminal)
 npm install
 npm run dev             # app on http://localhost:5173
 ```
 
-Then open http://localhost:5173, sign up (or log in as the demo account), and
-you're trading paper money.
+Set `MARKET_SYNC_ENABLED=true` in `api/.env` for local development. The
+scheduler runs `market_sync` once at startup, which seeds the 53-symbol NIFTY
+universe and its quotes; without it the Markets page and instrument search stay
+empty until that job runs.
+
+Then open http://localhost:5173 and sign up — you're trading paper money.
 
 ### Environment
 
-The backend reads everything from `server/.env` — see `server/.env.example`:
+The backend reads everything from `api/.env` — see `api/.env.example`:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `MONGO_URL` | yes | MongoDB connection string (server exits without it) |
+| `DATABASE_URL` | yes | PostgreSQL connection string for the app |
+| `DIRECT_DATABASE_URL` | for migrations | direct connection used by `alembic` |
 | `JWT_SECRET` | yes | Signs the auth cookie's JWT |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | for Nova + insight cards | Gemini API key |
-| `PORT` | no | API port (default 3002) |
+| `MARKET_SYNC_ENABLED` | no | Own the market-cache sync (seed + every 5 min) |
+| `TRADING_JOBS_ENABLED` | no | Own price sync (every minute) + daily snapshot |
+| `PORT` | no | API port (default 8000) |
 
 The frontend needs no env file for local dev. Set `VITE_API_URL` only when
 pointing a production build at a deployed backend.
@@ -71,17 +61,17 @@ pointing a production build at a deployed backend.
 | root | `npm run dev` | Vite dev server (port 5173) |
 | root | `npm run build` | production build |
 | root | `npm run lint` | ESLint |
-| server | `npm start` | backend with nodemon (port 3002) |
-| server | `npm run seed` | reset/create the demo account |
-| server | `npm run backfill` | backfill portfolio history snapshots |
+| root | `npm run screens` | capture landing-page screenshots (needs the app running) |
+| root | `alembic upgrade head` | apply PostgreSQL migrations |
+| root | `python -m pytest -q` | backend tests (needs `TEST_DATABASE_URL`) |
 
 ## How trading works here
 
 - **Products:** `CNC` (delivery) and `MIS` (intraday, squared off by day end)
 - **Order types:** MARKET fills at the server-side Yahoo price; LIMIT / SL /
-  SL-M rest as OPEN until the 5-minute price sync crosses them
+  SL-M rest as OPEN until the price sync crosses them
 - **Funds and shares are enforced atomically** — a buy debit, a sell share
-  check, and a square-off all use guarded MongoDB writes so two racing
+  check, and a square-off all run in one PostgreSQL transaction, so two racing
   requests can't double-spend
 - **Bracket exits:** stop-loss / target orders attach to a position; settling
   one cancels its sibling automatically
@@ -93,12 +83,13 @@ src/
   features/        one folder per feature (assistant, auth, dashboard, marketing)
   components/      shared UI (shadcn primitives + the chart library)
   utils/           formatters and portfolio math
-server/
-  routes/          one Express router per resource
-  controllers/     auth, assistant (AI tools), insights
-  models/          one Mongoose model per file
-  jobs/            price sync (5 min) + daily portfolio snapshot (6pm IST)
-  utils/           executeOrder (the trading core), portfolio math
+api/
+  routes/          one FastAPI router per resource
+  postgres/        SQLAlchemy models and the session factory
+  migrations/      Alembic history
+  jobs/            market sync (5 min), price sync (1 min), daily snapshot (6pm IST)
+  trading_book.py  the trading core (orders, positions, funds)
+  assistant.py     Nova's agent, tools and Gemini model
 ```
 
 `AGENTS.md` covers the same ground for AI coding assistants (conventions,
