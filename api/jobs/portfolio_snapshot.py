@@ -16,22 +16,18 @@ processed stay committed.
 """
 
 import logging
-import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
+from ..market_hours import IST
 from ..postgres.models import PortfolioSnapshot, User
 from ..postgres.session import get_session_factory
-from ..rows import utcnow
+from ..rows import new_id, utcnow
 from ..trading_book import portfolio_totals
 
 logger = logging.getLogger(__name__)
-
-# India has no daylight saving, so a fixed offset is exact (same reasoning as
-# api/market_hours.py; `tzdata` is not installed).
-IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def snapshot_date(now=None):
@@ -71,7 +67,7 @@ def record_daily_snapshot(session_factory=None):
                 )
 
                 statement = insert(PortfolioSnapshot).values(
-                    id=secrets.token_hex(12),
+                    id=new_id(),
                     user_id=raw_user_id,
                     snapshot_date=day,
                     value=value,

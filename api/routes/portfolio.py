@@ -19,13 +19,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import require_user
+from ..market_hours import IST
 from ..postgres.models import PortfolioSnapshot
 from ..postgres.session import get_session
 from ..trading_book import portfolio_totals
 
 router = APIRouter()
-
-IST = timezone(timedelta(hours=5, minutes=30))
 
 # Same windows as the Express route; any other range falls back to 30 days.
 RANGE_DAYS = {"1D": 1, "1W": 7, "1M": 30, "1Y": 365, "ALL": 100000}
