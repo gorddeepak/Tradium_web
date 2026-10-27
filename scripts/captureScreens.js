@@ -1,12 +1,12 @@
 /*
  * Captures the landing-page screenshots from the running app.
  *
- * This is the other half of server/scripts/seedDemo.js. That script makes the
- * DATA reproducible; this one makes the CAPTURE reproducible. Before both
- * existed, the screenshots in src/assets/screenshots/ were hand-taken, so they
- * drifted a whole market behind the app (US tickers in dollars long after the
- * code moved to NSE and rupees) and nobody noticed, because git cannot diff a
- * PNG. Now: `npm run seed` then `npm run screens` reproduces every asset.
+ * It assumes the demo account (demo@tradium.local) is already seeded; this
+ * script makes the CAPTURE reproducible. Before it existed, the screenshots in
+ * src/assets/screenshots/ were hand-taken, so they drifted a whole market behind
+ * the app (US tickers in dollars long after the code moved to NSE and rupees)
+ * and nobody noticed, because git cannot diff a PNG. Seed the demo data, then
+ * `npm run screens` reproduces every asset.
  *
  * WHY A FIXED 1440x900 VIEWPORT AND NOT fullPage
  *
@@ -33,7 +33,7 @@
  * Needs Chrome already installed (puppeteer-core ships no browser). Override the
  * path with CHROME_PATH=... if yours lives somewhere unusual.
  *
- * Run it with:  npm run screens                 (all six, with both servers up)
+ * Run it with:  npm run screens                 (all six, with the app running)
  *               npm run screens -- holdings     (just the matching filenames)
  *
  * The `--` is required: without it npm keeps the argument for itself and you
@@ -299,7 +299,7 @@ async function main() {
     console.log(`\nWrote ${SCREENS.length} screenshots to src/assets/screenshots/`);
     if (process.exitCode === 1) {
       console.log("One or more insight cards fell outside the 900px viewport.");
-      console.log("Shorten the arrays in server/scripts/seedDemo.js and re-run.");
+      console.log("Shorten the seeded demo tables and re-run.");
     }
   } finally {
     await browser.close();
