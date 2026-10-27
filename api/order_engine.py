@@ -224,7 +224,7 @@ def create_exit_pair(
     for order_type, price, trigger in legs:
         price = quantize(price, PRICE)
         trigger = quantize(trigger, PRICE)
-        if side == "BUY" and product == "CNC":
+        if blocks_cash(is_exit=True, side=side, product=product):
             adjust_funds(
                 session, user_id, -quantize(Decimal(qty) * price, CASH), now
             )

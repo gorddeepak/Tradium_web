@@ -11,15 +11,14 @@ its ledger row commit in one transaction.
 """
 
 import math
-from decimal import Decimal
 
 from fastapi import APIRouter, Body, Depends, HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import require_user
 from ..js_compat import js_number
-from ..postgres.models import Order, Position, Transaction
+from ..postgres.models import Transaction
 from ..postgres.session import get_session
 from ..serialization import to_json_value
 from ..trading_book import (
@@ -27,6 +26,7 @@ from ..trading_book import (
     adjust_funds,
     decimal_from,
     debit_existing_funds,
+    derived_fund_totals,
     fund_document,
     get_or_create_fund,
     lock_user,
@@ -53,45 +53,13 @@ def get_funds(
     with session.begin():
         # Express creates an empty funds row on the first read; keep that.
         fund = get_or_create_fund(session, user_id, now)
-
-        # Only entry orders block cash: not exits, and BUY or MIS.
-        open_orders = session.scalars(
-            select(Order).where(
-                Order.user_id == user_id,
-                Order.status == "OPEN",
-                Order.is_exit.is_(False),
-                or_(Order.side == "BUY", Order.product == "MIS"),
-            )
-        ).all()
-        blocked_in_orders = sum(
-            (Decimal(order.qty - order.filled) * order.price for order in open_orders),
-            Decimal(0),
-        )
-
-        positions = session.scalars(
-            select(Position).where(
-                Position.user_id == user_id, Position.product == "MIS"
-            )
-        ).all()
-        mis_margin = sum(
-            (position.entry * Decimal(position.qty) for position in positions),
-            Decimal(0),
-        )
-
-        realized_pnl = session.scalar(
-            select(func.coalesce(func.sum(Transaction.amount), 0)).where(
-                Transaction.user_id == user_id,
-                Transaction.kind == "SETTLEMENT",
-            )
-        )
+        totals = derived_fund_totals(session, user_id)
 
         document = fund_document(fund)
-        blocked_in_orders = quantize(blocked_in_orders, CASH)
-        mis_margin = quantize(mis_margin, CASH)
-        document["usedMargin"] = blocked_in_orders + mis_margin
-        document["blockedInOrders"] = blocked_in_orders
-        document["misMargin"] = mis_margin
-        document["realizedPnl"] = quantize(realized_pnl, CASH)
+        document["usedMargin"] = totals["used_margin"]
+        document["blockedInOrders"] = totals["blocked_in_orders"]
+        document["misMargin"] = totals["mis_margin"]
+        document["realizedPnl"] = totals["realized_pnl"]
 
     return to_json_value(document)
 

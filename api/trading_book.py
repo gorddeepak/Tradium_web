@@ -13,12 +13,11 @@ always ``ROUND_HALF_UP`` and never on an intermediate per-share value.
 from datetime import timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from .portfolio_math import mis_components
-from .rows import new_id, utcnow
 from .postgres.models import (
     Fund,
     Holding,
@@ -26,7 +25,9 @@ from .postgres.models import (
     LatestQuote,
     Order,
     Position,
+    Transaction,
 )
+from .rows import new_id, utcnow
 
 getcontext().prec = 28
 
@@ -131,6 +132,41 @@ def funds_available(session: Session, user_id: str):
         select(Fund.available).where(Fund.user_id == user_id)
     )
     return available if available is not None else Decimal("0.00")
+
+
+def derived_fund_totals(session: Session, user_id: str):
+    """The funds figures that are calculated from the rest of the book."""
+    blocked_in_orders = session.scalar(
+        select(
+            func.coalesce(func.sum((Order.qty - Order.filled) * Order.price), 0)
+        ).where(
+            Order.user_id == user_id,
+            Order.status == "OPEN",
+            Order.is_exit.is_(False),
+            or_(Order.side == "BUY", Order.product == "MIS"),
+        )
+    )
+    mis_margin = session.scalar(
+        select(func.coalesce(func.sum(Position.entry * Position.qty), 0)).where(
+            Position.user_id == user_id,
+            Position.product == "MIS",
+        )
+    )
+    realized_pnl = session.scalar(
+        select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+            Transaction.user_id == user_id,
+            Transaction.kind == "SETTLEMENT",
+        )
+    )
+
+    blocked_in_orders = quantize(blocked_in_orders, CASH)
+    mis_margin = quantize(mis_margin, CASH)
+    return {
+        "blocked_in_orders": blocked_in_orders,
+        "mis_margin": mis_margin,
+        "used_margin": blocked_in_orders + mis_margin,
+        "realized_pnl": quantize(realized_pnl, CASH),
+    }
 
 
 def holding_rows(session: Session, user_id: str):

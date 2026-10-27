@@ -13,13 +13,12 @@ already speak that shape.
 import json
 import math
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import Literal
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 
 from .config import get_ai_settings
 from .js_compat import format_inr
@@ -29,12 +28,11 @@ from .postgres.models import (
     Instrument,
     LatestQuote,
     Order,
-    Transaction,
     Watchlist,
 )
 from .postgres.session import get_session_factory
 from .serialization import to_json_value
-from .trading_book import holding_rows, position_rows
+from .trading_book import derived_fund_totals, holding_rows, position_rows
 
 CHAT_SYSTEM_PROMPT = """You are Nova, the portfolio assistant built into Tradium — a sharp, sharp-eyed trading-desk analyst the user can talk to about their account.
 
@@ -308,41 +306,13 @@ def funds_snapshot(user_id, session_factory=None):
         available = session.scalar(
             select(Fund.available).where(Fund.user_id == user_id)
         )
-
-        # Only entry orders block cash: not exits, and BUY or MIS.
-        blocked_in_orders = session.scalar(
-            select(
-                func.coalesce(
-                    func.sum((Order.qty - Order.filled) * Order.price), 0
-                )
-            ).where(
-                Order.user_id == user_id,
-                Order.status == "OPEN",
-                Order.is_exit.is_(False),
-                or_(Order.side == "BUY", Order.product == "MIS"),
-            )
-        )
-
-        mis_margin = sum(
-            (
-                position["entry"] * Decimal(position["qty"])
-                for position in position_rows(session, user_id, "MIS")
-            ),
-            Decimal(0),
-        )
-
-        realized_pnl = session.scalar(
-            select(func.coalesce(func.sum(Transaction.amount), 0)).where(
-                Transaction.user_id == user_id,
-                Transaction.kind == "SETTLEMENT",
-            )
-        )
+        totals = derived_fund_totals(session, user_id)
 
     available = float(available or 0)
-    blocked_in_orders = float(blocked_in_orders or 0)
-    mis_margin = float(mis_margin)
-    realized_pnl = float(realized_pnl or 0)
-    used_margin = blocked_in_orders + mis_margin
+    blocked_in_orders = float(totals["blocked_in_orders"])
+    mis_margin = float(totals["mis_margin"])
+    used_margin = float(totals["used_margin"])
+    realized_pnl = float(totals["realized_pnl"])
 
     data = {
         "available": available,

@@ -36,6 +36,7 @@ from ..serialization import to_json_value
 from ..trading_book import (
     CASH,
     PRICE,
+    cancel_open_exits,
     decimal_from,
     debit_existing_funds,
     funds_available,
@@ -306,35 +307,31 @@ def set_exits(
             qty = position.qty
             name = position.name
             side = "SELL" if position.side == "LONG" else "BUY"
-            sl_below_tp = sl_trigger < tp_price
-            long_needs_sl_below = (
-                sl_below_tp if position.side == "LONG" else not sl_below_tp
-            )
-            if sl_trigger > 0 and tp_price > 0 and not long_needs_sl_below:
-                message = (
-                    "Stop-loss trigger must be below the target price for a long"
-                    if position.side == "LONG"
-                    else "Stop-loss trigger must be above the target price for a short"
-                )
-                raise HTTPException(status_code=400, detail=message)
+            if sl_trigger > 0 and tp_price > 0:
+                if position.side == "LONG" and sl_trigger >= tp_price:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Stop-loss trigger must be below the target price for a long"
+                        ),
+                    )
+                if position.side == "SHORT" and sl_trigger < tp_price:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Stop-loss trigger must be above the target price for a short"
+                        ),
+                    )
 
         # Cancel the old exit pair first; only CNC BUY exits refund cash.
-        old_query = (
-            select(Order)
-            .where(
-                Order.user_id == user_id,
-                Order.symbol == symbol,
-                Order.exchange == exchange,
-                Order.product == product,
-                Order.is_exit.is_(True),
-                Order.status == "OPEN",
-            )
-            .with_for_update()
+        cancel_open_exits(
+            session,
+            user_id=user_id,
+            symbol=symbol,
+            exchange=exchange,
+            product=product,
+            now=now,
         )
-        for old in session.scalars(old_query).all():
-            old.status = "CANCELLED"
-            old.updated_at = now
-            refund_blocked_cash(session, old, now)
 
         # No entry order to anchor the group, so a fresh id plays that role.
         orders = create_exit_pair(
