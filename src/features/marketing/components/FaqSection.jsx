@@ -11,7 +11,7 @@ import { SectionHeader } from "@/features/marketing/components/SectionHeader";
 const faqs = [
   {
     q: "Is this a real brokerage?",
-    a: "No. Tradium is a portfolio project showcasing full-stack work — React, Express, MongoDB. It isn't a registered broker, holds no client funds, and can't place an order on any exchange.",
+    a: "No. Tradium is a portfolio project showcasing full-stack work — React, FastAPI, PostgreSQL. It isn't a registered broker, holds no client funds, and can't place an order on any exchange.",
   },
   {
     q: "Where do the prices come from?",
@@ -39,7 +39,7 @@ const faqs = [
   },
   {
     q: "Is the code available?",
-    a: "Yes — it's a portfolio project, so reading it is the point. The frontend lives in src/ organised by feature, and the Express API in server/ with one router and controller per resource.",
+    a: "Yes — it's a portfolio project, so reading it is the point. The frontend lives in src/ organised by feature, and the FastAPI API in api/ with one router per resource.",
   },
 ];
 

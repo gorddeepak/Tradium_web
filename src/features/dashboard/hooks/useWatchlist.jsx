@@ -7,6 +7,19 @@ import { useWatchlistStream } from "./useWatchlistStream";
    every minute. */
 const POLL_MS = 30000;
 
+// A row that moved gets a fresh stamp so a second move in the same direction
+// replays the flash animation instead of being ignored.
+function flashFor(previousPrice, price) {
+  if (
+    previousPrice === undefined ||
+    price === undefined ||
+    price === previousPrice
+  ) {
+    return null;
+  }
+  return { dir: price > previousPrice ? "up" : "down", stamp: Date.now() };
+}
+
 export function useWatchlist() {
   const [watchlist, setWatchlist] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -19,12 +32,8 @@ export function useWatchlist() {
   const apply = useCallback((list) => {
     const changed = {};
     for (const w of list) {
-      const prev = prevPrices.current[w._id];
-      if (prev !== undefined && w.ltp !== undefined && w.ltp !== prev) {
-        // stamp gives the flash cell a fresh key, so a second move in the
-        // same direction replays the animation instead of being ignored
-        changed[w._id] = { dir: w.ltp > prev ? "up" : "down", stamp: Date.now() };
-      }
+      const flash = flashFor(prevPrices.current[w._id], w.ltp);
+      if (flash) changed[w._id] = flash;
     }
     prevPrices.current = Object.fromEntries(list.map((w) => [w._id, w.ltp]));
     setWatchlist(list);
@@ -45,13 +54,8 @@ export function useWatchlist() {
     const byId = new Map(quotes.map((quote) => [quote._id, quote]));
     const changed = {};
     for (const quote of quotes) {
-      const prev = prevPrices.current[quote._id];
-      if (prev !== undefined && quote.ltp !== undefined && quote.ltp !== prev) {
-        changed[quote._id] = {
-          dir: quote.ltp > prev ? "up" : "down",
-          stamp: Date.now(),
-        };
-      }
+      const flash = flashFor(prevPrices.current[quote._id], quote.ltp);
+      if (flash) changed[quote._id] = flash;
       if (quote.ltp !== undefined) prevPrices.current[quote._id] = quote.ltp;
     }
 

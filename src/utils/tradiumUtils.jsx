@@ -363,7 +363,7 @@ function dayChangeRupees(h) {
   return h.qty * h.ltp * (h.dayChangePct / denom);
 }
 
-// Kept in sync with calculatePortfolioSummary in server/utils/portfolioMath.js.
+// Kept in sync with calculate_portfolio_summary in api/portfolio_math.py.
 export function portfolioSummary(holdings) {
   const invested = holdings.reduce((s, h) => s + h.qty * h.avgPrice, 0);
   const value = holdings.reduce((s, h) => s + h.qty * h.ltp, 0);
