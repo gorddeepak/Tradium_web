@@ -73,11 +73,13 @@ def seconds_until_snapshot(hour=SNAPSHOT_HOUR_IST, now=None):
     return (target - ist_now).total_seconds()
 
 
-class MarketSyncScheduler:
-    """Runs ``market_sync`` every five minutes until stopped."""
+class JobScheduler:
+    """A daemon thread that runs one job until stopped."""
 
-    def __init__(self, interval_seconds=SYNC_INTERVAL_SECONDS, session_factory=None):
-        self.interval_seconds = interval_seconds
+    name = "job"
+    run_immediately = True
+
+    def __init__(self, session_factory=None):
         self.session_factory = session_factory
         self._stop = threading.Event()
         self._thread = None
@@ -86,7 +88,7 @@ class MarketSyncScheduler:
         if self._thread is not None:
             return
         self._thread = threading.Thread(
-            target=self._run, name="market-sync", daemon=True
+            target=self._run, name=self.name, daemon=True
         )
         self._thread.start()
 
@@ -96,100 +98,78 @@ class MarketSyncScheduler:
             self._thread.join(timeout=5)
             self._thread = None
 
+    def next_delay(self):
+        raise NotImplementedError
+
+    def run_job(self, session_factory):
+        raise NotImplementedError
+
     def _run(self):
-        # Express also syncs once on connect, so a cold cache is populated
-        # immediately rather than after the first interval.
-        self._tick()
-        while not self._stop.wait(self.interval_seconds):
+        if self.run_immediately:
+            self._tick()
+        while not self._stop.wait(self.next_delay()):
             self._tick()
 
     def _tick(self):
         try:
             factory = self.session_factory or get_session_factory()
-            market_sync(factory)
+            self.run_job(factory)
         except Exception:  # noqa: BLE001 - keep the thread alive
-            logger.exception("Market sync tick failed")
+            logger.exception("%s tick failed", self.name)
 
 
-class PriceSyncScheduler:
+class MarketSyncScheduler(JobScheduler):
+    """Runs ``market_sync`` every five minutes until stopped."""
+
+    name = "market-sync"
+
+    def __init__(self, interval_seconds=SYNC_INTERVAL_SECONDS, session_factory=None):
+        super().__init__(session_factory)
+        self.interval_seconds = interval_seconds
+
+    def next_delay(self):
+        return self.interval_seconds
+
+    def run_job(self, session_factory):
+        market_sync(session_factory)
+
+
+class PriceSyncScheduler(JobScheduler):
     """Runs ``sync_prices`` every minute until stopped.
 
     ``sync_prices`` owns the market-hours gate, so a tick outside 09:15-15:30
     IST costs nothing and no order is filled.
     """
 
+    name = "price-sync"
+
     def __init__(self, interval_seconds=PRICE_SYNC_INTERVAL_SECONDS, session_factory=None):
+        super().__init__(session_factory)
         self.interval_seconds = interval_seconds
-        self.session_factory = session_factory
-        self._stop = threading.Event()
-        self._thread = None
 
-    def start(self):
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run, name="price-sync", daemon=True
-        )
-        self._thread.start()
+    def next_delay(self):
+        return self.interval_seconds
 
-    def stop(self):
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            self._thread = None
-
-    def _run(self):
-        # Express calls syncPrices() on connect as well as every minute.
-        self._tick()
-        while not self._stop.wait(self.interval_seconds):
-            self._tick()
-
-    def _tick(self):
-        try:
-            factory = self.session_factory
-            if factory is None:
-                factory = get_session_factory()
-            sync_prices(factory)
-        except Exception:  # noqa: BLE001 - keep the thread alive
-            logger.exception("Price sync tick failed")
+    def run_job(self, session_factory):
+        sync_prices(session_factory)
 
 
-class PortfolioSnapshotScheduler:
+class PortfolioSnapshotScheduler(JobScheduler):
     """Runs ``record_daily_snapshot`` once a day at 18:00 IST.
 
     Unlike the two interval jobs there is no run on startup: Express only adds
     the cron entry, so a process that starts at 20:00 waits until tomorrow.
     """
 
+    name = "portfolio-snapshot"
+    run_immediately = False
+
     def __init__(self, hour=SNAPSHOT_HOUR_IST, session_factory=None):
+        super().__init__(session_factory)
         self.hour = hour
-        self.session_factory = session_factory
-        self._stop = threading.Event()
-        self._thread = None
 
-    def start(self):
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run, name="portfolio-snapshot", daemon=True
-        )
-        self._thread.start()
+    def next_delay(self):
+        return seconds_until_snapshot(self.hour)
 
-    def stop(self):
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            self._thread = None
-
-    def _run(self):
-        while not self._stop.is_set():
-            if self._stop.wait(seconds_until_snapshot(self.hour)):
-                return
-            self._tick()
-
-    def _tick(self):
-        try:
-            factory = self.session_factory or get_session_factory()
-            record_daily_snapshot(factory)
-        except Exception:  # noqa: BLE001 - keep the thread alive
-            logger.exception("Portfolio snapshot tick failed")
+    def run_job(self, session_factory):
+        record_daily_snapshot(session_factory)

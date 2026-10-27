@@ -12,8 +12,6 @@ owns the quote cache.
 """
 
 import re
-import secrets
-from datetime import datetime, timezone
 
 from fastapi import (
     APIRouter,
@@ -31,6 +29,7 @@ from sqlalchemy.orm import Session
 from ..auth import require_user, user_from_token
 from ..postgres.models import Instrument, LatestQuote, Watchlist
 from ..postgres.session import get_session
+from ..rows import new_id, utcnow
 from ..serialization import to_json_value
 from ..watchlist_stream import hub
 
@@ -41,17 +40,6 @@ SYMBOL_PATTERN = re.compile(r"[\^A-Z0-9&-]{1,20}")
 
 # Phase 2 is NSE-only for equity listings (design D21/F13).
 SUPPORTED_EXCHANGE = "NSE"
-
-
-def new_watchlist_id() -> str:
-    """A 24-character lowercase hex id, the ObjectId-compatible external shape."""
-    return secrets.token_hex(12)
-
-
-def utcnow_ms() -> datetime:
-    """Current UTC time truncated to the millisecond precision of the column."""
-    now = datetime.now(timezone.utc)
-    return now.replace(microsecond=(now.microsecond // 1000) * 1000)
 
 
 def watchlist_item(item: Watchlist, ltp=0, day_change_pct=0) -> dict:
@@ -128,9 +116,9 @@ def add_watchlist(
     if not name:
         name = symbol
 
-    now = utcnow_ms()
+    now = utcnow()
     item = Watchlist(
-        id=new_watchlist_id(),
+        id=new_id(),
         user_id=user_id,
         symbol=symbol,
         name=str(name),

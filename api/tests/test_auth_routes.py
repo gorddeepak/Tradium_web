@@ -274,15 +274,15 @@ def test_signup_maps_a_unique_constraint_race_to_duplicate(
     client, session_factory, monkeypatch
 ):
     """A competing insert between the pre-checks and this request's commit."""
-    real_new_user_id = auth_routes.new_user_id
+    real_new_id = auth_routes.new_id
 
-    def new_user_id_after_competing_signup():
+    def new_id_after_competing_signup():
         # This commits on another connection, so the route's own INSERT hits
         # the PostgreSQL unique constraint rather than its fast-path SELECT.
         insert_user(session_factory, username="racer", email="deepak@example.com")
-        return real_new_user_id()
+        return real_new_id()
 
-    monkeypatch.setattr(auth_routes, "new_user_id", new_user_id_after_competing_signup)
+    monkeypatch.setattr(auth_routes, "new_id", new_id_after_competing_signup)
 
     response = client.post(
         "/api/auth/signup",

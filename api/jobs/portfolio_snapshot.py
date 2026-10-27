@@ -22,9 +22,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
-from ..documents import utcnow
 from ..postgres.models import PortfolioSnapshot, User
 from ..postgres.session import get_session_factory
+from ..rows import utcnow
 from ..trading_book import portfolio_totals
 
 logger = logging.getLogger(__name__)

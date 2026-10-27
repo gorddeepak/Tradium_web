@@ -355,16 +355,16 @@ def test_duplicate_race_maps_the_unique_constraint_to_409(
     client, session_factory, make_token, monkeypatch
 ):
     user = insert_user(session_factory)
-    real_new_watchlist_id = watchlist_routes.new_watchlist_id
+    real_new_id = watchlist_routes.new_id
 
-    def new_watchlist_id_after_competing_add():
+    def new_id_after_competing_add():
         # This commits on another connection, so the route's own INSERT hits
         # the unique constraint rather than its fast-path SELECT.
         insert_watchlist(session_factory, user.id, symbol="INFY")
-        return real_new_watchlist_id()
+        return real_new_id()
 
     monkeypatch.setattr(
-        watchlist_routes, "new_watchlist_id", new_watchlist_id_after_competing_add
+        watchlist_routes, "new_id", new_id_after_competing_add
     )
 
     response = client.post(

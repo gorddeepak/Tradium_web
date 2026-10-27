@@ -10,8 +10,7 @@ place that rounds: cash at 2 dp, prices at 4 dp, weighted averages at 6 dp,
 always ``ROUND_HALF_UP`` and never on an intermediate per-share value.
 """
 
-import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 
 from sqlalchemy import func, select, text, update
@@ -19,6 +18,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from .portfolio_math import mis_components
+from .rows import new_id, utcnow
 from .postgres.models import (
     Fund,
     Holding,
@@ -60,17 +60,6 @@ def decimal_from(value):
     if isinstance(value, Decimal):
         return value
     return Decimal(str(value))
-
-
-def utcnow():
-    """Current UTC time truncated to the millisecond precision of the columns."""
-    now = datetime.now(timezone.utc)
-    return now.replace(microsecond=(now.microsecond // 1000) * 1000)
-
-
-def new_id():
-    """A 24-character lowercase hex id, the ObjectId-compatible external shape."""
-    return secrets.token_hex(12)
 
 
 def lock_user(session: Session, user_id: str):

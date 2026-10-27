@@ -13,9 +13,6 @@ User identity lives in PostgreSQL. The `require_user` dependency and 24-hex
 user ids keep the shape the frontend already expects.
 """
 
-import secrets
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
@@ -26,6 +23,7 @@ from ..auth import create_token, hash_password, require_user, verify_password
 from ..config import get_settings
 from ..postgres.models import User
 from ..postgres.session import get_session
+from ..rows import new_id, utcnow
 from ..serialization import to_json_value
 
 router = APIRouter()
@@ -54,17 +52,6 @@ def set_token_cookie(response: Response, token: str) -> None:
         secure=cookie_secure(),
         samesite="strict",
     )
-
-
-def new_user_id() -> str:
-    """A 24-character lowercase hex id, the external ObjectId-compatible shape."""
-    return secrets.token_hex(12)
-
-
-def utcnow_ms() -> datetime:
-    """Current UTC time truncated to the millisecond precision of the column."""
-    now = datetime.now(timezone.utc)
-    return now.replace(microsecond=(now.microsecond // 1000) * 1000)
 
 
 def compact_user(user: User) -> dict:
@@ -109,9 +96,9 @@ def signup(
         if session.scalar(select(User.id).where(User.username == username)) is not None:
             raise HTTPException(status_code=400, detail="User already exists")
 
-        now = utcnow_ms()
+        now = utcnow()
         user = User(
-            id=new_user_id(),
+            id=new_id(),
             username=username,
             email=email,
             password_hash=hash_password(password),
