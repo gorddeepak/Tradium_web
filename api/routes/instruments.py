@@ -48,6 +48,33 @@ def _omit_missing(document):
     return {key: value for key, value in document.items() if value is not None}
 
 
+def _live_quote(symbol):
+    """Fetch a usable live quote, or answer the Express-style 404."""
+    try:
+        quote = fetch_quote_row(symbol)
+    except MarketDataError as err:
+        logger.error("Quote fetch failed for %s: %s", symbol, err)
+        raise HTTPException(status_code=404, detail=INSTRUMENT_NOT_FOUND)
+
+    # `!quote?.regularMarketPrice` also rejects a zero price, so a symbol
+    # with no trade is "not found" rather than a 200 full of zeros.
+    if quote is None or not quote.get("regularMarketPrice"):
+        raise HTTPException(status_code=404, detail=INSTRUMENT_NOT_FOUND)
+    return quote
+
+
+def _instrument_fields(symbol, quote):
+    """The fields both instrument detail routes return."""
+    return {
+        "symbol": symbol.upper(),
+        "name": quote.get("longName") or quote.get("shortName") or symbol,
+        "exchange": "NSE",
+        "price": quote.get("regularMarketPrice"),
+        "change": quote.get("regularMarketChange"),
+        "changePct": quote.get("regularMarketChangePercent"),
+    }
+
+
 @router.get("/api/instruments/lookup/{symbol}")
 def lookup_instrument(
     symbol: str,
@@ -56,26 +83,7 @@ def lookup_instrument(
 ):
     # Express wraps the whole handler in `try { } catch { 404 }`, so a provider
     # failure and an unknown symbol answer identically.
-    try:
-        quote = fetch_quote_row(symbol)
-        # `!quote?.regularMarketPrice` also rejects a zero price, so a symbol
-        # with no trade is "not found" rather than a 200 full of zeros.
-        if quote is None or not quote.get("regularMarketPrice"):
-            raise HTTPException(status_code=404, detail=INSTRUMENT_NOT_FOUND)
-
-        return _omit_missing(
-            {
-                "symbol": symbol.upper(),
-                "name": quote.get("longName") or quote.get("shortName") or symbol,
-                "exchange": "NSE",
-                "price": quote.get("regularMarketPrice"),
-                "change": quote.get("regularMarketChange"),
-                "changePct": quote.get("regularMarketChangePercent"),
-            }
-        )
-    except MarketDataError as err:
-        logger.error("Quote fetch failed for %s: %s", symbol, err)
-        raise HTTPException(status_code=404, detail=INSTRUMENT_NOT_FOUND)
+    return _omit_missing(_instrument_fields(symbol, _live_quote(symbol)))
 
 
 @router.get("/api/instruments/{symbol}")
@@ -83,31 +91,19 @@ def instrument_detail(
     symbol: str,
     user_id: str = Depends(require_user),
 ):
-    try:
-        quote = fetch_quote_row(symbol)
-        if quote is None or not quote.get("regularMarketPrice"):
-            raise HTTPException(status_code=404, detail=INSTRUMENT_NOT_FOUND)
-
-        return _omit_missing(
-            {
-                "symbol": symbol.upper(),
-                "name": quote.get("longName") or quote.get("shortName") or symbol,
-                "exchange": "NSE",
-                "price": quote.get("regularMarketPrice"),
-                "change": quote.get("regularMarketChange"),
-                "changePct": quote.get("regularMarketChangePercent"),
-                "open": quote.get("regularMarketOpen"),
-                "high": quote.get("regularMarketDayHigh"),
-                "low": quote.get("regularMarketDayLow"),
-                "prevClose": quote.get("regularMarketPreviousClose"),
-                "volume": quote.get("regularMarketVolume"),
-                "week52High": quote.get("fiftyTwoWeekHigh"),
-                "week52Low": quote.get("fiftyTwoWeekLow"),
-            }
-        )
-    except MarketDataError as err:
-        logger.error("Quote fetch failed for %s: %s", symbol, err)
-        raise HTTPException(status_code=404, detail=INSTRUMENT_NOT_FOUND)
+    quote = _live_quote(symbol)
+    return _omit_missing(
+        {
+            **_instrument_fields(symbol, quote),
+            "open": quote.get("regularMarketOpen"),
+            "high": quote.get("regularMarketDayHigh"),
+            "low": quote.get("regularMarketDayLow"),
+            "prevClose": quote.get("regularMarketPreviousClose"),
+            "volume": quote.get("regularMarketVolume"),
+            "week52High": quote.get("fiftyTwoWeekHigh"),
+            "week52Low": quote.get("fiftyTwoWeekLow"),
+        }
+    )
 
 
 @router.get("/api/instruments/{symbol}/candles")

@@ -54,8 +54,8 @@ services:
       # empty to deploy without Nova (the three assistant routes then answer 503).
       - key: GOOGLE_GENERATIVE_AI_API_KEY
         sync: false
-      # Both job systems stay off until the Express crons are stopped and this
-      # service is deliberately made the single owner. See DEPLOYMENT.md section 5.
+      # Both job systems stay off until this service is deliberately made the
+      # single owner. See DEPLOYMENT.md section 5.
       - key: MARKET_SYNC_ENABLED
         value: "false"
       - key: TRADING_JOBS_ENABLED

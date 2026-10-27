@@ -49,7 +49,6 @@ The backend reads everything from `api/.env` — see `api/.env.example`:
 | `GOOGLE_GENERATIVE_AI_API_KEY` | for Nova + insight cards | Gemini API key |
 | `MARKET_SYNC_ENABLED` | no | Own the market-cache sync (seed + every 5 min) |
 | `TRADING_JOBS_ENABLED` | no | Own price sync (every minute) + daily snapshot |
-| `PORT` | no | API port (default 8000) |
 
 The frontend needs no env file for local dev. Set `VITE_API_URL` only when
 pointing a production build at a deployed backend.
