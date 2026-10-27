@@ -1,8 +1,9 @@
 # Migration Status
 
-**Last updated:** 2026-10-26 (Phase 3C2-D)
-**Current phase:** **Phase 3C2-D — release readiness for a PostgreSQL-only FastAPI**
-**Application code modified:** **Yes, up to Phase 3C2-C** (Phase 3C2-D changed documentation only).
+**Last updated:** 2026-10-27 (Phase 3C-E)
+**Current phase:** **Phase 3C2-E — Render deployment configuration**
+**Application code modified:** **Yes, up to Phase 3C2-C** (3C2-D changed documentation only; 3C-E adds
+deployment configuration, `.python-version` and documentation, with no application code change).
 Phase 3B1 moved authentication to PostgreSQL; Phase 3B2 moved the market cache there and made
 `price_sync` a dual writer; Phase 3B3 moved watchlists there and made the daily snapshot enumerate users
 from PostgreSQL; Phase 3B3.1 moved price sync and Nova's watchlist tool onto the same table; Phase 3C1
@@ -10,8 +11,9 @@ moved the snapshot rows and the historical half of `/api/portfolio/history` ther
 whole trading book (funds, holdings, positions, orders, transactions) and tied the write flows to it;
 Phase 3C2-B moved the last book readers (the live history point, the snapshot job, Nova's five book tools);
 Phase 3C2-C merged the watchlist WebSocket branch and deleted the MongoDB runtime. Every FastAPI surface
-is now PostgreSQL-backed, the runtime needs no MongoDB, and the phase 3C2-D decision is a clean start on
-an empty database (§3Z). `server/` and the original repository remain untouched.
+is now PostgreSQL-backed, the runtime needs no MongoDB, the 3C2-D decision is a clean start on
+an empty database (§3Z), and 3C-E adds the Render Blueprint that deploys it (§3AA). `server/` and the
+original repository remain untouched.
 **Phase 0 docs commit:** `629af4d Phase 0: migration docs and repository guidance`
 (`migration/fastapi-backend`, local only — not pushed; see §6.1)
 
@@ -21,7 +23,7 @@ an empty database (§3Z). `server/` and the original repository remain untouched
 
 | Item | Value |
 |---|---|
-| Phase | 3C2-D — release readiness: the clean-start data decision and a PostgreSQL-only deployment runbook |
+| Phase | 3C2-E — Render deployment configuration: Blueprint, environment mapping and local verification |
 | FastAPI application | **started** — the 13 read routes, the 7 write routes, the 4 auth routes and the 3 assistant routes (27 registered operations), plus the optional static mount and SPA fallback |
 | PostgreSQL schema | **created by Alembic** — `api/migrations/versions/0001_initial_schema.py` creates all 10 tables (`users`, `funds`, `holdings`, `positions`, `orders`, `transactions`, `watchlists`, `instruments`, `latest_quotes`, `portfolio_snapshots`) plus `alembic_version`; verified by `alembic upgrade head` on a disposable PostgreSQL 17.6 cluster |
 | PostgreSQL-backed surfaces | **authentication** (`users`, Phase 3B1), the **market cache** (`instruments`/`latest_quotes`, Phase 3B2), **watchlists** (Phase 3B3), **price sync's watchlist symbols** (Phase 3B3.1), **Nova's `getWatchlist`** (Phase 3B3.1), **portfolio snapshots** (`portfolio_snapshots`, Phase 3C1), the **whole trading book** (`funds`, `holdings`, `positions`, `orders`, `transactions`, Phase 3C2) and its **remaining readers** — the live portfolio point, the daily snapshot's book read and Nova's five book tools (Phase 3C2-B) |
@@ -44,7 +46,8 @@ an empty database (§3Z). `server/` and the original repository remain untouched
 | Branch for migration work | `migration/fastapi-backend` (base); the release candidate is `phase3c2-final-cutover`, local only |
 | Source snapshot | `23099b7 single service deployment - Express serves the built frontend` |
 | Original repository | `D:\deepak\coding\Full Stack Dev\Zerodha` — untouched |
-| Production (Render) | untouched; no service, branch, or env changes |
+| Production (Render) | untouched; the Blueprint is prepared but **not applied**, and no service, branch or environment variable was changed |
+| Render deployment config | `render.yaml` (one Python web service + one PostgreSQL database, same region) and `.python-version`; pre-deploy `alembic upgrade head`, same-origin static serving, schedulers off, secrets generated or entered in the dashboard (§3AA) |
 | Tests executed | **414 passed, 7 skipped** with only `TEST_DATABASE_URL`; **421 passed, 0 skipped** with `TEST_DATABASE_URL` **and** `TEST_MONGO_URL` (2026-10-26, Phase 3C2-C) — see §5 |
 | PostgreSQL test instance | PostgreSQL 17.6, local cluster on `127.0.0.1:5433`, database `tradium_final_cutover_test`; scoped to this run and outside the repository |
 | Express parity check | **run (Phase 2e)** — cookies, numeric rendering and the non-snapshot job side effects; **no functional difference** (§3K). The snapshot job and portfolio history were removed from the harness in Phase 3C1 because they no longer share a database |
@@ -1783,6 +1786,54 @@ No application code changed in this phase, so the suite was not rerun; the Phase
 
 ---
 
+## 3AA. Phase 3C-E — Render deployment configuration
+
+**The deployment is now described in the repository.** `render.yaml` at the root defines one Python web
+service (`tradium-fastapi`) and one PostgreSQL database (`tradium-postgres`) in the same region, wired
+together through the database's internal `connectionString`; `.python-version` pins Python 3.13, the
+version the migration was developed on.
+
+- **Build:** `npm ci --include=dev && npm run build && pip install -r api/requirements.txt`.
+  `--include=dev` is required because the service sets `NODE_ENV=production`, and `npm ci` would
+  otherwise omit Vite and the other devDependencies.
+- **Pre-deploy:** `alembic upgrade head`, with `DIRECT_DATABASE_URL` supplied explicitly from the
+  database. Pre-deploy commands require a paid instance type.
+- **Start:** `uvicorn api.main:app --host 0.0.0.0 --port $PORT --proxy-headers
+  --forwarded-allow-ips='*'`. Render's Python runtime already sets `FORWARDED_ALLOW_IPS=*`; the explicit
+  flag keeps the rate-limiter requirement visible. The service is a `0.5c-512mb` instance so there is no
+  idle spin-down and one scheduler owner.
+- **Health check:** `/api/health` (liveness only, as before).
+- **Secrets:** `JWT_SECRET` uses Render's `generateValue`; `GOOGLE_GENERATIVE_AI_API_KEY` uses
+  `sync: false`, so it is entered privately in the dashboard. No secret is committed.
+- **Jobs:** `MARKET_SYNC_ENABLED` and `TRADING_JOBS_ENABLED` are explicitly `"false"`, matching the code
+  default. `numInstances: 1` keeps one owner when they are enabled later.
+- **Frontend:** `NODE_ENV=production` turns on static serving, and `SERVE_STATIC=true` states it
+  explicitly. One origin means the `Secure` cookie and the `/api/watchlist/stream` WebSocket need no
+  CORS; `CORS_ORIGINS` stays unset.
+
+Validated locally against the disposable `tradium_render_check` database (created and dropped for this
+check), using Render-shaped plain `postgresql://` URLs:
+
+- `alembic upgrade head` created the schema (`alembic_version = 0001`, 11 tables) and a second run was a
+  no-op. This also confirmed that SQLAlchemy 2.1.6 resolves the plain scheme Render supplies to the
+  installed psycopg 3 driver.
+- `npm ci --include=dev` and `npm run build` succeeded with `NODE_ENV=production`, producing
+  `dist/index.html` and the hashed `/assets/*` files.
+- `uvicorn` with the Blueprint's environment (including the proxy flags) served `/` and `/dashboard` as
+  the SPA shell, `/favicon.svg` and a hashed asset with `200`s, returned the JSON 404 for an unknown
+  `/api` path, accepted signup (`201`, `HttpOnly; Secure; SameSite=strict; Path=/; Max-Age=604800`),
+  served authenticated funds and watchlist routes, accepted the watchlist WebSocket with the token cookie
+  and closed it with `1008` without one.
+- With `--forwarded-allow-ips='*'`, 21 rate-limited signup requests carrying distinct `X-Forwarded-For`
+  values were all rejected as `400` and none as `429`; the 21st request from one address got `429`.
+- `python -m compileall -q api` passed. The local server process used about 120 MB after startup, well
+  inside the 512 MB plan; watch for exit 137 under Nova load.
+
+`render.yaml` was checked locally against Render's published Blueprint fields, plan IDs and regions.
+The Render CLI is not installed, so `render blueprints validate` was not run, and nothing was deployed.
+
+---
+
 ## 4. Known issues recorded
 
 These were found during the audit and are documented in `CURRENT_ARCHITECTURE.md` §9. Issues 1–3 and
@@ -1958,6 +2009,8 @@ Items 5–8 are still reproduced as-is; fix separately with approval (AD-9).
 | FastAPI MongoDB runtime after Phase 3C2-C | **none** — `api/db.py` deleted, no `MONGO_URL` setting, no `app.state.db`, no scheduler or route `db` parameter; `python` runs with `MONGO_URL` unset and with it pointed at a dead port, and `pymongo` is not imported at runtime |
 | Test PostgreSQL instance (Phase 3C2-C) | local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_final_cutover_test`; outside the repository |
 | Application tests (Phase 3C2-D) | **not rerun** — documentation only, no application code changed; the Phase 3C2-C totals (**414**/**421**) stand. Validated instead on a disposable `tradium_release_check_test`: `alembic upgrade head` through `DIRECT_DATABASE_URL`, and a live `uvicorn` run with `NODE_ENV=production`, no `MONGO_URL` and no `dist/` build (§3Z) |
+| Render configuration (Phase 3C-E) | **not rerun** — no application code changed; the Phase 3C2-C totals still stand. Validated instead on a disposable `tradium_render_check` database: the Blueprint's plain `postgresql://` URLs migrate to `0001` (11 tables, second run a no-op), `npm ci --include=dev && npm run build` succeeds with `NODE_ENV=production`, and the Blueprint's `uvicorn` command serves the SPA, hashed assets, signup with the production cookie, authenticated routes and the watchlist WebSocket, with per-IP rate limiting through the proxy headers; `python -m compileall -q api` passes (§3AA) |
+| Test PostgreSQL instance (Phase 3C-E) | disposable local PostgreSQL **17.6** cluster on `127.0.0.1:5433`, database `tradium_render_check`; created and dropped around the check; outside the repository |
 
 ---
 
@@ -2089,18 +2142,23 @@ From `ARCHITECTURE_DECISIONS.md`:
 
 ## 9. Immediate next step
 
-**Phases 3B1–3C2-D are complete and awaiting review.** Authentication, the market cache, watchlists
+**Phases 3B1–3C2-E are complete and awaiting review.** Authentication, the market cache, watchlists
 (including the live WebSocket stream), price-sync watchlist symbols, Nova's `getWatchlist`, portfolio
 snapshots and the whole trading book — including its last readers — are PostgreSQL-backed, and the
 FastAPI runtime no longer needs MongoDB at all. The suite reports **414 passed, 7 skipped**
 (`TEST_DATABASE_URL` alone) and **421 passed, 0 skipped** with `TEST_MONGO_URL` too. The branch is
 still local-only; nothing was deployed.
 
-**The code is release-ready; the decision history is settled by a clean start (§3Z).** Provision an empty
-PostgreSQL database, run `alembic upgrade head` with `DIRECT_DATABASE_URL`, set `DATABASE_URL`, `JWT_SECRET`
-and (if Nova is wanted) `GOOGLE_GENERATIVE_AI_API_KEY`, then start
-`uvicorn api.main:app --host 0.0.0.0 --port $PORT`. The exact requirements, verified commands and
-limitations are in [`DEPLOYMENT.md`](./DEPLOYMENT.md).
+**The deployment is described in the repository; applying it is a dashboard step.** `render.yaml` (§3AA)
+provisions one Python web service and one PostgreSQL database in the same region, and runs
+`alembic upgrade head` as the pre-deploy command with `DIRECT_DATABASE_URL` supplied explicitly. To use it:
+push the branch to a Git provider, create a Render Blueprint from the repository, enter
+`GOOGLE_GENERATIVE_AI_API_KEY` when prompted, and deploy. The Blueprint uses paid plans on purpose — the
+free web plan cannot run a pre-deploy command and spins down after 15 idle minutes (stopping the
+schedulers and dropping WebSockets), and free Postgres expires after 30 days. Both scheduler switches stay
+`"false"` until the Express crons are stopped; see §3J for ownership and `DEPLOYMENT.md` §5 and §7.6 for
+the switch-on sequence. The exact steps, verified commands and limitations are in
+[`DEPLOYMENT.md`](./DEPLOYMENT.md) §7.
 
 No data migration is required or planned: users sign up fresh, and MongoDB stays untouched as an archive
 (§3Z). Nothing is left to reconcile before this deployment; the loader and reconciliation design in

@@ -1,0 +1,70 @@
+# Render Blueprint for the FastAPI + PostgreSQL release candidate.
+#
+# One web service serves the API and the built React app from the same origin
+# (NODE_ENV=production turns on the static mount in api/main.py), so the auth
+# cookie and the watchlist WebSocket need no CORS configuration.
+#
+# The database lives in the same region; both connection variables use its
+# private-network URL. See docs/migration/DEPLOYMENT.md section 7 for the
+# dashboard steps and the free-plan alternative.
+
+services:
+  - type: web
+    name: tradium-fastapi
+    runtime: python
+    # A paid instance is required for preDeployCommand. The free plan also
+    # spins down after 15 idle minutes, which stops the schedulers and drops
+    # WebSocket connections, and its Postgres expires after 30 days.
+    plan: 0.5c-512mb
+    region: oregon
+    # Omit `branch`: Render deploys the branch that contains this file.
+    #
+    # --include=dev is required because NODE_ENV=production makes `npm ci`
+    # skip devDependencies, and Vite is one of them.
+    buildCommand: npm ci --include=dev && npm run build && pip install -r api/requirements.txt
+    preDeployCommand: alembic upgrade head
+    # --forwarded-allow-ips lets Uvicorn trust Render's proxy headers, so the
+    # auth rate limiter keys on the real client IP instead of the proxy's.
+    startCommand: "uvicorn api.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
+    healthCheckPath: /api/health
+    # Exactly one instance, so each scheduler switch has a single owner.
+    numInstances: 1
+    envVars:
+      # Both variables are the database's private-network connection string:
+      # DATABASE_URL for the app, DIRECT_DATABASE_URL for Alembic. Render's
+      # connectionString is the direct (non-pooled) URL, so it is safe for
+      # migrations even if managed connection pooling is enabled later.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: tradium-postgres
+          property: connectionString
+      - key: DIRECT_DATABASE_URL
+        fromDatabase:
+          name: tradium-postgres
+          property: connectionString
+      # Render generates a 256-bit value; changing it logs every user out.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: NODE_ENV
+        value: production
+      # Redundant with NODE_ENV=production, but states the intent explicitly.
+      - key: SERVE_STATIC
+        value: "true"
+      # Prompted once in the Render Dashboard; never stored in Git. Leave it
+      # empty to deploy without Nova (the three assistant routes then answer 503).
+      - key: GOOGLE_GENERATIVE_AI_API_KEY
+        sync: false
+      # Both job systems stay off until the Express crons are stopped and this
+      # service is deliberately made the single owner. See DEPLOYMENT.md section 5.
+      - key: MARKET_SYNC_ENABLED
+        value: "false"
+      - key: TRADING_JOBS_ENABLED
+        value: "false"
+
+databases:
+  - name: tradium-postgres
+    plan: 0.1c-256mb
+    region: oregon
+    # The schema was developed and verified against PostgreSQL 17.
+    postgresMajorVersion: "17"
+    databaseName: tradium
