@@ -97,6 +97,14 @@ def create_app() -> FastAPI:
         if market_sync_enabled():
             app.state.market_sync = MarketSyncScheduler()
             app.state.market_sync.start()
+        else:
+            # A cold PostgreSQL cache leaves the Markets page and instrument
+            # search empty until market_sync runs. Say so instead of leaving
+            # the operator to guess why the data is missing.
+            logger.warning(
+                "Market sync is disabled (MARKET_SYNC_ENABLED is not set); "
+                "this process will not seed or refresh the market cache."
+            )
         if trading_jobs_enabled():
             # Price sync fills orders and moves funds, so it shares one
             # owner switch with the daily snapshot.

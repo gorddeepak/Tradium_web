@@ -10,8 +10,12 @@ real orders: a full-stack playground for MERN + AI tool-calling.
 > `DATABASE_URL`/`DIRECT_DATABASE_URL` at a local PostgreSQL database, run
 > `alembic upgrade head`, then
 > `.venv/Scripts/python.exe -m uvicorn api.main:app --reload --port 8000` and
-> `npm run dev` here. The Express quick start below is retained as the original
-> reference. See [docs/migration/MIGRATION_STATUS.md](docs/migration/MIGRATION_STATUS.md).
+> `npm run dev` here. Set `MARKET_SYNC_ENABLED=true` in `api/.env` for local
+> FastAPI-only development: the scheduler runs `market_sync` once at startup,
+> which seeds the 53-symbol NIFTY universe and its quotes. Without it the
+> Markets page and instrument search stay empty until that job runs. The
+> Express quick start below is retained as the original reference. See
+> [docs/migration/MIGRATION_STATUS.md](docs/migration/MIGRATION_STATUS.md).
 > A production build (`npm run build`) is served by FastAPI itself when
 > `NODE_ENV=production` or `SERVE_STATIC=true`; see
 > [docs/migration/DEPLOYMENT.md](docs/migration/DEPLOYMENT.md).
