@@ -204,29 +204,39 @@ def fetch_quote(symbol):
     if row is None:
         return None
 
-    price = row.get("regularMarketPrice")
-    # Reject anything that is not a usable positive number, so a null, a zero
-    # or a non-numeric value never becomes a fill price. Express uses
-    # `if (!quote.regularMarketPrice)`, which rejects 0 and NaN too.
-    if not _is_usable_number(price) or price <= 0:
+    quote = quote_from_row(row)
+    if quote is None:
         logger.error("No price returned for %s, skipping", ticker)
         return None
 
-    change_pct = row.get("regularMarketChangePercent")
-    if not _is_usable_number(change_pct):
-        change_pct = 0
     return {
-        "ltp": price,
-        "dayChangePct": change_pct,
+        **quote,
         "sourceTime": provider_source_time(row.get("regularMarketTime")),
     }
 
 
-def _is_usable_number(value):
+def is_usable_number(value):
     """True for a real number, excluding ``bool`` and ``NaN``/``inf``."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     return math.isfinite(value)
+
+
+def quote_from_row(row):
+    """Reduce a raw Yahoo row to ``{"ltp", "dayChangePct"}``, or ``None``.
+
+    A missing, zero, negative or non-numeric price means "no usable quote";
+    a bad percentage becomes 0. Both the quote fetch and the price-sync job
+    validate provider rows this way.
+    """
+    price = row.get("regularMarketPrice")
+    if not is_usable_number(price) or price <= 0:
+        return None
+
+    change_pct = row.get("regularMarketChangePercent")
+    if not is_usable_number(change_pct):
+        change_pct = 0
+    return {"ltp": price, "dayChangePct": change_pct}
 
 
 def fetch_quotes(tickers):

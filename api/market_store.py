@@ -27,16 +27,11 @@ from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from .postgres.models import Instrument, LatestQuote
+from .rows import utcnow as _utcnow
 
 logger = logging.getLogger(__name__)
 
 SECTOR_BATCH_SIZE = 10
-
-
-def _utcnow():
-    """Current UTC time truncated to the millisecond precision of the column."""
-    now = datetime.now(timezone.utc)
-    return now.replace(microsecond=(now.microsecond // 1000) * 1000)
 
 
 def provider_decimal(value):

@@ -16,12 +16,17 @@ The fill rules come from ``POSTGRES_SCHEMA_DESIGN.md`` §6.4:
 """
 
 import logging
-import math
 import threading
 
 from sqlalchemy import select
 
-from ..market_data import MarketDataError, fetch_quotes, fetch_sector, ticker_for
+from ..market_data import (
+    MarketDataError,
+    fetch_quotes,
+    fetch_sector,
+    quote_from_row,
+    ticker_for,
+)
 from ..market_hours import is_market_open
 from ..market_store import (
     backfill_sectors as backfill_instrument_sectors,
@@ -44,29 +49,6 @@ logger = logging.getLogger(__name__)
 # Single-flight guard, the equivalent of the Express `isSyncing` flag. Per
 # process; the scheduler is the only caller and runs on one thread.
 _sync_lock = threading.Lock()
-
-
-def _quote_from_row(row):
-    """Reduce a raw Yahoo row to ``{"ltp", "dayChangePct"}``, or ``None``.
-
-    Mirrors ``fetch_quote``'s validation: a missing, zero, negative or
-    non-numeric price means "no usable quote", and a bad percentage becomes 0.
-    """
-    price = row.get("regularMarketPrice")
-    if not _is_usable_number(price) or price <= 0:
-        return None
-
-    change_pct = row.get("regularMarketChangePercent")
-    if not _is_usable_number(change_pct):
-        change_pct = 0
-    return {"ltp": price, "dayChangePct": change_pct}
-
-
-def _is_usable_number(value):
-    """True for a real number, excluding ``bool`` and ``NaN``/``inf``."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    return math.isfinite(value)
 
 
 def sync_prices(session_factory):
@@ -142,7 +124,7 @@ def run_sync(session_factory, *, now=None):
         row = rows.get(ticker)
         if row is None:
             continue
-        quote = _quote_from_row(row)
+        quote = quote_from_row(row)
         if quote is None:
             logger.error("No price returned for %s, skipping", ticker)
             continue
