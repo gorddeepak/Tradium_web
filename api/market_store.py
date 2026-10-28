@@ -63,8 +63,8 @@ def _non_negative(value, places):
     """Quantize a field that has a non-negative database constraint."""
     number = provider_decimal(value)
     if number is None or number < 0:
-        return Decimal(0).quantize(Decimal(1).scaleb(-places))
-    return number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+        number = Decimal(0)
+    return _quantized(number, places)
 
 
 def _volume(value):
@@ -447,16 +447,3 @@ def backfill_sectors(session_factory, fetch_sector, limit=SECTOR_BATCH_SIZE):
 
     return filled
 
-
-def instrument_sectors(session_factory, symbols):
-    """Return the known sectors for ``symbols``, keyed by symbol."""
-    unique = list(dict.fromkeys(symbols))
-    if not unique:
-        return {}
-    with session_factory() as session:
-        rows = session.execute(
-            select(Instrument.symbol, Instrument.sector).where(
-                Instrument.symbol.in_(unique), Instrument.sector != ""
-            )
-        )
-    return {symbol: sector for symbol, sector in rows}

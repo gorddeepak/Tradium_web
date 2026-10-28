@@ -34,7 +34,6 @@ getcontext().prec = 28
 CASH = Decimal("0.01")
 PRICE = Decimal("0.0001")
 AVERAGE = Decimal("0.000001")
-PERCENT = Decimal("0.000001")
 
 # A fill needs the provider's own market time, not the receipt time. A missing,
 # older-than-10-minutes or more-than-2-minutes-future source time means "skip
