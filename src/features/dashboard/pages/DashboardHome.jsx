@@ -60,6 +60,15 @@ export default function DashboardHome() {
   );
   const { user } = useAuth();
 
+  /* Not enough history yet: hold the latest value flat. Same whole-account
+     numbers as the card — MIS legs contribute qty × entry to invested. */
+  const flatValue = series[0]?.value ?? 0;
+  const flatInvested = portfolio.invested + misInvested;
+  const flatSeries = [
+    { label: "", value: flatValue, invested: flatInvested },
+    { label: "", value: flatValue, invested: flatInvested },
+  ];
+
   /* Mirrors the loaded layout so nothing jumps when the data lands. */
   if (holdingsLoading) return (
     <main className="mx-auto max-w-[1440px] px-6 py-8">
@@ -156,18 +165,7 @@ export default function DashboardHome() {
             {seriesLoading ? (
               <div className="skeleton-shimmer h-[320px] w-full rounded-lg" />
             ) : series.length < 2 ? (
-              /* Same whole-account numbers as the card: MIS legs contribute
-                 qty × entry to invested and their P&L to value. */
-              (() => {
-                const v = series[0]?.value ?? 0;
-                const inv = portfolio.invested + misInvested;
-                return (
-                  <PerformanceChart
-                    data={[{ label: "", value: v, invested: inv }, { label: "", value: v, invested: inv }]}
-                    up={true}
-                  />
-                );
-              })()
+              <PerformanceChart data={flatSeries} up={true} />
             ) : (
               <PerformanceChart data={series} up={overallPnl >= 0} />
             )}

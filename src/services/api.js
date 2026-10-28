@@ -26,6 +26,13 @@ async function request(path, options = {}) {
   return res.json();
 }
 
+export const getMe = () => request("/auth/me");
+export const signup = (payload) =>
+  request("/auth/signup", { method: "POST", body: JSON.stringify(payload) });
+export const login = (payload) =>
+  request("/auth/login", { method: "POST", body: JSON.stringify(payload) });
+export const logout = () => request("/auth/logout", { method: "POST" });
+
 export const getHoldings = () => request("/holdings");
 export const getPositions = () => request("/positions");
 export const squareOffPosition = (id) => request(`/positions/${id}/square-off`, { method: "POST" });

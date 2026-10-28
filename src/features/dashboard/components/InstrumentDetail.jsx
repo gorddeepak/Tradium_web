@@ -89,6 +89,8 @@ export function InstrumentDetail() {
   const heldQty = holding?.qty ?? 0;
   const avgPrice = holding?.avgPrice ?? 0;
   const insufficientHoldings = side === "SELL" && product !== "MIS" && (Number(qty) || 0) > heldQty;
+  // Indicative charges only — nothing is debited.
+  const charges = estimateCharges({ side, product, turnover: total });
 
   // The "Your position" strip, from both books.
   const holdingM = holding ? holdingMetrics(holding) : null;
@@ -463,25 +465,20 @@ export function InstrumentDetail() {
               </div>
             ))}
             {/* Indicative charges only — nothing is debited. */}
-            {(() => {
-              const c = estimateCharges({ side, product, turnover: total });
-              return (
-                <div className="rounded-lg bg-surface-sunken p-3 text-[12px]">
-                  <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Estimated charges
-                  </div>
-                  <div className="num space-y-1">
-                    <div className="flex justify-between"><span className="text-muted-foreground">Brokerage</span><span>{fmtMoney(c.brokerage)}</span></div>
-                    <div className="flex justify-between"><span className="text-muted-foreground">STT</span><span>{fmtMoney(c.stt)}</span></div>
-                    <div className="flex justify-between"><span className="text-muted-foreground">Exchange txn</span><span>{fmtMoney(c.txnCharges)}</span></div>
-                    <div className="flex justify-between"><span className="text-muted-foreground">SEBI charges</span><span>{fmtMoney(c.sebi)}</span></div>
-                    <div className="flex justify-between"><span className="text-muted-foreground">GST</span><span>{fmtMoney(c.gst)}</span></div>
-                    <div className="flex justify-between"><span className="text-muted-foreground">Stamp duty</span><span>{fmtMoney(c.stampDuty)}</span></div>
-                    <div className="flex justify-between border-t border-border pt-1 font-medium"><span>Total charges</span><span>{fmtMoney(c.total)}</span></div>
-                  </div>
-                </div>
-              );
-            })()}
+            <div className="rounded-lg bg-surface-sunken p-3 text-[12px]">
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Estimated charges
+              </div>
+              <div className="num space-y-1">
+                <div className="flex justify-between"><span className="text-muted-foreground">Brokerage</span><span>{fmtMoney(charges.brokerage)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">STT</span><span>{fmtMoney(charges.stt)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Exchange txn</span><span>{fmtMoney(charges.txnCharges)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">SEBI charges</span><span>{fmtMoney(charges.sebi)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">GST</span><span>{fmtMoney(charges.gst)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Stamp duty</span><span>{fmtMoney(charges.stampDuty)}</span></div>
+                <div className="flex justify-between border-t border-border pt-1 font-medium"><span>Total charges</span><span>{fmtMoney(charges.total)}</span></div>
+              </div>
+            </div>
           </div>
           <DialogFooter className="gap-2">
             {side === "SELL" && insufficientHoldings && (
