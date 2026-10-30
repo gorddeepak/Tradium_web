@@ -4,6 +4,7 @@ import { useFunds } from "@/features/dashboard/FundsContext";
 import { fmtMoney } from "@/utils/tradiumUtils";
 import { AccountMenu } from "./AccountMenu";
 import { GlobalSearch } from "./GlobalSearch";
+import { LivePriceBadge } from "@/features/dashboard/quotes/LivePriceBadge";
 import { ROUTES } from "@/pages/routes/routes";
 import { Menu, SearchIcon, Sparkles, X } from 'lucide-react';
 
@@ -58,6 +59,7 @@ export function TopBar({ onOpenAssistant }) {
             onOpenChange={setSearchOpen}
             triggerClassName="hidden md:flex"
           />
+          <LivePriceBadge />
           {/* Solid dark — the navbar's one primary action. */}
           <button
             onClick={onOpenAssistant}

@@ -48,6 +48,12 @@ def jwt_secret(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", TEST_SECRET)
 
 
+@pytest.fixture(autouse=True)
+def live_quotes_off(monkeypatch):
+    """Never open the upstream stream from an automated test."""
+    monkeypatch.delenv("LIVE_QUOTES_ENABLED", raising=False)
+
+
 @pytest.fixture
 def client():
     # raise_server_exceptions=False lets the 500 handler run like production.

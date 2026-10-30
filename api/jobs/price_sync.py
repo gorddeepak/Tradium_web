@@ -41,6 +41,8 @@ from ..postgres.models import (
     Position,
     Watchlist,
 )
+from ..quote_service import quote_service
+from ..quote_stream import hub, publish_live_quotes
 from ..trading_book import lock_user, quote_is_fresh, utcnow
 from ..watchlist_stream import publish_persisted_quotes
 
@@ -108,6 +110,17 @@ def run_sync(session_factory, *, now=None):
         symbols[key] = {"symbol": document.symbol, "exchange": document.exchange}
         names.setdefault(document.symbol, document.name or document.symbol)
 
+    # A page opens the quote stream for the symbols it shows. Those belong in
+    # this batch too, so an instrument nobody holds still gets a live price.
+    # The set is empty when no browser is connected, so the job costs nothing
+    # extra on an idle server.
+    for symbol in hub.subscribed_symbols():
+        key = f"{symbol}-NSE"
+        if key in symbols:
+            continue
+        symbols[key] = {"symbol": symbol, "exchange": "NSE"}
+        names.setdefault(symbol, symbol)
+
     # One batched request for every distinct Yahoo ticker. A provider failure
     # leaves the stored quotes alone, just as a per-symbol failure did.
     tickers = list(dict.fromkeys(ticker_for(item["symbol"]) for item in symbols.values()))
@@ -152,10 +165,13 @@ def run_sync(session_factory, *, now=None):
             # Push only after the commit, so a subscriber never sees a price
             # that is not in latest_quotes. Best-effort: the job continues even
             # if no socket or no database read is available.
-            publish_persisted_quotes(
-                session_factory,
-                [entry["symbol"] for entry in entries],
-            )
+            published_symbols = [entry["symbol"] for entry in entries]
+            publish_persisted_quotes(session_factory, published_symbols)
+            # A live stream already delivered every tick. Polling frames here
+            # would only re-send the same row, and could arrive after a newer
+            # tick and look like a regression to the browser.
+            if not quote_service.is_streaming():
+                publish_live_quotes(session_factory, published_symbols)
 
     # Sectors live on PostgreSQL instruments now; holdings/positions read them
     # through the join, so there is no book row to mirror.

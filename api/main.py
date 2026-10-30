@@ -15,7 +15,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .config import get_cors_origins, serve_static_enabled
+from .config import get_cors_origins, live_quotes_enabled, serve_static_enabled
+from .postgres.session import get_session_factory
+from .quote_service import quote_service
 from .rate_limit import AuthRateLimitMiddleware
 from .routes import (
     assistant,
@@ -28,6 +30,7 @@ from .routes import (
     orders,
     portfolio,
     positions,
+    quotes,
     watchlist,
 )
 from .scheduler import (
@@ -112,12 +115,22 @@ def create_app() -> FastAPI:
             app.state.portfolio_snapshot = PortfolioSnapshotScheduler()
             app.state.portfolio_snapshot.start()
 
+        # One upstream Yahoo connection for the process, off by default. The
+        # service starts its own thread, seeds the cache from latest_quotes and
+        # flushes pending ticks on shutdown. See docs/migration/LIVE_MARKET_PRICES.md.
+        quote_service.start(
+            get_session_factory() if live_quotes_enabled() else None
+        )
+
         yield
 
         for name in ("market_sync", "price_sync", "portfolio_snapshot"):
             job = getattr(app.state, name)
             if job is not None:
                 job.stop()
+
+        # After the jobs stop, so nothing queues a tick during the final flush.
+        quote_service.stop()
 
     app = FastAPI(lifespan=lifespan)
 
@@ -165,6 +178,7 @@ def create_app() -> FastAPI:
     app.include_router(holdings.router)
     app.include_router(orders.router)
     app.include_router(watchlist.router)
+    app.include_router(quotes.router)
     app.include_router(positions.router)
     app.include_router(funds.router)
     app.include_router(portfolio.router)

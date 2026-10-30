@@ -13,7 +13,7 @@ real orders: a full-stack playground for trading UIs and AI tool-calling.
 - **AI** — Google Gemini via pydantic-ai, used for Nova (chat + tools)
   and per-page insight cards
 - **Live data** — Yahoo Finance quotes and candles; prices sync to PostgreSQL
-  every minute
+  every minute, with an optional intraday stream (`LIVE_QUOTES_ENABLED`)
 
 ## Getting started
 
@@ -49,6 +49,9 @@ The backend reads everything from `api/.env` — see `api/.env.example`:
 | `GOOGLE_GENERATIVE_AI_API_KEY` | for Nova + insight cards | Gemini API key |
 | `MARKET_SYNC_ENABLED` | no | Own the market-cache sync (seed + every 5 min) |
 | `TRADING_JOBS_ENABLED` | no | Own price sync (every minute) + daily snapshot |
+| `LIVE_QUOTES_ENABLED` | no | Open one Yahoo quote stream per API process (off by default; see `docs/migration/LIVE_MARKET_PRICES.md`) |
+| `LIVE_QUOTES_FLUSH_SECONDS` | no | How often live ticks are persisted (default 5) |
+| `LIVE_QUOTES_STALE_SECONDS` | no | Age at which a quote is marked stale (default 60) |
 
 The frontend needs no env file for local dev. Set `VITE_API_URL` only when
 pointing a production build at a deployed backend.
@@ -60,6 +63,7 @@ pointing a production build at a deployed backend.
 | root | `npm run dev` | Vite dev server (port 5173) |
 | root | `npm run build` | production build |
 | root | `npm run lint` | ESLint |
+| root | `npm run test:quotes` | frontend quote-merge unit tests (`node --test`) |
 | root | `npm run screens` | capture landing-page screenshots (needs the app running) |
 | root | `alembic upgrade head` | apply PostgreSQL migrations |
 | root | `python -m pytest -q` | backend tests (needs `TEST_DATABASE_URL`) |

@@ -1,6 +1,8 @@
 import { useCallback, useState } from "react";
 import { getInstrument, getCandles } from "@/services/api";
 import { usePolling } from "./usePolling";
+import { useLiveQuotes } from "../quotes/QuoteContext";
+import { mergeInstrumentQuote, normalizeSymbol } from "../quotes/quoteMerge";
 
 /* Fetch quotes and candles on mount/symbol/range change, then every 30s while
    the market is open. */
@@ -40,5 +42,10 @@ export function useInstrument(symbol, range) {
 
   usePolling(fetchQuoteAndCandles, apply, POLL_MS, onError);
 
-  return { instrument, candles, instrumentLoading, candlesLoading };
+  // The page's own quote wins over the poll, and the poll stays as fallback.
+  const quoteSymbol = normalizeSymbol(instrument?.symbol || symbol);
+  const live = useLiveQuotes([quoteSymbol]);
+  const merged = mergeInstrumentQuote(instrument, live[quoteSymbol]);
+
+  return { instrument: merged, candles, instrumentLoading, candlesLoading };
 }

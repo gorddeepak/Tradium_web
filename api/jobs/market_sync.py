@@ -28,6 +28,8 @@ from ..market_store import (
     persist_market_quotes,
 )
 from ..postgres.session import get_session_factory
+from ..quote_service import quote_service
+from ..quote_stream import publish_live_quotes
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,17 @@ def sync_quotes(session_factory):
         )
 
     cached = persist_market_quotes(session_factory, entries)
+    if cached:
+        # Markets reads the 53-symbol universe, and price_sync only quotes the
+        # symbols in a book. Publishing here is what makes Markets move: after
+        # this commit, every browser watching a constituent gets the new row.
+        # While the live feed is connected it already sent the tick, so skip
+        # the slower polling frame.
+        if not quote_service.is_streaming():
+            publish_live_quotes(
+                session_factory,
+                [instrument["symbol"] for instrument in BY_TICKER.values()],
+            )
     missing = [ticker for ticker in TICKERS if ticker not in quotes]
     unusable = [
         BY_TICKER[ticker]["symbol"]

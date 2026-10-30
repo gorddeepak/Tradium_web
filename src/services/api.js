@@ -11,6 +11,9 @@ const STREAM_BASE = BASE_URL.startsWith("http")
   ? BASE_URL.replace(/^http/, "ws")
   : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}${BASE_URL}`;
 export const WATCHLIST_STREAM_URL = `${STREAM_BASE}/watchlist/stream`;
+// The generic channel carries the same quote frame for any symbol a page
+// shows. The watchlist stream stays for older clients.
+export const QUOTES_STREAM_URL = `${STREAM_BASE}/quotes/stream`;
 
 async function request(path, options = {}) {
   const res = await fetch(`${BASE_URL}${path}`, {

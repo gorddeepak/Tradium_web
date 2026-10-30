@@ -4,6 +4,7 @@ The FastAPI runtime is PostgreSQL-only: it needs ``DATABASE_URL`` and
 ``JWT_SECRET``.
 """
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,3 +96,41 @@ def get_ai_settings() -> AISettings:
         api_key=os.getenv("GOOGLE_GENERATIVE_AI_API_KEY", "").strip(),
         model=os.getenv("GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL,
     )
+
+
+# -- Live quote feed -------------------------------------------------------
+#
+# Off unless LIVE_QUOTES_ENABLED is set. The provider is unofficial, so this
+# is never turned on by a deployment file; the operator opts in. See
+# docs/migration/LIVE_MARKET_PRICES.md.
+
+
+def live_quotes_enabled() -> bool:
+    """Whether this process opens the upstream quote stream."""
+    return os.getenv("LIVE_QUOTES_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _configured_seconds(name, default, minimum):
+    raw = os.getenv(name, "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if not math.isfinite(value) or value < minimum:
+        return default
+    return value
+
+
+def live_quotes_flush_seconds() -> float:
+    """How often pending ticks are written to ``latest_quotes`` (default 5s)."""
+    return _configured_seconds("LIVE_QUOTES_FLUSH_SECONDS", 5.0, 0.5)
+
+
+def live_quotes_stale_seconds() -> float:
+    """Age after which a quote is shown as stale (default 60s)."""
+    return _configured_seconds("LIVE_QUOTES_STALE_SECONDS", 60.0, 5.0)
