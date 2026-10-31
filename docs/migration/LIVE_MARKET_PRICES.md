@@ -177,6 +177,16 @@ precedence, coalesced writes, failed-write retry, shutdown flush, feed
 disabled/reconnect/stop, WebSocket auth (`1008`), snapshots, subscribe and
 subscriber isolation.
 
+The end-to-end path (mock provider socket -> decoder -> feed -> service -> hub
+-> PostgreSQL) needs a disposable database:
+
+```
+TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:55432/tradium_live_test \
+  pytest api/tests/test_quotes_live_integration.py -q
+```
+
+It skips when `TEST_DATABASE_URL` is unset, like the other PostgreSQL tests.
+
 Frontend merge rules:
 
 ```

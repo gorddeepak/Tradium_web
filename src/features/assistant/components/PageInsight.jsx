@@ -1,5 +1,5 @@
 import { useCompletion } from '@ai-sdk/react';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useAssistant } from '@/features/assistant/AssistantContext';
 import { BASE_URL } from '@/services/api';
 
@@ -13,9 +13,14 @@ export default function PageInsight({ page, data }) {
     streamProtocol: 'text',
   });
   const { openWithContext } = useAssistant();
+  // One insight per page visit. Live prices re-render these pages on every
+  // tick, so re-running on each data change would call the AI in a loop.
+  const requestedPage = useRef(null);
 
   useEffect(() => {
-    if (data) complete('', { body: { page, data } });
+    if (!data || requestedPage.current === page) return;
+    requestedPage.current = page;
+    complete('', { body: { page, data } });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, JSON.stringify(data)]);
 
