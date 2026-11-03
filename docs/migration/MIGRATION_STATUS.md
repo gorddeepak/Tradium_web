@@ -1125,7 +1125,7 @@ document the production configuration, and verify the built app locally.
 | `api/config.py` | `serve_static_enabled()` — `SERVE_STATIC` override, else `NODE_ENV=production` (Express parity) |
 | `api/.env.example` | documents `SERVE_STATIC` and its relationship to `NODE_ENV` |
 | `api/tests/test_static.py` | **new** — 10 tests over a throwaway `dist/`: root/deep-link shell, assets, root files, known-API passthrough, unknown-API JSON 404, bare `/api`, default-off, missing build, production-mode default, flag precedence |
-| `docs/migration/DEPLOYMENT.md` | **new** — build/start commands, env-var table, cookie/CORS notes, scheduler ownership, static behaviour, local production run, rollback |
+| `docs/DEPLOYMENT.md` | **new** - build/start commands, env-var table, cookie/CORS notes, scheduler ownership, static behaviour, local production run, rollback |
 
 No change was made to `src/`; the production build already calls the API at the relative `/api` path
 (Phase 3a), which is what makes same-origin serving work.
@@ -1243,7 +1243,7 @@ not called, so the harness stays offline; row 1I.36 stays `NOT RUN` (it needs th
 
 ### Deployment readiness
 
-`docs/migration/DEPLOYMENT.md` was cross-checked against the code; the build/start commands, env-var
+`docs/DEPLOYMENT.md` was cross-checked against the code; the build/start commands, env-var
 names, `/api/health` endpoint, `Secure`-cookie behaviour, static-serving switch and the two scheduler
 switches all match. Notes added or confirmed:
 
@@ -2191,7 +2191,7 @@ free web plan cannot run a pre-deploy command and spins down after 15 idle minut
 schedulers and dropping WebSockets), and free Postgres expires after 30 days. Both scheduler switches stay
 `"false"` until the Express crons are stopped; see §3J for ownership and `DEPLOYMENT.md` §5 and §7.6 for
 the switch-on sequence. The exact steps, verified commands and limitations are in
-[`DEPLOYMENT.md`](./DEPLOYMENT.md) §7.
+[`DEPLOYMENT.md`](../DEPLOYMENT.md) §7.
 
 No data migration is required or planned: users sign up fresh, and MongoDB stays untouched as an archive
 (§3Z). Nothing is left to reconcile before this deployment; the loader and reconciliation design in
