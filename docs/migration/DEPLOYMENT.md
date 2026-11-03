@@ -195,22 +195,22 @@ document).
 
 ## 7. Render deployment (`render.yaml`)
 
-The repository root now carries a Render Blueprint. Build, migration and start commands live in Git
-instead of the dashboard, and one Python service plus one PostgreSQL database are defined together.
+The repository root carries a Render Blueprint. Build, migration and start commands live in Git
+instead of the dashboard. The Blueprint defines **one** Python web service; PostgreSQL is hosted
+externally by **Neon**, so no database resource is created on Render.
 
 ### 7.1 What the Blueprint creates
 
 | Resource | Settings | Why |
 |---|---|---|
 | Web service `tradium-fastapi` | Python runtime, `0.5c-512mb`, `oregon`, one instance | Paid instance so `preDeployCommand` is available; no idle spin-down, which would stop the schedulers and drop WebSocket connections |
-| Database `tradium-postgres` | `0.1c-256mb`, PostgreSQL 17, `oregon`, database `tradium` | Same region as the service, so the private-network URL works; paid so it does not expire after 30 days |
+| Neon PostgreSQL | External service, created in the Neon console | Not provisioned by Render; the Blueprint only holds placeholders for its two connection strings |
 
-Both resource names are new. **Do not reuse the existing Express service's name**: Render applies a
-Blueprint to an existing resource with the same name instead of creating a second one, which would
-reconfigure the live Express service.
+The service name is new. **Do not reuse the old Express service's name**: Render applies a Blueprint to
+an existing resource with the same name instead of creating a second one.
 
-`region: oregon` is Render's default. Change both entries together before the first deploy if a
-different region is wanted; a region cannot be changed after creation.
+`region: oregon` is Render's default. It cannot be changed after creation, so pick it before the first
+deploy. Neon's region is independent; choose the one closest to Oregon for the lowest latency.
 
 ### 7.2 Build, migrate, start
 
@@ -224,84 +224,103 @@ different region is wanted; a region cannot be changed after creation.
 - `--include=dev` is required: the service sets `NODE_ENV=production`, and `npm ci` otherwise omits
   devDependencies, including Vite.
 - The build runs from the repository root, so `dist/` exists in the deploy image and the same service
-  serves it (§7.5).
+  serves it (section 7.5).
 - `preDeployCommand` runs after the build and before the new instance receives traffic; a failure cancels
   the deploy and the previous version keeps serving. It requires a **paid** instance type.
 - The start command binds to `$PORT` (Render's default is `10000`). Uvicorn reads the flag, not the
   environment.
 - Render's Python runtime sets `FORWARDED_ALLOW_IPS=*`; the explicit flag keeps the requirement visible
-  in the Blueprint and is what makes the auth limiter see real client IPs (§2.4).
+  in the Blueprint and is what makes the auth limiter see real client IPs.
 
 ### 7.3 Database and connection strings
 
-- `DATABASE_URL` and `DIRECT_DATABASE_URL` both reference the database's `connectionString`: the
-  **internal** URL, `postgresql://USER:PASSWORD@INTERNAL_HOST:PORT/DATABASE`. It is reachable only from a
-  Render service in the same account and region, which is why both resources share `oregon`.
-- `connectionString` is the direct connection; `connectionPoolString` is the pooled one. Pooling is not
-  enabled, so both variables point at the same direct URL and Alembic never runs through a pooler.
-- The URL uses the plain `postgresql://` scheme. SQLAlchemy 2.1.6 resolves that to the installed
-  **psycopg 3** driver, so no `+psycopg` suffix is needed (verified against a disposable database with
-  both Alembic and the running app). A hand-written `postgresql+psycopg://` URL is equivalent.
+- The Blueprint declares `DATABASE_URL` and `DIRECT_DATABASE_URL` with `sync: false`. Render prompts for
+  both in the Dashboard, and neither value is ever committed to Git.
+- `DATABASE_URL` is Neon's **pooled** connection string, the hostname containing `-pooler`. The running
+  app uses it for every read and write, and the pooler keeps the service's connection count low.
+- `DIRECT_DATABASE_URL` is Neon's **direct** connection string, the hostname without `-pooler`. Alembic
+  uses it for `alembic upgrade head`; migrations must not run through the pooler.
+- Both are plain `postgresql://` URLs ending in `?sslmode=require`. SQLAlchemy 2.1.6 resolves that scheme
+  to the installed **psycopg 3** driver, so no `+psycopg` suffix is needed. A hand-written
+  `postgresql+psycopg://` URL is equivalent.
 - The app connects lazily, so the first request after a deploy is the first database connection. A wrong
-  URL therefore looks healthy until then (§2.4).
+  URL therefore looks healthy until then.
 
-### 7.4 Migrations
+### 7.4 Schema and migrations
 
-- On the paid instance the Blueprint runs `alembic upgrade head` before each deploy. It is idempotent
-  (revision `0001` is the only one) and the deploy is cancelled if it fails.
-- `DIRECT_DATABASE_URL` is supplied explicitly from the database; it is never derived from
-  `DATABASE_URL` (§2.3).
+- Neon starts with an empty database. The whole schema is created by the existing Alembic migration:
+  the pre-deploy step runs `alembic upgrade head` after the build and before the new instance receives
+  traffic. Revision `0001` creates every table the app uses.
+- The migration is idempotent, so running it on every deploy is safe. A failure cancels the deploy and
+  the previous version keeps serving.
+- `DIRECT_DATABASE_URL` is always supplied explicitly. It is never derived from `DATABASE_URL`, so the
+  migration cannot accidentally run through the pooler.
 - Do **not** put `alembic upgrade head` in `startCommand`: it would run on every restart, and a second
   instance could race the first.
-- On the **free** plan `preDeployCommand` is unsupported. Run the migration manually from a machine that
-  can reach the database's **external** URL, then deploy:
+- If `preDeployCommand` is unavailable on the chosen plan, run the migration manually from a machine that
+  can reach Neon before deploying:
 
   ```bash
-  DIRECT_DATABASE_URL='postgresql+psycopg://USER:PASSWORD@EXTERNAL_HOST:5432/tradium?sslmode=require' \
+  DIRECT_DATABASE_URL='postgresql+psycopg://USER:PASSWORD@EP-ENDPOINT.neon.tech/DB?sslmode=require' \
     alembic upgrade head
   ```
 
-  Repeat before every deploy that contains a migration. Free Postgres also expires 30 days after
-  creation, has no backups and is capped at 1 GB of storage, so it is a demo target only.
+  Repeat before every deploy that contains a migration.
+- No data is migrated from MongoDB. The old Express/MongoDB deployment keeps its data untouched, and this
+  service starts with a clean PostgreSQL database. Everyone signs up again; legacy MongoDB users do not
+  exist here.
 
 ### 7.5 Frontend, HTTPS, cookies and WebSockets
 
 - The same service serves the SPA. `NODE_ENV=production` (and the explicit `SERVE_STATIC=true`) turns on
   the static mount, and `dist/index.html` exists after the build. `/` and client routes such as
-  `/dashboard` return the shell; `/assets/*` returns the hashed files (§4).
+  `/dashboard` return the shell; `/assets/*` returns the hashed files.
 - Render terminates TLS and redirects HTTP to HTTPS, so the `Secure` auth cookie and `SameSite=strict`
   work. The frontend calls the relative `/api` path, so the cookie and the API share one origin and no
   CORS headers are involved.
-- The watchlist WebSocket connects to `wss://<service-host>/api/watchlist/stream` (derived from the page
-  origin), carrying the same `token` cookie on the handshake. Render proxies WebSocket upgrades on the
-  service's single port with no extra configuration and imposes no fixed connection timeout.
+- The watchlist WebSocket connects to `wss://<service-host>/api/watchlist/stream` and the shared quote
+  channel to `wss://<service-host>/api/quotes/stream`. Both derive the scheme from the page origin and
+  carry the same `token` cookie on the handshake. Render proxies WebSocket upgrades on the service's
+  single port with no extra configuration and imposes no fixed connection timeout.
 - `CORS_ORIGINS` stays unset. It is only needed if the frontend moves to a different origin, in which
-  case `VITE_API_URL` must also be set at build time (§3).
+  case `VITE_API_URL` must also be set at build time.
 
-### 7.6 Schedulers
+### 7.6 Scheduled jobs and live quotes
 
-The Blueprint sets `MARKET_SYNC_ENABLED` and `TRADING_JOBS_ENABLED` to `"false"`, matching the code
-default (§5). `numInstances: 1` keeps one owner when they are turned on, but a zero-downtime deploy
-briefly runs the old and new instances together. Enable each switch deliberately, and keep the instance
-count at one.
+- `numInstances: 1` gives each background job and the upstream quote socket a single owner.
+- `MARKET_SYNC_ENABLED=true` runs the market-cache refresh once at startup and then every five minutes.
+- `TRADING_JOBS_ENABLED=true` runs the per-minute price sync (which fills crossed OPEN orders, settles
+  MIS exits and moves funds) and the daily 18:00 IST portfolio snapshot.
+- The two switches cover different work, so both are on and neither job runs twice. A zero-downtime
+  deploy briefly runs the old and new instances together; keep the instance count at one.
+- `LIVE_QUOTES_ENABLED=true` opens one upstream Yahoo WebSocket per process and pushes ticks to the
+  browser through `/api/quotes/stream`. `LIVE_QUOTES_FLUSH_SECONDS=5` controls how often pending ticks
+  are written to `latest_quotes`, and `LIVE_QUOTES_STALE_SECONDS=60` marks an older quote stale.
+- Yahoo's streamer is an **unofficial** provider. Verify it during an NSE session, and read
+  [LIVE_MARKET_PRICES.md](./LIVE_MARKET_PRICES.md) before relying on it. When it is disabled, prices
+  still refresh through the scheduled REST sync.
 
 ### 7.7 Manual dashboard steps
 
-1. Push the branch to a Git provider (the repository still has no remote) and grant Render access to it.
-2. In Render: **New > Blueprint**, choose the repository, then the branch that contains `render.yaml`.
-3. Review the two resources. Change `region` in both entries before the first deploy if needed; it cannot
-   be changed afterwards.
-4. Enter `GOOGLE_GENERATIVE_AI_API_KEY` when prompted. Leaving it empty is allowed; Nova then answers
-   `503` while the rest of the app works.
-5. Click **Deploy Blueprint**. The first deploy runs the build, then the migration, then the start
-   command.
-6. Open `https://<service>.onrender.com/api/health` (expect `{"ok":true}`), then the root URL, and sign up
-   with a fresh account — legacy MongoDB users do not exist here (§2.1).
-7. Optional custom domain: **Settings > Custom Domains**, add the domain, create the CNAME it shows and
+1. Push the branch to GitHub (repository `gorddeepak/Tradium_web`, branch `main`) and grant Render access
+   to it.
+2. In Neon, create the project, database and role, then copy the **pooled** and **direct** connection
+   strings.
+3. In Render: **New > Blueprint**, choose the repository, then the branch that contains `render.yaml`.
+4. Review the single web service. Change `region` before the first deploy if needed; it cannot be changed
+   afterwards.
+5. Enter `DATABASE_URL` (pooled), `DIRECT_DATABASE_URL` (direct) and, optionally,
+   `GOOGLE_GENERATIVE_AI_API_KEY` when prompted. Leaving the Gemini key empty is allowed; Nova then
+   answers `503` while the rest of the app works.
+6. Click **Deploy Blueprint**. The first deploy runs the build, then the migration that creates the
+   schema, then the start command.
+7. Open `https://<service>.onrender.com/api/health` (expect `{"ok":true}`), then the root URL, and sign up
+   with a fresh account.
+8. Optional custom domain: **Settings > Custom Domains**, add the domain, create the CNAME it shows and
    wait for Render's certificate. No application setting changes: the frontend is same-origin and the
-   WebSocket derives `wss://` from the page.
-8. To enable the jobs, wait until the Express crons are stopped, set the switches in the dashboard (or in
-   `render.yaml`) and redeploy (§5).
+   WebSockets derive `wss://` from the page.
+9. The Blueprint already enables both job switches and the live quote feed; no dashboard change is
+   needed. Confirm the top bar shows **Live** during market hours.
 
 ## 8. Rollback
 
