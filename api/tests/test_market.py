@@ -62,6 +62,25 @@ def test_cold_cache_returns_nulls_and_empty_lists(client, make_token, user_id):
     assert body == {"asOf": None, "indices": [], "stocks": []}
 
 
+def test_an_instrument_without_a_quote_is_visible_with_no_price(
+    client, make_token, user_id, market_instrument_factory
+):
+    market_instrument_factory(symbol="INFY", name="Infosys", quote=False)
+
+    body = client.get("/api/market/overview", cookies={"token": make_token(user_id)}).json()
+
+    assert body["asOf"] is None
+    assert [row["symbol"] for row in body["stocks"]] == ["INFY"]
+    row = body["stocks"][0]
+    assert row["ltp"] is None
+    assert row["dayChange"] is None
+    assert row["dayChangePct"] is None
+    assert row["prevClose"] is None
+    assert row["volume"] is None
+    assert row["marketCap"] is None
+    assert row["updatedAt"] is None
+
+
 def test_as_of_is_the_freshest_quote_and_rows_keep_the_legacy_keys(
     client, make_token, user_id, market_instrument_factory
 ):

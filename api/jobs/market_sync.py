@@ -25,6 +25,7 @@ from ..market_store import (
     backfill_sectors as backfill_instrument_sectors,
     count_market_quotes,
     is_usable_quote,
+    persist_market_instruments,
     persist_market_quotes,
 )
 from ..postgres.session import get_session_factory
@@ -50,6 +51,28 @@ TICKERS = list(BY_TICKER)
 # per process; see `docs/migration/MIGRATION_STATUS.md` §3I for why that is
 # enough here and what it does not cover.
 _sync_lock = threading.Lock()
+
+
+def universe_entries():
+    """The static symbol, name and kind for every universe instrument."""
+    return [
+        {
+            "symbol": instrument["symbol"],
+            "name": instrument["name"],
+            "kind": instrument["kind"],
+        }
+        for instrument in BY_TICKER.values()
+    ]
+
+
+def seed_universe(session_factory):
+    """Create the 53 instruments without asking Yahoo for a price.
+
+    This is what makes search and the Markets page work on a fresh database
+    when the provider is rate limiting or temporarily down. It writes no
+    quotes, so a missing price stays visibly missing.
+    """
+    return persist_market_instruments(session_factory, universe_entries())
 
 
 def sync_quotes(session_factory):
@@ -128,6 +151,11 @@ def market_sync(session_factory=None):
 
     try:
         factory = session_factory or get_session_factory()
+        try:
+            seed_universe(factory)
+        except Exception:  # noqa: BLE001 - quotes can still be attempted
+            logger.exception("Could not seed the market universe")
+
         with factory() as session:
             cached = count_market_quotes(session)
 

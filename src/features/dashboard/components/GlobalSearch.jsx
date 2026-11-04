@@ -88,13 +88,13 @@ export function GlobalSearch({ open, onOpenChange, triggerClassName = "" }) {
                     <span className="font-medium">{r.symbol}</span>
                     <span className="truncate text-muted-foreground">{r.name}</span>
                     <span className="ml-auto num text-xs text-muted-foreground">
-                      {fmtMoney(r.price)}
+                      {typeof r.price === "number" ? fmtMoney(r.price) : "Unavailable"}
                     </span>
-                    <span
-                      className={`num text-xs ${toneClass(r.changePct ?? 0)}`}
-                    >
-                      {fmtPct(r.changePct ?? 0)}
-                    </span>
+                    {typeof r.changePct === "number" && (
+                      <span className={`num text-xs ${toneClass(r.changePct)}`}>
+                        {fmtPct(r.changePct)}
+                      </span>
+                    )}
                   </CommandItem>
                 ))}
               </CommandGroup>

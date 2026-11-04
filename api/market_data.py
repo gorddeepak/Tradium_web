@@ -26,6 +26,7 @@ WebSocket streaming was evaluated separately and deliberately not adopted
 import logging
 import math
 import threading
+import time
 from datetime import datetime, timedelta
 
 import requests
@@ -87,9 +88,65 @@ _session = None
 _crumb = None
 _session_lock = threading.Lock()
 
+# Yahoo answers 429 when it is rate limiting a caller. Retrying immediately
+# only makes the block longer, so every provider call shares one cooldown.
+# The delay starts at a minute and doubles up to fifteen minutes.
+PROVIDER_BACKOFF_START_SECONDS = 60
+PROVIDER_BACKOFF_MAX_SECONDS = 15 * 60
+_provider_blocked_until = 0.0
+_provider_failures = 0
+_cooldown_lock = threading.Lock()
+
 
 class MarketDataError(Exception):
     """The provider could not answer. The routes turn this into a 404 or a 503."""
+
+
+def _cooldown_remaining():
+    """Seconds left on the shared 429 cooldown, or 0 when a call may proceed."""
+    with _cooldown_lock:
+        return max(0.0, _provider_blocked_until - time.monotonic())
+
+
+def _note_rate_limit(response=None):
+    """Start or extend the cooldown after a 429 and return the delay."""
+    global _provider_blocked_until, _provider_failures
+
+    with _cooldown_lock:
+        _provider_failures += 1
+        delay = min(
+            PROVIDER_BACKOFF_MAX_SECONDS,
+            PROVIDER_BACKOFF_START_SECONDS * (2 ** (_provider_failures - 1)),
+        )
+        # A provider Retry-After is a lower bound, never a shorter wait.
+        retry_after = 0
+        if response is not None:
+            raw = (getattr(response, "headers", None) or {}).get("Retry-After", "")
+            try:
+                retry_after = int(str(raw).strip())
+            except (TypeError, ValueError):
+                retry_after = 0
+        delay = min(
+            PROVIDER_BACKOFF_MAX_SECONDS, max(delay, retry_after)
+        )
+        _provider_blocked_until = time.monotonic() + delay
+        logger.warning(
+            "Yahoo rate limit (HTTP 429); pausing market-data calls for %ss", delay
+        )
+        return delay
+
+
+def _provider_succeeded():
+    """Clear the cooldown after a successful provider response."""
+    global _provider_blocked_until, _provider_failures
+
+    with _cooldown_lock:
+        _provider_blocked_until = 0.0
+        _provider_failures = 0
+
+
+def _rate_limited(response):
+    return getattr(response, "status_code", None) == 429
 
 
 def ticker_for(symbol):
@@ -107,6 +164,13 @@ def _yahoo_session(force_refresh=False):
     global _session, _crumb
 
     with _session_lock:
+        remaining = _cooldown_remaining()
+        if remaining > 0:
+            raise MarketDataError(
+                "Yahoo market data is cooling down after HTTP 429; "
+                f"retrying in {remaining:.0f}s"
+            )
+
         if _session is not None and _crumb is not None and not force_refresh:
             return _session, _crumb
 
@@ -114,10 +178,26 @@ def _yahoo_session(force_refresh=False):
         session.headers.update(REQUEST_HEADERS)
         try:
             # 404 is the expected status; the Set-Cookie header is what matters.
-            session.get(COOKIE_BOOTSTRAP_URL, timeout=REQUEST_TIMEOUT_SECONDS)
+            bootstrap = session.get(
+                COOKIE_BOOTSTRAP_URL, timeout=REQUEST_TIMEOUT_SECONDS
+            )
+            if _rate_limited(bootstrap):
+                delay = _note_rate_limit(bootstrap)
+                raise MarketDataError(
+                    f"Yahoo rate-limited the cookie request (HTTP 429); "
+                    f"pausing for {delay}s"
+                )
             response = session.get(CRUMB_URL, timeout=REQUEST_TIMEOUT_SECONDS)
+            if _rate_limited(response):
+                delay = _note_rate_limit(response)
+                raise MarketDataError(
+                    f"Yahoo rate-limited the crumb request (HTTP 429); "
+                    f"pausing for {delay}s"
+                )
             response.raise_for_status()
             crumb = response.text.strip()
+        except MarketDataError:
+            raise
         except requests.RequestException as err:
             raise MarketDataError(f"could not obtain a Yahoo crumb: {err}") from err
 
@@ -145,6 +225,13 @@ def _request_quotes(tickers):
         except requests.RequestException as err:
             raise MarketDataError(str(err)) from err
 
+        if _rate_limited(response):
+            delay = _note_rate_limit(response)
+            raise MarketDataError(
+                f"Yahoo rate-limited the quote request (HTTP 429); "
+                f"pausing for {delay}s"
+            )
+
         # 401 means the crumb went stale; retry once with a fresh one.
         if response.status_code == 401 and attempt == 0:
             logger.info("Yahoo rejected the crumb, refreshing it")
@@ -161,6 +248,7 @@ def _request_quotes(tickers):
         quote_response = payload.get("quoteResponse") or {}
         if quote_response.get("error"):
             raise MarketDataError(str(quote_response["error"]))
+        _provider_succeeded()
         return quote_response.get("result") or []
 
     raise MarketDataError("Yahoo rejected the crumb twice")
@@ -275,10 +363,18 @@ def fetch_sector(symbol):
         except requests.RequestException as err:
             raise MarketDataError(str(err)) from err
 
+        if _rate_limited(response):
+            delay = _note_rate_limit(response)
+            raise MarketDataError(
+                f"Yahoo rate-limited the profile request (HTTP 429); "
+                f"pausing for {delay}s"
+            )
+
         if response.status_code == 401 and attempt == 0:
             continue
         # 404 is "no profile for this symbol" (every index), not a failure.
         if response.status_code == 404:
+            _provider_succeeded()
             return ""
         try:
             response.raise_for_status()
@@ -289,6 +385,7 @@ def fetch_sector(symbol):
             raise MarketDataError(f"profile response was not JSON: {err}") from err
 
         results = (payload.get("quoteSummary") or {}).get("result") or []
+        _provider_succeeded()
         if not results:
             return ""
         profile = results[0].get("assetProfile") or {}
@@ -323,6 +420,13 @@ def _request_chart(ticker, interval, period1, period2):
     Isolated so tests can supply a canned payload without touching the network.
     """
     params = dict(YAHOO_PARAMS, interval=interval, period1=period1, period2=period2)
+    remaining = _cooldown_remaining()
+    if remaining > 0:
+        raise MarketDataError(
+            "Yahoo market data is cooling down after HTTP 429; "
+            f"retrying in {remaining:.0f}s"
+        )
+
     try:
         response = requests.get(
             CHART_URL.format(ticker=ticker),
@@ -330,8 +434,18 @@ def _request_chart(ticker, interval, period1, period2):
             headers=REQUEST_HEADERS,
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
+        if _rate_limited(response):
+            delay = _note_rate_limit(response)
+            raise MarketDataError(
+                f"Yahoo rate-limited the chart request (HTTP 429); "
+                f"pausing for {delay}s"
+            )
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        _provider_succeeded()
+        return payload
+    except MarketDataError:
+        raise
     except requests.RequestException as err:
         raise MarketDataError(str(err)) from err
     except ValueError as err:  # a non-JSON body

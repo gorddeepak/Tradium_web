@@ -71,6 +71,24 @@ def test_renames_fields_for_the_client(
     ]
 
 
+def test_an_instrument_without_a_quote_is_still_searchable(
+    client, make_token, user_id, market_instrument_factory
+):
+    market_instrument_factory(symbol="INFY", name="Infosys", quote=False)
+
+    body = _search(client, make_token, user_id, "inf")
+
+    assert body == [
+        {
+            "symbol": "INFY",
+            "name": "Infosys",
+            "kind": "stock",
+            "price": None,
+            "changePct": None,
+        }
+    ]
+
+
 def test_empty_query_returns_empty_list(client, make_token, user_id):
     token_cookie = {"token": make_token(user_id)}
 

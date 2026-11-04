@@ -25,8 +25,14 @@ const columns = [
   { key: "marketCap", label: "Mkt cap", numeric: true },
 ];
 
+/* A quote-less instrument is shown as unavailable, never as a zero price. */
+function hasPrice(v) {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
 /* Index levels are points, not money — so no ₹ symbol. */
 function fmtLevel(v) {
+  if (!hasPrice(v)) return "—";
   return v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
@@ -41,16 +47,19 @@ export default function MarketsPage() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
 
-  /* Breadth over the whole 50, not the filtered set. */
+  /* Breadth over the whole 50, not the filtered set. Instruments without a
+     price are left out rather than counted as unchanged. */
+  const priced = useMemo(() => stocks.filter((s) => hasPrice(s.ltp)), [stocks]);
+
   const breadth = useMemo(() => {
     let up = 0;
     let down = 0;
-    for (const s of stocks) {
+    for (const s of priced) {
       if (s.dayChangePct > 0) up += 1;
       else if (s.dayChangePct < 0) down += 1;
     }
-    return { up, down, flat: stocks.length - up - down };
-  }, [stocks]);
+    return { up, down, flat: priced.length - up - down };
+  }, [priced]);
 
   const rows = useTableRows(stocks, { query, filter, sort, dir, pnlKey: "dayChangePct", zeroIsGainer: false });
 
@@ -69,7 +78,9 @@ export default function MarketsPage() {
         description={
           asOf
             ? "Live NIFTY 50 constituents, refreshed every five minutes."
-            : "Live NIFTY 50 constituents. Awaiting the first market sync."
+            : stocks.length || indices.length
+              ? "NIFTY 50 constituents. Prices are temporarily unavailable."
+              : "Live NIFTY 50 constituents. Awaiting the first market sync."
         }
       >
         {/* Three indices plus breadth, in the same four-up grid the other pages
@@ -80,8 +91,8 @@ export default function MarketsPage() {
               key={i.symbol}
               label={i.name}
               value={fmtLevel(i.ltp)}
-              tone={i.dayChange}
-              sub={fmtPct(i.dayChangePct)}
+              tone={hasPrice(i.ltp) ? i.dayChange : undefined}
+              sub={hasPrice(i.ltp) ? fmtPct(i.dayChangePct) : "Unavailable"}
             />
           ))}
           <MetricReadout
@@ -89,17 +100,23 @@ export default function MarketsPage() {
             /* Green advances, red declines — the convention every trading
                terminal uses, so the number reads without a label. */
             value={
-              <>
-                <span className="text-positive">{breadth.up} ↑</span>
-                <span className="text-muted-foreground"> / </span>
-                <span className="text-negative">{breadth.down} ↓</span>
-              </>
+              priced.length ? (
+                <>
+                  <span className="text-positive">{breadth.up} ↑</span>
+                  <span className="text-muted-foreground"> / </span>
+                  <span className="text-negative">{breadth.down} ↓</span>
+                </>
+              ) : (
+                "—"
+              )
             }
             /* NIFTY's own move gives the breadth number context. indices[0] is NIFTY 50. */
             sub={
-              indices.length
+              indices.length && hasPrice(indices[0].ltp)
                 ? `NIFTY 50 ${fmtPct(indices[0].dayChangePct)}${breadth.flat > 0 ? ` · ${breadth.flat} unchanged` : ""}`
-                : undefined
+                : priced.length
+                  ? `${priced.length} priced`
+                  : undefined
             }
             hint="NIFTY 50 constituents advancing vs declining today, regardless of the filter above"
           />
@@ -124,12 +141,16 @@ export default function MarketsPage() {
             <td className={TD}>
               <InstrumentCell symbol={s.symbol} name={s.name} />
             </td>
-            <td className={TD_R}>{fmtMoney(s.ltp)}</td>
-            <td className={cn(TD_R, toneClass(s.dayChangePct))}>
-              {fmtMoney(s.dayChange, { sign: true })} ({fmtPct(s.dayChangePct)})
+            <td className={TD_R}>
+              {hasPrice(s.ltp) ? fmtMoney(s.ltp) : <span className="text-muted-foreground">Unavailable</span>}
             </td>
-            <td className={TD_R}>{fmtVolume(s.volume)}</td>
-            <td className={TD_R}>{fmtCap(s.marketCap)}</td>
+            <td className={cn(TD_R, hasPrice(s.ltp) ? toneClass(s.dayChangePct) : "text-muted-foreground")}>
+              {hasPrice(s.ltp)
+                ? <>{fmtMoney(s.dayChange, { sign: true })} ({fmtPct(s.dayChangePct)})</>
+                : "—"}
+            </td>
+            <td className={TD_R}>{s.volume == null ? "—" : fmtVolume(s.volume)}</td>
+            <td className={TD_R}>{s.marketCap == null ? "—" : fmtCap(s.marketCap)}</td>
             <td className={TD_R}>
               <Button asChild size="xs" variant="contrast">
                 <Link to={ROUTES.instrument(s.symbol)}>Trade</Link>
@@ -143,19 +164,29 @@ export default function MarketsPage() {
       <div className="animate-entry mt-6 grid grid-cols-1 items-start gap-6 [animation-delay:200ms] lg:grid-cols-3">
         <div className="lg:col-span-2" data-capture="sector-heatmap">
           {/* The heatmap always sees the full index, not the filtered rows. */}
-          <SectorHeatmap stocks={stocks} onSelectSymbol={openSymbol} />
+          <SectorHeatmap
+            stocks={stocks}
+            onSelectSymbol={openSymbol}
+            emptyMessage={
+              stocks.length
+                ? "Prices are temporarily unavailable for the heatmap."
+                : "Awaiting first market sync."
+            }
+          />
         </div>
         <PageInsight
           page="markets"
           data={{
             advancing: breadth.up,
             declining: breadth.down,
-            indices: indices.map((i) => ({
-              name: i.name,
-              level: i.ltp,
-              dayChangePct: i.dayChangePct,
-            })),
-            topMovers: topMovers(stocks),
+            indices: indices
+              .filter((i) => hasPrice(i.ltp))
+              .map((i) => ({
+                name: i.name,
+                level: i.ltp,
+                dayChangePct: i.dayChangePct,
+              })),
+            topMovers: topMovers(priced),
           }}
         />
       </div>

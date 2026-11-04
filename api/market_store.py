@@ -224,6 +224,31 @@ def _upsert_quotes(session, quote_rows, full_row):
     session.execute(statement)
 
 
+def persist_market_instruments(session_factory, entries, now=None):
+    """Seed or refresh the 53-symbol universe without a provider call.
+
+    Instrument identity is static, so a fresh database can be usable for search
+    and the Markets page while Yahoo is unavailable. Quotes are untouched: a
+    new instrument has no ``latest_quotes`` row until a price arrives.
+    """
+    unique = _unique_entries(entries)
+    if not unique:
+        return 0
+
+    now = now or _utcnow()
+    with session_factory() as session:
+        with session.begin():
+            _upsert_instruments(
+                session,
+                unique,
+                now,
+                in_market_universe=True,
+                update_metadata=True,
+            )
+
+    return len(unique)
+
+
 def persist_market_quotes(session_factory, entries, now=None):
     """Upsert market-sync instruments and full quotes.
 
@@ -303,9 +328,11 @@ def count_market_quotes(session):
 def read_market_overview(session):
     """Rows for ``GET /api/market/overview`` in the approved order.
 
-    Only universe instruments with a persisted quote are returned. Indices use
-    the seed rank (unknown first), then symbol; stocks use symbol. ``asOf`` is
-    the freshest quote receipt time, or ``None`` on a cold cache.
+    Every universe instrument is returned. A temporarily missing quote leaves
+    its price fields ``None``; it is never filled with a zero or a made-up
+    value. Indices use the seed rank (unknown first), then symbol; stocks use
+    symbol. ``asOf`` is the freshest quote receipt time, or ``None`` when no
+    quote has been stored yet.
     """
     columns = (
         Instrument.id.label("_id"),
@@ -325,7 +352,7 @@ def read_market_overview(session):
     )
     base = (
         select(*columns)
-        .join(LatestQuote, LatestQuote.instrument_id == Instrument.id)
+        .outerjoin(LatestQuote, LatestQuote.instrument_id == Instrument.id)
         .where(Instrument.in_market_universe.is_(True))
     )
 
@@ -365,7 +392,9 @@ def search_market_instruments(session, query, limit=10):
     """Search the visible universe with the approved relevance order.
 
     Exact symbol, symbol prefix, name prefix, then any substring; ties break by
-    symbol so repeated calls are deterministic.
+    symbol so repeated calls are deterministic. An instrument whose quote is
+    temporarily unavailable is still searchable, with ``price`` and
+    ``changePct`` set to ``None``.
     """
     text = query.strip()
     if not text:
@@ -394,7 +423,7 @@ def search_market_instruments(session, query, limit=10):
             LatestQuote.ltp.label("price"),
             LatestQuote.day_change_pct.label("changePct"),
         )
-        .join(LatestQuote, LatestQuote.instrument_id == Instrument.id)
+        .outerjoin(LatestQuote, LatestQuote.instrument_id == Instrument.id)
         .where(Instrument.in_market_universe.is_(True), match)
         .order_by(relevance, Instrument.symbol)
         .limit(limit)

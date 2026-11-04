@@ -227,6 +227,82 @@ def test_fetch_quotes_deduplicates_before_the_provider_request(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# HTTP 429 handling
+# --------------------------------------------------------------------------
+
+
+class _TooManyRequests:
+    status_code = 429
+    headers = {}
+
+
+class _RateLimitedSession:
+    def __init__(self):
+        self.calls = 0
+
+    def get(self, *args, **kwargs):
+        self.calls += 1
+        return _TooManyRequests()
+
+
+def test_a_429_starts_a_cooldown_instead_of_retrying(monkeypatch):
+    session = _RateLimitedSession()
+    monkeypatch.setattr(
+        market_data, "_yahoo_session", lambda force_refresh=False: (session, "crumb")
+    )
+    monkeypatch.setattr(market_data, "_provider_blocked_until", 0.0)
+    monkeypatch.setattr(market_data, "_provider_failures", 0)
+
+    with pytest.raises(market_data.MarketDataError):
+        market_data._request_quotes(["RELIANCE.NS"])
+
+    assert session.calls == 1
+    assert market_data._cooldown_remaining() > 0
+
+
+def test_a_429_on_the_crumb_handshake_stops_further_requests(monkeypatch):
+    class CrumbRateLimitedSession:
+        def __init__(self):
+            self.headers = {}
+            self.calls = 0
+
+        def get(self, *args, **kwargs):
+            self.calls += 1
+            return _TooManyRequests()
+
+    created = []
+
+    def make_session():
+        session = CrumbRateLimitedSession()
+        created.append(session)
+        return session
+
+    monkeypatch.setattr(market_data.requests, "Session", make_session)
+    monkeypatch.setattr(market_data, "_session", None)
+    monkeypatch.setattr(market_data, "_crumb", None)
+    monkeypatch.setattr(market_data, "_provider_blocked_until", 0.0)
+    monkeypatch.setattr(market_data, "_provider_failures", 0)
+
+    with pytest.raises(market_data.MarketDataError):
+        market_data._yahoo_session()
+
+    # The bootstrap was the one request; the crumb endpoint was not hammered.
+    assert len(created) == 1
+    assert created[0].calls == 1
+    assert market_data._cooldown_remaining() > 0
+
+
+def test_the_cooldown_blocks_even_a_cached_crumb(monkeypatch):
+    monkeypatch.setattr(market_data, "_session", object())
+    monkeypatch.setattr(market_data, "_crumb", "cached")
+    monkeypatch.setattr(market_data, "_provider_blocked_until", 10**12)
+    monkeypatch.setattr(market_data, "_provider_failures", 1)
+
+    with pytest.raises(market_data.MarketDataError):
+        market_data._yahoo_session()
+
+
+# --------------------------------------------------------------------------
 # PostgreSQL persistence
 # --------------------------------------------------------------------------
 
@@ -579,6 +655,42 @@ def test_market_sync_syncs_a_cold_cache_even_when_closed(
     sync.market_sync(postgres_session_factory)
 
     assert called == [postgres_session_factory]
+
+
+def test_market_sync_seeds_a_fresh_database_when_yahoo_is_rate_limited(
+    postgres_session_factory, monkeypatch
+):
+    """Search and Markets must work before the first quote ever arrives."""
+
+    def rate_limited(tickers):
+        raise market_data.MarketDataError("HTTP 429 from Yahoo")
+
+    monkeypatch.setattr(sync, "fetch_quotes", rate_limited)
+    monkeypatch.setattr(sync, "is_market_open", lambda: False)
+    monkeypatch.setattr(sync, "backfill_sectors", lambda factory: 0)
+
+    sync.market_sync(postgres_session_factory)
+
+    assert _instrument_count(postgres_session_factory) == 53
+    assert (
+        _instrument_count(postgres_session_factory, in_market_universe=True)
+        == 53
+    )
+    with postgres_session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(LatestQuote)) == 0
+
+    reliance, quote = _quote(postgres_session_factory, "RELIANCE")
+    assert reliance.name == "Reliance Industries"
+    assert reliance.kind == "stock"
+    assert quote is None
+
+
+def test_seeding_the_universe_is_idempotent(
+    postgres_session_factory
+):
+    assert sync.seed_universe(postgres_session_factory) == 53
+    assert sync.seed_universe(postgres_session_factory) == 53
+    assert _instrument_count(postgres_session_factory) == 53
 
 
 def test_market_sync_survives_an_unexpected_error(

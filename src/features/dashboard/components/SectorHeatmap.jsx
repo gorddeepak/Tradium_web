@@ -42,7 +42,7 @@ function DetailStrip({ row }) {
 
 /* NIFTY 50 grouped into sectors, sized by market cap, coloured by today's move.
    No stock/sector toggle — grouping is the point of this card. */
-export function SectorHeatmap({ stocks, onSelectSymbol }) {
+export function SectorHeatmap({ stocks, onSelectSymbol, emptyMessage = "Awaiting first market sync." }) {
   /* Memoised so the map doesn't relayout on every render. */
   const nodes = useMemo(() => {
     // drop zero/negative caps — they'd be invisible slivers
@@ -77,7 +77,7 @@ export function SectorHeatmap({ stocks, onSelectSymbol }) {
       /* Outline the hovered tile's whole sector. */
       getHighlightGroup={(row) => row.sector || UNCATEGORIZED}
       renderStrip={(row) => <DetailStrip row={row} />}
-      emptyMessage="Awaiting first market sync."
+      emptyMessage={emptyMessage}
       onSelectSymbol={onSelectSymbol}
     />
   );
