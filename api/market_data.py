@@ -50,6 +50,14 @@ CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
 QUOTE_URL = "https://query2.finance.yahoo.com/v7/finance/quote"
 QUOTE_SUMMARY_URL = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
 
+# The quote endpoint above needs a cookie and a crumb, and Yahoo rate limits
+# that handshake from datacenter IPs (Render answers 429 on getcrumb). Spark
+# serves the same prices with no cookie, no crumb and no API key; it is the
+# fallback when the credentialled call fails. It carries no market cap.
+SPARK_URL = "https://query1.finance.yahoo.com/v7/finance/spark"
+# Yahoo rejects more than 20 symbols per spark request with HTTP 400.
+SPARK_BATCH_SIZE = 20
+
 # yahoo-finance2 relies on its own user agent; Yahoo rejects some clients
 # without one. This does not change the data that comes back.
 REQUEST_HEADERS = {
@@ -248,6 +256,109 @@ def _request_quotes(tickers):
     raise MarketDataError("Yahoo rejected the crumb twice")
 
 
+def _spark_quote_row(meta):
+    """Map a spark ``meta`` block to the quote-row shape the app reads.
+
+    Spark names the previous close ``chartPreviousClose`` and the day change
+    ``fulldayChange``; the mapping keeps the ``regularMarket*`` keys so every
+    caller (market sync, price sync, instrument detail) is unchanged.
+    """
+    price = meta.get("regularMarketPrice")
+    previous = meta.get("chartPreviousClose")
+    change = meta.get("fulldayChange")
+
+    # Older payloads omit fulldayChange; the difference is still exact.
+    if not is_usable_number(change):
+        if is_usable_number(price) and is_usable_number(previous):
+            change = price - previous
+        else:
+            change = None
+
+    row = {
+        "symbol": meta.get("symbol"),
+        "regularMarketPrice": price,
+        "regularMarketChange": change,
+        "regularMarketChangePercent": meta.get("regularMarketChangePercent"),
+        "regularMarketTime": meta.get("regularMarketTime"),
+        "regularMarketPreviousClose": previous,
+        "regularMarketVolume": meta.get("regularMarketVolume"),
+        "regularMarketDayHigh": meta.get("regularMarketDayHigh"),
+        "regularMarketDayLow": meta.get("regularMarketDayLow"),
+        "fiftyTwoWeekHigh": meta.get("fiftyTwoWeekHigh"),
+        "fiftyTwoWeekLow": meta.get("fiftyTwoWeekLow"),
+        "longName": meta.get("longName"),
+        "shortName": meta.get("shortName"),
+    }
+    return {key: value for key, value in row.items() if value is not None}
+
+
+def _request_spark(tickers):
+    """Quote rows from Yahoo's cookie-free endpoint.
+
+    Used only when the credentialled quote call fails. The shared 429 cooldown
+    guards the crumb handshake, so this path deliberately ignores it: the
+    cooldown exists to stop hammering a blocked endpoint, and the callers'
+    schedules (five minutes for the market cache, one minute for the book)
+    already bound how often this one runs.
+    """
+    rows = []
+    for start in range(0, len(tickers), SPARK_BATCH_SIZE):
+        batch = tickers[start:start + SPARK_BATCH_SIZE]
+        try:
+            response = requests.get(
+                SPARK_URL,
+                params={
+                    "symbols": ",".join(batch),
+                    "range": "1d",
+                    "interval": "1d",
+                },
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as err:
+            raise MarketDataError(f"spark quote request failed: {err}") from err
+
+        if _rate_limited(response):
+            raise MarketDataError(
+                "Yahoo rate-limited the fallback quote request (HTTP 429)"
+            )
+
+        try:
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as err:
+            raise MarketDataError(str(err)) from err
+        except ValueError as err:
+            raise MarketDataError(f"spark response was not JSON: {err}") from err
+
+        spark = payload.get("spark") or {}
+        if spark.get("error"):
+            raise MarketDataError(str(spark["error"]))
+
+        for item in spark.get("result") or []:
+            responses = item.get("response") or []
+            meta = (responses[0] or {}).get("meta") if responses else None
+            if not meta or not meta.get("symbol"):
+                continue
+            rows.append(_spark_quote_row(meta))
+
+    return rows
+
+
+def _request_quote_rows(tickers):
+    """Raw quote rows, with a cookie-free retry when the crumb path fails."""
+    try:
+        return _request_quotes(tickers)
+    except MarketDataError as err:
+        logger.warning(
+            "Yahoo quote endpoint unavailable (%s); retrying %s symbols on the "
+            "cookie-free spark endpoint",
+            err,
+            len(tickers),
+        )
+        return _request_spark(tickers)
+
+
 def fetch_quote_row(symbol):
     """Return Yahoo's raw quote row for a symbol, or ``None``.
 
@@ -257,7 +368,7 @@ def fetch_quote_row(symbol):
     routes' bare ``catch`` turns into their 404.
     """
     ticker = ticker_for(symbol)
-    rows = _request_quotes([ticker])
+    rows = _request_quote_rows([ticker])
     for row in rows:
         if row.get("symbol") == ticker:
             return row
@@ -329,7 +440,7 @@ def fetch_quotes(tickers):
     which is how ``marketSync`` detects dead symbols. Duplicate tickers are
     removed before the provider request.
     """
-    rows = _request_quotes(list(dict.fromkeys(tickers)))
+    rows = _request_quote_rows(list(dict.fromkeys(tickers)))
     found = {}
     for row in rows:
         ticker = row.get("symbol")

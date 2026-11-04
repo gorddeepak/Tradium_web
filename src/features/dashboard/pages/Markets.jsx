@@ -150,7 +150,7 @@ export default function MarketsPage() {
                 : "—"}
             </td>
             <td className={TD_R}>{s.volume == null ? "—" : fmtVolume(s.volume)}</td>
-            <td className={TD_R}>{s.marketCap == null ? "—" : fmtCap(s.marketCap)}</td>
+            <td className={TD_R}>{s.marketCap > 0 ? fmtCap(s.marketCap) : "—"}</td>
             <td className={TD_R}>
               <Button asChild size="xs" variant="contrast">
                 <Link to={ROUTES.instrument(s.symbol)}>Trade</Link>

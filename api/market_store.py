@@ -208,7 +208,16 @@ def _upsert_quotes(session, quote_rows, full_row):
                 "day_change": statement.excluded.day_change,
                 "prev_close": statement.excluded.prev_close,
                 "volume": statement.excluded.volume,
-                "market_cap": statement.excluded.market_cap,
+                # The cookie-free fallback carries no market cap, and a missing
+                # value is stored as zero. Never let that zero replace a cap a
+                # richer response already wrote.
+                "market_cap": case(
+                    (
+                        statement.excluded.market_cap > 0,
+                        statement.excluded.market_cap,
+                    ),
+                    else_=LatestQuote.market_cap,
+                ),
             }
         )
 

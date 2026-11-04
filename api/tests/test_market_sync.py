@@ -162,7 +162,11 @@ def test_fetch_quote_swallows_a_provider_error(monkeypatch):
     def explode(tickers):
         raise market_data.MarketDataError("Yahoo is down")
 
+    def explode_fallback(tickers):
+        raise market_data.MarketDataError("spark is down too")
+
     monkeypatch.setattr(market_data, "_request_quotes", explode)
+    monkeypatch.setattr(market_data, "_request_spark", explode_fallback)
 
     # The callers have no handler of their own: raising here would be a 500.
     assert market_data.fetch_quote("RELIANCE") is None
@@ -198,7 +202,11 @@ def test_fetch_quote_row_propagates_a_provider_failure(monkeypatch):
     def explode(tickers):
         raise market_data.MarketDataError("Yahoo is down")
 
+    def explode_fallback(tickers):
+        raise market_data.MarketDataError("spark is down too")
+
     monkeypatch.setattr(market_data, "_request_quotes", explode)
+    monkeypatch.setattr(market_data, "_request_spark", explode_fallback)
 
     with pytest.raises(market_data.MarketDataError):
         market_data.fetch_quote_row("RELIANCE")
@@ -300,6 +308,160 @@ def test_the_cooldown_blocks_even_a_cached_crumb(monkeypatch):
 
     with pytest.raises(market_data.MarketDataError):
         market_data._yahoo_session()
+
+
+# --------------------------------------------------------------------------
+# The cookie-free fallback
+# --------------------------------------------------------------------------
+#
+# Yahoo rate limits the cookie/crumb handshake from datacenter IPs, which is
+# what production sees on Render. The spark endpoint returns the same prices
+# without a crumb, so it is the second attempt.
+
+
+class _SparkResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.headers = {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+def _spark_payload(*tickers):
+    return {
+        "spark": {
+            "result": [
+                {
+                    "symbol": ticker,
+                    "response": [
+                        {
+                            "meta": {
+                                "symbol": ticker,
+                                "regularMarketPrice": 1202.8,
+                                "fulldayChange": -8.4,
+                                "regularMarketChangePercent": -0.69,
+                                "regularMarketTime": 1793786362,
+                                "chartPreviousClose": 1211.2,
+                                "regularMarketVolume": 15138916,
+                                "regularMarketDayHigh": 1215.0,
+                                "regularMarketDayLow": 1195.0,
+                                "fiftyTwoWeekHigh": 1611.8,
+                                "fiftyTwoWeekLow": 1152.2,
+                                "longName": "Reliance Industries Limited",
+                            }
+                        }
+                    ],
+                }
+                for ticker in tickers
+            ]
+        }
+    }
+
+
+def _fail_the_crumb_endpoint(monkeypatch):
+    def explode(tickers):
+        raise market_data.MarketDataError(
+            "Yahoo rate-limited the crumb request (HTTP 429)"
+        )
+
+    monkeypatch.setattr(market_data, "_request_quotes", explode)
+
+
+def test_fetch_quotes_falls_back_to_the_cookie_free_endpoint(monkeypatch):
+    _fail_the_crumb_endpoint(monkeypatch)
+    asked = []
+
+    def fake_get(url, params=None, **kwargs):
+        asked.append(params["symbols"])
+        return _SparkResponse(_spark_payload(*params["symbols"].split(",")))
+
+    monkeypatch.setattr(market_data.requests, "get", fake_get)
+
+    found = market_data.fetch_quotes(["RELIANCE.NS", "TCS.NS"])
+
+    assert set(found) == {"RELIANCE.NS", "TCS.NS"}
+    row = found["RELIANCE.NS"]
+    # The fallback keeps the regularMarket* keys every caller already reads.
+    assert row["regularMarketPrice"] == 1202.8
+    assert row["regularMarketChange"] == -8.4
+    assert row["regularMarketChangePercent"] == -0.69
+    assert row["regularMarketPreviousClose"] == 1211.2
+    assert row["regularMarketTime"] == 1793786362
+    assert row["regularMarketVolume"] == 15138916
+    assert asked == ["RELIANCE.NS,TCS.NS"]
+
+
+def test_the_fallback_never_asks_for_more_than_twenty_symbols(monkeypatch):
+    _fail_the_crumb_endpoint(monkeypatch)
+    batches = []
+
+    def fake_get(url, params=None, **kwargs):
+        batches.append(params["symbols"].split(","))
+        return _SparkResponse({"spark": {"result": []}})
+
+    monkeypatch.setattr(market_data.requests, "get", fake_get)
+
+    tickers = [f"S{index}.NS" for index in range(45)]
+    market_data.fetch_quotes(tickers)
+
+    assert [len(batch) for batch in batches] == [20, 20, 5]
+
+
+def test_the_fallback_derives_the_day_change_when_it_is_missing(monkeypatch):
+    _fail_the_crumb_endpoint(monkeypatch)
+    payload = _spark_payload("RELIANCE.NS")
+    meta = payload["spark"]["result"][0]["response"][0]["meta"]
+    meta.pop("fulldayChange")
+
+    monkeypatch.setattr(
+        market_data.requests, "get", lambda *args, **kwargs: _SparkResponse(payload)
+    )
+
+    row = market_data.fetch_quote_row("RELIANCE")
+
+    assert row["regularMarketChange"] == pytest.approx(1202.8 - 1211.2)
+
+
+def test_a_429_on_the_fallback_is_still_a_provider_error(monkeypatch):
+    _fail_the_crumb_endpoint(monkeypatch)
+    monkeypatch.setattr(
+        market_data.requests,
+        "get",
+        lambda *args, **kwargs: _SparkResponse({}, status_code=429),
+    )
+
+    with pytest.raises(market_data.MarketDataError, match="fallback"):
+        market_data.fetch_quotes(["RELIANCE.NS"])
+
+
+def test_a_failed_fallback_raises_instead_of_returning_an_empty_cache(monkeypatch):
+    _fail_the_crumb_endpoint(monkeypatch)
+
+    def also_fail(tickers):
+        raise market_data.MarketDataError("spark is down")
+
+    monkeypatch.setattr(market_data, "_request_spark", also_fail)
+
+    with pytest.raises(market_data.MarketDataError, match="spark is down"):
+        market_data.fetch_quotes(["RELIANCE.NS"])
+
+
+def test_the_fallback_is_not_used_when_the_crumb_endpoint_works(monkeypatch):
+    _serve(monkeypatch, [_row()])
+    called = []
+    monkeypatch.setattr(
+        market_data, "_request_spark", lambda tickers: called.append(tickers)
+    )
+
+    market_data.fetch_quotes(["RELIANCE.NS"])
+
+    assert called == []
 
 
 # --------------------------------------------------------------------------
@@ -439,6 +601,27 @@ def test_repeated_market_syncs_do_not_duplicate_or_blank_metadata(
     assert instrument.created_at == created_at
     assert refreshed.ltp == Decimal("1210.0000")
     assert refreshed.updated_at >= first.updated_at
+
+
+def test_a_fallback_row_without_a_market_cap_keeps_the_stored_one(
+    postgres_session_factory, monkeypatch
+):
+    rows = _all_market_rows()
+    monkeypatch.setattr(sync, "fetch_quotes", lambda tickers: rows)
+
+    sync.sync_quotes(postgres_session_factory)
+    _, first = _quote(postgres_session_factory, "RELIANCE")
+    assert first.market_cap == Decimal("16276858601472.00")
+
+    # The cookie-free fallback carries no market cap, so the row arrives with
+    # none. That must not blank the value a full response already stored.
+    rows["RELIANCE.NS"].pop("marketCap")
+    rows["RELIANCE.NS"]["regularMarketPrice"] = 1210.0
+    sync.sync_quotes(postgres_session_factory)
+
+    _, refreshed = _quote(postgres_session_factory, "RELIANCE")
+    assert refreshed.ltp == Decimal("1210.0000")
+    assert refreshed.market_cap == Decimal("16276858601472.00")
 
 
 def test_source_time_is_the_provider_time_not_the_receipt_time(

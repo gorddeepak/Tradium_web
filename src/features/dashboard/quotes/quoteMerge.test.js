@@ -224,6 +224,21 @@ test("mergeInstrumentQuote ignores an older or unusable update", () => {
   assert.equal(mergeInstrumentQuote(null, quote()), null);
 });
 
+test("a snapshot row without a price never hides a persisted REST price", () => {
+  const row = stock({ ltp: 1500, updatedAt: "2026-10-30T09:59:00.000Z" });
+
+  const merged = mergeQuote(row, {
+    symbol: "INFY",
+    ltp: null,
+    live: false,
+    restored: true,
+    stale: true,
+  });
+
+  assert.equal(merged, row);
+  assert.equal(merged.ltp, 1500);
+});
+
 test("isQuoteStale uses the provider time and treats a missing one as stale", () => {
   const now = Date.parse(NOW);
 
