@@ -102,7 +102,7 @@ def get_ai_settings() -> AISettings:
 #
 # Off unless LIVE_QUOTES_ENABLED is set. The provider is unofficial, so this
 # is never turned on by a deployment file; the operator opts in. See
-# docs/migration/LIVE_MARKET_PRICES.md.
+# docs/LIVE_MARKET_PRICES.md.
 
 
 def live_quotes_enabled() -> bool:

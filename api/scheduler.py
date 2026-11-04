@@ -16,9 +16,8 @@ the same orders, so ownership is explicit:
 - ``TRADING_JOBS_ENABLED`` gates the per-minute price sync (which fills orders
   and moves funds) and the daily 18:00 IST portfolio snapshot.
 
-Both default to **off**. Exactly one process may set each, and during the
-migration that process is whichever service owns the job — never both. See
-``docs/migration/MIGRATION_STATUS.md`` §3J.
+Both default to **off**. Exactly one process may set each, and that process
+owns the job - never two.
 
 The ticks are plain threads rather than a scheduler dependency: two intervals
 and one fixed daily time need no cron expression parser, and the suite never

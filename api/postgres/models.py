@@ -1,6 +1,6 @@
 """SQLAlchemy models for the approved PostgreSQL schema.
 
-Source of truth: docs/migration/POSTGRES_SCHEMA_DESIGN.md. Every runtime
+The Alembic migrations are the schema source of truth. Every runtime
 feature — authentication, the market cache, watchlists, the trading book and
 snapshots — reads and writes these tables.
 """

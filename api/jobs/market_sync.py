@@ -48,8 +48,7 @@ for _symbol, _name in NIFTY50:
 TICKERS = list(BY_TICKER)
 
 # Single-flight guard, the equivalent of the Express `isSyncing` flag. It is
-# per process; see `docs/migration/MIGRATION_STATUS.md` §3I for why that is
-# enough here and what it does not cover.
+# per process, so exactly one worker may run the sync at a time.
 _sync_lock = threading.Lock()
 
 

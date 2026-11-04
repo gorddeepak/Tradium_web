@@ -4,9 +4,10 @@ Revision ID: 0001
 Revises:
 Create Date: 2026-10-25
 
-Creates every table, constraint, and index in
-docs/migration/POSTGRES_SCHEMA_DESIGN.md. migration.quarantine is deliberately
-not created here: it belongs to the one-shot loader in a separate schema.
+Creates every table, constraint, and index used by the application. See
+docs/ARCHITECTURE.md for the table overview. migration.quarantine is
+deliberately not created here: it belongs to the one-shot loader in a separate
+schema.
 """
 
 from typing import Sequence, Union

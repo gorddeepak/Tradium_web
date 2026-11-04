@@ -32,8 +32,9 @@ npm run dev             # app on http://localhost:5173
 
 Set `MARKET_SYNC_ENABLED=true` in `api/.env` for local development. The
 scheduler runs `market_sync` once at startup, which seeds the 53-symbol NIFTY
-universe and its quotes; without it the Markets page and instrument search stay
-empty until that job runs.
+universe before fetching quotes. Instruments and search therefore work even
+when Yahoo is temporarily unavailable; missing prices stay visibly missing.
+Without the job the Markets page and instrument search stay empty.
 
 Then open http://localhost:5173 and sign up — you're trading paper money.
 
@@ -49,7 +50,7 @@ The backend reads everything from `api/.env` — see `api/.env.example`:
 | `GOOGLE_GENERATIVE_AI_API_KEY` | for Nova + insight cards | Gemini API key |
 | `MARKET_SYNC_ENABLED` | no | Own the market-cache sync (seed + every 5 min) |
 | `TRADING_JOBS_ENABLED` | no | Own price sync (every minute) + daily snapshot |
-| `LIVE_QUOTES_ENABLED` | no | Open one Yahoo quote stream per API process (off by default; see `docs/migration/LIVE_MARKET_PRICES.md`) |
+| `LIVE_QUOTES_ENABLED` | no | Open one Yahoo quote stream per API process (off by default; see `docs/LIVE_MARKET_PRICES.md`) |
 | `LIVE_QUOTES_FLUSH_SECONDS` | no | How often live ticks are persisted (default 5) |
 | `LIVE_QUOTES_STALE_SECONDS` | no | Age at which a quote is marked stale (default 60) |
 
@@ -95,8 +96,8 @@ api/
   assistant.py     Nova's agent, tools and Gemini model
 ```
 
-`AGENTS.md` covers the same ground for AI coding assistants (conventions,
-gotchas, rate-limit constraints).
+`docs/ARCHITECTURE.md` describes the runtime shape, data model and background
+jobs. `docs/DEPLOYMENT.md` covers the Render and Neon deployment.
 
 ## Notes
 

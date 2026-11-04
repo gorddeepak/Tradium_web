@@ -1,7 +1,7 @@
 """Metadata tests for the approved PostgreSQL schema.
 
 These run without a database. They pin the column types, IDs, constraints, and
-indexes so the models cannot drift from docs/migration/POSTGRES_SCHEMA_DESIGN.md.
+indexes so the models cannot drift from the Alembic migrations.
 """
 
 from decimal import Decimal

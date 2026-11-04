@@ -4,7 +4,7 @@ Every scheduled tick refreshes the canonical quote cache, backfills missing
 instrument sectors, then matches OPEN limit/stop orders against those quotes
 and fills the crossed ones.
 
-The fill rules come from ``POSTGRES_SCHEMA_DESIGN.md`` §6.4:
+The fill rules are:
 
 - The quote must carry a trustworthy provider ``source_time``. Missing, older
   than ten minutes, or more than two minutes future means "skip this order";

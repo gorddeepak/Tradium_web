@@ -2,9 +2,8 @@
 
 The route reaches Yahoo through api.market_data, so these tests replace
 api.market_data._request_chart with a canned payload and never touch the
-network. The payload shape is the one a real Yahoo chart response has; the
-bar-by-bar mapping is verified against yahoo-finance2 itself in
-MARKET_DATA_PLAN.md section 3.2.
+network. The payload shape is the one a real Yahoo chart response has, and the
+bar-by-bar mapping matches the Yahoo chart contract.
 """
 
 import pytest
@@ -265,7 +264,7 @@ def record_request(monkeypatch):
 def test_sends_the_same_query_parameters_as_yahoo_finance2(record_request):
     # These are the parameters yahoo-finance2 puts on the chart request; the
     # `includePrePost` default in particular decides which bars come back, so
-    # it has to match or the index series differs (MARKET_DATA_PLAN.md 3.2).
+    # it has to match or the index series differs (verified against Yahoo).
     from api.market_data import fetch_candles
 
     seen = record_request(FakeResponse(chart_payload([1], [100.0])))

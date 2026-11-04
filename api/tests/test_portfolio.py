@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(
     reason="TEST_DATABASE_URL is not set; PostgreSQL portfolio tests skipped",
 )
 
-# Business-day labels are IST (API_CONTRACTS §0.5).
+# Business-day labels are IST.
 IST = timezone(timedelta(hours=5, minutes=30))
 
 NOW = datetime(2026, 9, 1, 4, 15, 30, 123000, tzinfo=timezone.utc)

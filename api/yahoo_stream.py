@@ -13,7 +13,7 @@ The format, as observed from ``wss://streamer.finance.yahoo.com/?version=2``:
   **zigzag** varints. Reading ``time`` as a plain varint yields a timestamp in
   the year 2083 — the failure is silent, so it is decoded explicitly here.
 
-Evidence and measurements are in docs/migration/MARKET_DATA_PLAN.md §3.2.
+The frame layout is exercised by ``api/tests/test_yahoo_stream.py``.
 """
 
 import base64

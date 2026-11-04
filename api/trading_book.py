@@ -36,8 +36,8 @@ PRICE = Decimal("0.0001")
 AVERAGE = Decimal("0.000001")
 
 # A fill needs the provider's own market time, not the receipt time. A missing,
-# older-than-10-minutes or more-than-2-minutes-future source time means "skip
-# this order"; see POSTGRES_SCHEMA_DESIGN.md §6.4.
+# older-than-10-minutes or more-than-2-minutes-future source time means the
+# order stays OPEN.
 MAX_QUOTE_AGE = timedelta(minutes=10)
 MAX_FUTURE_SKEW = timedelta(minutes=2)
 

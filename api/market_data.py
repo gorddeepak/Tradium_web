@@ -1,13 +1,11 @@
 """Market-data provider seam.
 
-Everything here talks to Yahoo Finance, the same provider the Express app uses.
-The operations are:
+Everything here talks to Yahoo Finance over REST. The operations are:
 
-- ``fetch_candles`` — historical OHLC for the instrument chart (§3.1 of
-  ``MARKET_DATA_PLAN.md``).
+- ``fetch_candles`` — historical OHLC for the instrument chart.
 - ``fetch_quote`` — the reduced ``{"ltp", "dayChangePct", "sourceTime"}`` shape
-  used by MARKET order placement and square-off, matching ``fetchQuote`` in
-  ``server/jobs/priceSync.js`` plus the provider time the fill guard needs.
+  used by MARKET order placement and square-off, including the provider time
+  the fill guard needs.
 - ``fetch_quote_row`` — the raw Yahoo quote row, used by the two instrument
   detail routes.
 - ``fetch_quotes`` / ``fetch_sector`` — the batch and profile reads behind the
@@ -15,12 +13,8 @@ The operations are:
 
 The candle and quote endpoints are not the same, and neither is trivial to
 reach: candles need no credentials, while the quote endpoints require a cookie
-plus a matching "crumb" token. ``_yahoo_session`` reproduces that handshake,
-which is what ``yahoo-finance2`` does internally. See ``MARKET_DATA_PLAN.md``
-§3.3 for the measurements.
-
-WebSocket streaming was evaluated separately and deliberately not adopted
-(§3.2); nothing here opens a socket.
+plus a matching "crumb" token. ``_yahoo_session`` reproduces that handshake.
+The optional live feed is separate; see ``api/quote_feed.py``.
 """
 
 import logging

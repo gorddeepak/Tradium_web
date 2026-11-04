@@ -117,7 +117,7 @@ def create_app() -> FastAPI:
 
         # One upstream Yahoo connection for the process, off by default. The
         # service starts its own thread, seeds the cache from latest_quotes and
-        # flushes pending ticks on shutdown. See docs/migration/LIVE_MARKET_PRICES.md.
+        # flushes pending ticks on shutdown. See docs/LIVE_MARKET_PRICES.md.
         quote_service.start(
             get_session_factory() if live_quotes_enabled() else None
         )

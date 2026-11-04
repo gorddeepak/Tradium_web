@@ -219,7 +219,7 @@ The live quote feed is also owned by that one process:
 
 Yahoo's streamer is an unofficial endpoint. Treat it as best-effort and follow
 the provider note in
-[LIVE_MARKET_PRICES.md](./migration/LIVE_MARKET_PRICES.md) before relying on it
+[LIVE_MARKET_PRICES.md](../LIVE_MARKET_PRICES.md) before relying on it
 publicly.
 
 ## 9. Domain and HTTPS

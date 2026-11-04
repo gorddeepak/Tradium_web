@@ -19,7 +19,7 @@ export default defineConfig([
     },
     // Tradium deliberately co-locates helpers and components in one file
     // (tradiumUtils.jsx, the chart shells, the ui primitives) — that's the
-    // "beginner-simple, avoid over-abstraction" style from CLAUDE.md, so the
+    // project's beginner-simple, avoid-over-abstraction style, so the
     // only-export-components rule fights the project's structure, not a bug.
     rules: {
       'react-refresh/only-export-components': 'off',

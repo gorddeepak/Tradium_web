@@ -53,7 +53,7 @@ services:
       - key: GOOGLE_GENERATIVE_AI_API_KEY
         sync: false
       # Live quotes. The provider is unofficial; see
-      # docs/migration/LIVE_MARKET_PRICES.md before enabling this publicly.
+      # docs/LIVE_MARKET_PRICES.md before enabling this publicly.
       - key: LIVE_QUOTES_ENABLED
         value: "true"
       - key: LIVE_QUOTES_FLUSH_SECONDS

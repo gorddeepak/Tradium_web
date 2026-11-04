@@ -10,7 +10,7 @@ callback, and reconnect with bounded exponential backoff.
 The provider is **unofficial**. Yahoo does not publish this endpoint as a
 supported market-data API, and its terms do not grant redistribution. Keep the
 feed off unless the deployment use is acceptable for your own account; see
-``docs/migration/LIVE_MARKET_PRICES.md``.
+``docs/LIVE_MARKET_PRICES.md``.
 
 No real socket is opened in tests: ``connect`` is injectable, so a fake
 connector can drive every reconnect path deterministically.
