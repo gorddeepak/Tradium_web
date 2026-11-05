@@ -13,6 +13,7 @@ export function useInstrument(symbol, range) {
   const [candles, setCandles] = useState([]);
   const [instrumentLoading, setInstrumentLoading] = useState(true);
   const [candlesLoading, setCandlesLoading] = useState(true);
+  const [candlesError, setCandlesError] = useState(false);
 
   const fetchQuoteAndCandles = useCallback(async (isInitial) => {
     // loading shows only for the mount / symbol / range fetch, not for polls
@@ -20,32 +21,36 @@ export function useInstrument(symbol, range) {
       setInstrumentLoading(true);
       setCandlesLoading(true);
     }
-    const [quote, candleData] = await Promise.all([
+    // A chart outage must not hide the instrument, so each request settles on
+    // its own instead of the pair rejecting together.
+    const [quote, candleData] = await Promise.allSettled([
       getInstrument(symbol),
       getCandles(symbol, range),
     ]);
-    return { quote, candleData };
+    return { quote, candleData, isInitial };
   }, [symbol, range]);
 
-  const apply = useCallback(({ quote, candleData }) => {
-    setInstrument(quote);
-    setCandles(candleData);
+  const apply = useCallback(({ quote, candleData, isInitial }) => {
+    if (quote.status === "fulfilled") setInstrument(quote.value);
+    if (candleData.status === "fulfilled") {
+      setCandles(candleData.value);
+      setCandlesError(false);
+    } else if (isInitial && quote.status === "fulfilled") {
+      // The instrument loaded but its history did not; say so instead of
+      // drawing the previous symbol's chart or an empty one.
+      setCandles([]);
+      setCandlesError(true);
+    }
     setInstrumentLoading(false);
     setCandlesLoading(false);
   }, []);
 
-  const onError = useCallback(() => {
-    // clear the skeletons even when the fetch fails
-    setInstrumentLoading(false);
-    setCandlesLoading(false);
-  }, []);
-
-  usePolling(fetchQuoteAndCandles, apply, POLL_MS, onError);
+  usePolling(fetchQuoteAndCandles, apply, POLL_MS);
 
   // The page's own quote wins over the poll, and the poll stays as fallback.
   const quoteSymbol = normalizeSymbol(instrument?.symbol || symbol);
   const live = useLiveQuotes([quoteSymbol]);
   const merged = mergeInstrumentQuote(instrument, live[quoteSymbol]);
 
-  return { instrument: merged, candles, instrumentLoading, candlesLoading };
+  return { instrument: merged, candles, candlesError, instrumentLoading, candlesLoading };
 }

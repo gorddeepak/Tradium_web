@@ -26,7 +26,7 @@ const ranges = ["1D", "5D", "1M", "6M", "1Y", "5Y", "ALL"];
 export function InstrumentDetail() {
   const { symbol } = useParams();
   const [range, setRange] = useState("1M");
-  const { instrument, candles, instrumentLoading, candlesLoading } = useInstrument(symbol, range);
+  const { instrument, candles, candlesError, instrumentLoading, candlesLoading } = useInstrument(symbol, range);
   const { funds, refresh: refreshFunds } = useFunds();
   const { holdings, refresh: refreshHoldings } = useHoldings();
   // feeds the "Your position" strip
@@ -212,6 +212,10 @@ export function InstrumentDetail() {
         {candlesLoading ? (
           <div className="flex h-[378px] items-center justify-center text-sm text-muted-foreground">
             Loading chart...
+          </div>
+        ) : candlesError ? (
+          <div className="flex h-[378px] items-center justify-center text-sm text-muted-foreground">
+            Chart unavailable right now.
           </div>
         ) : (
           <CandleChart candles={candles} height={378} fitKey={`${symbol}-${range}`} />

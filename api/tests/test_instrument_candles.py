@@ -315,3 +315,28 @@ def test_a_missing_result_is_a_provider_error(record_request):
 
     with pytest.raises(MarketDataError):
         fetch_candles("RELIANCE", "1M")
+
+
+def test_a_credentialled_cooldown_does_not_block_charts(
+    client, make_token, user_id, record_request, monkeypatch
+):
+    """Charts need no crumb, so the crumb 429 cooldown must not stop them.
+
+    Production saw every chart answer "Could not fetch candle data" while the
+    cookie-free quote fallback kept working: the failing crumb handshake re-armed
+    the shared cooldown, and the chart call checked it before reaching Yahoo.
+    """
+    from api import market_data
+
+    record_request(FakeResponse(chart_payload([1], [100.0])))
+    monkeypatch.setattr(market_data, "_provider_blocked_until", 10**12)
+    monkeypatch.setattr(market_data, "_provider_failures", 5)
+
+    response = client.get(
+        "/api/instruments/RELIANCE/candles",
+        params={"range": "1M"},
+        cookies={"token": make_token(user_id)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["open"] == 100.0

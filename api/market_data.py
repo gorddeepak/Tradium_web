@@ -525,13 +525,10 @@ def _request_chart(ticker, interval, period1, period2):
     Isolated so tests can supply a canned payload without touching the network.
     """
     params = dict(YAHOO_PARAMS, interval=interval, period1=period1, period2=period2)
-    remaining = _cooldown_remaining()
-    if remaining > 0:
-        raise MarketDataError(
-            "Yahoo market data is cooling down after HTTP 429; "
-            f"retrying in {remaining:.0f}s"
-        )
-
+    # Charts need no cookie or crumb, and Yahoo rate limits the crumb handshake
+    # separately from this endpoint. Sharing that cooldown turned every chart
+    # into "Could not fetch candle data" while the quote fallback kept working,
+    # so this call ignores it and only records its own 429s.
     try:
         response = requests.get(
             CHART_URL.format(ticker=ticker),
