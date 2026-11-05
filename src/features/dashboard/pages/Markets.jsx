@@ -169,7 +169,7 @@ export default function MarketsPage() {
             onSelectSymbol={openSymbol}
             emptyMessage={
               stocks.length
-                ? "Prices are temporarily unavailable for the heatmap."
+                ? "Market caps are unavailable, so the heatmap cannot be sized."
                 : "Awaiting first market sync."
             }
           />
